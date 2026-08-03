@@ -1,0 +1,37 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "data": {
+          "email": "E-mail",
+          "password": "Adgangskode"
+        },
+        "description": "Indtast venligst dine Brunata loginoplysninger."
+      }
+    },
+    "error": {
+      "cannot_connect": "Kan ikke oprette forbindelse til Brunata API. Tjek din netværksforbindelse.",
+      "invalid_auth": "Ugyldigt login",
+      "unknown": "Uventet fejl"
+    },
+    "abort": {
+      "already_configured": "Kontoen er allerede konfigureret"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "data": {
+          "debug_logging": "Aktiver debug-logning"
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "consumption": {
+        "name": "Forbrug"
+      }
+    }
+  }
+}

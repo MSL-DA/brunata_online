@@ -1,0 +1,37 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "data": {
+          "email": "Email",
+          "password": "Password"
+        },
+        "description": "Please enter your Brunata credentials."
+      }
+    },
+    "error": {
+      "cannot_connect": "Cannot connect to the Brunata API. Check your network connection.",
+      "invalid_auth": "Invalid authentication",
+      "unknown": "Unexpected error"
+    },
+    "abort": {
+      "already_configured": "Device is already configured"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "data": {
+          "debug_logging": "Enable debug logging"
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "consumption": {
+        "name": "Consumption"
+      }
+    }
+  }
+}
