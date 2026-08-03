@@ -1,0 +1,31 @@
+---
+name: HACS Validation
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - develop
+    tags:
+      - "v*"
+  schedule:
+    - cron: "0 0 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  hacs:
+    name: HACS Validation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code from GitHub
+        uses: actions/checkout@v7
+
+      - name: Run HACS validation
+        uses: hacs/action@main
+        with:
+          category: integration
