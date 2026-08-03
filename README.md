@@ -46,17 +46,22 @@ https://github.com/MSL-DA/brunata_online
 3. Search for **Brunata**
 4. Enter your Brunata email and password
 
-> **Note on Branding:** If the logo/icon does not show up immediately, clear your browser cache or use an incognito window. HACS and Home Assistant can sometimes take a moment to refresh brand assets.
-
 ---
 
 ## 🔗 Credits
 
 Special thanks to the [brunata-api](https://pypi.org/project/brunata-api/) project for providing the Python library that makes this integration possible.
 
+This project is a derivative work based on
+https://github.com/vondk/brunata_hacs.
+
+The original project was created by vondk and is licensed under the MIT License.
+This repository contains modifications and additional functionality by MSL-DA while
+continuing to be distributed under the MIT License.
+
 ---
 
 ## 📄 License
 
 MIT License
-See `LICENSE` file for details.
+See [LICENSE](https://github.com/MSL-DA/brunata_online/blob/main/LICENSE) file for details.
