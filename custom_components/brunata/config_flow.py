@@ -9,8 +9,7 @@ from brunata_api import Client
 
 from homeassistant import config_entries
 from homeassistant.core import HomeAssistant
-from homeassistant.config_entries import ConfigEntry
-from homeassistant.data_entry_flow import FlowResult
+from homeassistant.config_entries import ConfigEntry, ConfigFlowResult
 from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
 from homeassistant.core import callback
 
@@ -70,7 +69,7 @@ class BrunataConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     VERSION = 1
 
-    async def async_step_user(self, user_input=None) -> FlowResult:
+    async def async_step_user(self, user_input=None) -> ConfigFlowResult:
         """Handle the initial step."""
         _LOGGER.debug("async_step_user called with input: %s", user_input)
         errors = {}
@@ -100,7 +99,7 @@ class BrunataConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             errors=errors,
         )
 
-    async def async_step_reauth(self, user_input=None) -> FlowResult:
+    async def async_step_reauth(self, user_input=None) -> ConfigFlowResult:
         """Handle re-authentication when credentials are no longer valid."""
         entry = self.hass.config_entries.async_get_entry(self.context["entry_id"])
         assert entry is not None
@@ -142,7 +141,7 @@ class BrunataOptionsFlowHandler(config_entries.OptionsFlow):
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
+    ) -> ConfigFlowResult:
         """Manage the Brunata options."""
         if user_input is not None:
             return self.async_create_entry(title="", data=user_input)
