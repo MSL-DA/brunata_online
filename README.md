@@ -14,7 +14,7 @@ The integration is designed for Brunata Online accounts. If [Brunata Online](htt
 - Supports water (`m³`, `l`), energy (`kWh`, `MWh`) and heat cost allocator (`units`) meters
 - Groups sensors under devices for easy management
 - Uses standard Home Assistant device classes and state classes (Long Term Statistics supported)
-- Reliable data fetching using `DataUpdateCoordinator`
+- Reliable data fetching using `DataUpdateCoordinator`, scheduled every hour at minute 58 and second 00
 
 ---
 
