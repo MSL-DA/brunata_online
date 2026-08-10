@@ -18,7 +18,6 @@ try:
     import httpx as _httpx
     _CONNECT_ERRORS = (ConnectionError, UnboundLocalError, _httpx.ConnectError, _httpx.ConnectTimeout, _httpx.ReadTimeout)
 except ImportError:
-    _httpx = None
     _CONNECT_ERRORS = (ConnectionError, UnboundLocalError)
 
 import brunata_api as _brunata_api
@@ -244,14 +243,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     _LOGGER.debug("Setting up Brunata integration for %s", email)
     client = await hass.async_add_executor_job(Client, email, password)
-
-    # Brunata's servers can respond slowly on the /consumer/meters endpoint.
-    # httpx's default timeout is 5 seconds for connect/read/write/pool each,
-    # which is too aggressive here and causes spurious ReadTimeout errors.
-    # Only applied if httpx was successfully imported above.
-    if _httpx is not None:
-        client._session.timeout = _httpx.Timeout(15.0)
-
     coordinator = BrunataDataUpdateCoordinator(hass, client)
 
     # Initial data refresh
@@ -278,15 +269,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         """
         hass.async_create_task(coordinator.async_request_refresh())
 
-    # Poll 2 minutes before every new hour (xx:58:00), instead of relying on
+    # Poll 2 minutes before every new hour (xx:59:30), instead of relying on
     # DataUpdateCoordinator's rolling update_interval, which drifts based on
     # whenever HA last started or the integration was last reloaded.
     entry.async_on_unload(
         async_track_time_change(
             hass,
             _handle_scheduled_refresh,
-            minute=58,
-            second=0,
+            minute=59,
+            second=30,
         )
     )
 
@@ -320,7 +311,7 @@ class BrunataDataUpdateCoordinator(DataUpdateCoordinator):
             _LOGGER,
             name=DOMAIN,
             # No update_interval: polling is instead driven by an
-            # async_track_time_change listener (xx:58 every hour, see
+            # async_track_time_change listener (xx:59:30 every hour, see
             # async_setup_entry), so the schedule is fixed to wall-clock
             # time rather than drifting from whenever HA last started or
             # the integration was last reloaded.
