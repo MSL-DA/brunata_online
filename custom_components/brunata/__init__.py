@@ -18,6 +18,7 @@ try:
     import httpx as _httpx
     _CONNECT_ERRORS = (ConnectionError, UnboundLocalError, _httpx.ConnectError, _httpx.ConnectTimeout, _httpx.ReadTimeout)
 except ImportError:
+    _httpx = None
     _CONNECT_ERRORS = (ConnectionError, UnboundLocalError)
 
 import brunata_api as _brunata_api
@@ -243,6 +244,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     _LOGGER.debug("Setting up Brunata integration for %s", email)
     client = await hass.async_add_executor_job(Client, email, password)
+
+    # Brunata's servers can respond slowly on the /consumer/meters endpoint.
+    # httpx's default timeout is 5 seconds for connect/read/write/pool each,
+    # which is too aggressive here and causes spurious ReadTimeout errors.
+    # Only applied if httpx was successfully imported above.
+    if _httpx is not None:
+        client._session.timeout = _httpx.Timeout(15.0)
+
     coordinator = BrunataDataUpdateCoordinator(hass, client)
 
     # Initial data refresh
