@@ -18,6 +18,18 @@ from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
+# Meter types whose value may legitimately drop. Brunata resets radiator/heat
+# cost allocator meters to (near) zero at the end of each accounting year.
+# Deliberately a deny-list: anything not matching here — including meter types
+# we don't recognise — keeps the strict "never counts down" guard. Only extend
+# this with types confirmed to reset.
+RESETTING_METER_TYPES = ("radiator", "allocator")
+
+# A decrease is only accepted as a reset when the new value is at most this
+# fraction of the previous one. A genuine reset drops to ~0; small decreases
+# are API glitches.
+RESET_MAX_RATIO = 0.5
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
@@ -67,12 +79,7 @@ class BrunataSensor(CoordinatorEntity, SensorEntity):
         if unit == "m3":
             self._attr_native_unit_of_measurement = "m³"
         elif not unit:
-            # Fallback for meters that report no unit at all. Confirmed via
-            # meter_type == "Radiator" that heat-cost-allocator meters do NOT
-            # hit this branch — their API response includes unit == "units",
-            # which is handled by the else branch below. This branch is kept
-            # as a safety net in case some other, currently unknown meter
-            # type reports an empty unit string.
+            # For meters without unit (e.g. radiator meters) we use 'pts' (points)
             self._attr_native_unit_of_measurement = "pts"
         else:
             self._attr_native_unit_of_measurement = raw_unit
@@ -91,16 +98,16 @@ class BrunataSensor(CoordinatorEntity, SensorEntity):
         else:
             self._attr_icon = "mdi:gauge"
 
-        # A meter reading only ever increases and never resets, so TOTAL_INCREASING
-        # lets HA correctly compute hourly sums and aggregate consumption over time.
+        # Water/energy meter readings only ever increase, while radiator meters
+        # reset once a year. TOTAL_INCREASING covers both: it lets HA compute
+        # hourly sums and aggregate consumption, and its statistics engine
+        # already knows how to handle a periodic reset to zero.
         self._attr_state_class = SensorStateClass.TOTAL_INCREASING
         self._attr_suggested_display_precision = 2
 
-        # Radiator/heat-cost-allocator meters reset annually at year-end per
-        # Brunata's own behaviour (confirmed via meter_type == "Radiator"),
-        # unlike water/energy meters which never decrease. Track this so
-        # native_value() can tell a real reset apart from a transient glitch.
-        self._periodically_resets = "radiator" in meter_type
+        # Whether a decreasing reading is plausible for this meter. See
+        # RESETTING_METER_TYPES and native_value().
+        self._may_reset = any(k in meter_type for k in RESETTING_METER_TYPES)
 
         # Group under a device per meter
         self._attr_device_info = DeviceInfo(
@@ -122,17 +129,40 @@ class BrunataSensor(CoordinatorEntity, SensorEntity):
         meter = self.coordinator.data.get(self._meter_id)
         if meter and meter.latest_reading:
             value = meter.latest_reading.value
-            # A water/energy meter never counts down, so a lower value there
-            # is treated as a glitch and ignored, keeping the last value so
-            # HA doesn't read it as a reset and emit a false spike.
-            # Radiator/heat-cost-allocator meters (self._periodically_resets)
-            # genuinely reset at year-end, so a lower value for those is
-            # accepted as the new, correct state.
-            if (
-                self._last_value is None
-                or value >= self._last_value
-                or self._periodically_resets
-            ):
+            if self._last_value is None or value >= self._last_value:
+                accept = True
+            elif self._may_reset and value <= self._last_value * RESET_MAX_RATIO:
+                # Radiator meters are reset by Brunata at the end of the
+                # accounting year, so a large drop is the real new state.
+                _LOGGER.info(
+                    "Meter %s reset detected: %s -> %s",
+                    self._meter_id,
+                    self._last_value,
+                    value,
+                )
+                accept = True
+            else:
+                # Anything else counting down is an API glitch. Keep the last
+                # value so HA doesn't read it as a reset and emit a false spike.
+                accept = False
+                if self._may_reset:
+                    _LOGGER.warning(
+                        "Meter %s reported a small decrease (%s -> %s), too small "
+                        "to be a yearly reset — ignoring it as a glitch",
+                        self._meter_id,
+                        self._last_value,
+                        value,
+                    )
+                else:
+                    _LOGGER.debug(
+                        "Meter %s reported a decrease (%s -> %s) — ignoring it, "
+                        "this meter type never counts down",
+                        self._meter_id,
+                        self._last_value,
+                        value,
+                    )
+
+            if accept:
                 self._last_value = value
                 self._last_reading_date = meter.latest_reading.date
         return self._last_value
