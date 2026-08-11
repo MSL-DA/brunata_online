@@ -25,10 +25,11 @@ _LOGGER = logging.getLogger(__name__)
 # this with types confirmed to reset.
 RESETTING_METER_TYPES = ("radiator", "allocator")
 
-# A decrease is only accepted as a reset when the new value is at most this
-# fraction of the previous one. A genuine reset drops to ~0; small decreases
-# are API glitches.
-RESET_MAX_RATIO = 0.5
+# A decrease is only accepted as a reset when the reading's date falls on one
+# of these (month, day) pairs — Brunata's year-end reset happens on Dec 31 or
+# Jan 1. A decrease reported on any other date is treated as an API glitch,
+# regardless of its size.
+RESET_WINDOW_MONTH_DAYS = {(12, 31), (1, 1)}
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -129,11 +130,14 @@ class BrunataSensor(CoordinatorEntity, SensorEntity):
         meter = self.coordinator.data.get(self._meter_id)
         if meter and meter.latest_reading:
             value = meter.latest_reading.value
+            reading_date = meter.latest_reading.date
+
             if self._last_value is None or value >= self._last_value:
                 accept = True
-            elif self._may_reset and value <= self._last_value * RESET_MAX_RATIO:
-                # Radiator meters are reset by Brunata at the end of the
-                # accounting year, so a large drop is the real new state.
+            elif self._may_reset and (reading_date.month, reading_date.day) in RESET_WINDOW_MONTH_DAYS:
+                # Radiator/allocator meters are reset by Brunata at the end of
+                # the accounting year, so a drop reported on Dec 31 or Jan 1
+                # is the real new state.
                 _LOGGER.info(
                     "Meter %s reset detected: %s -> %s",
                     self._meter_id,
@@ -147,8 +151,8 @@ class BrunataSensor(CoordinatorEntity, SensorEntity):
                 accept = False
                 if self._may_reset:
                     _LOGGER.warning(
-                        "Meter %s reported a small decrease (%s -> %s), too small "
-                        "to be a yearly reset — ignoring it as a glitch",
+                        "Meter %s reported a decrease (%s -> %s) outside the "
+                        "Dec 31/Jan 1 reset window — ignoring it as a glitch",
                         self._meter_id,
                         self._last_value,
                         value,
@@ -164,7 +168,7 @@ class BrunataSensor(CoordinatorEntity, SensorEntity):
 
             if accept:
                 self._last_value = value
-                self._last_reading_date = meter.latest_reading.date
+                self._last_reading_date = reading_date
         return self._last_value
 
     @property
