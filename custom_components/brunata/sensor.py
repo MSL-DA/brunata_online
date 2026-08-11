@@ -20,7 +20,7 @@ _LOGGER = logging.getLogger(__name__)
 
 # Meter types whose value may legitimately drop. Brunata's API reports heat
 # cost allocators with meter_type "Radiator", and
-# resets them to (near) zero at the end of each accounting year.
+# resets them to zero at the end of each accounting year.
 # Deliberately a deny-list: anything not matching here — including meter types
 # we don't recognise — keeps the strict "never counts down" guard. Only extend
 # this with types confirmed to reset.
