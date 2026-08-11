@@ -18,12 +18,13 @@ from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
-# Meter types whose value may legitimately drop. Brunata resets radiator/heat
-# cost allocator meters to (near) zero at the end of each accounting year.
+# Meter types whose value may legitimately drop. Brunata's API reports heat
+# cost allocators with meter_type "Radiator", and
+# resets them to zero at the end of each accounting year.
 # Deliberately a deny-list: anything not matching here — including meter types
 # we don't recognise — keeps the strict "never counts down" guard. Only extend
 # this with types confirmed to reset.
-RESETTING_METER_TYPES = ("radiator", "allocator")
+RESETTING_METER_TYPES = ("radiator",)
 
 # A decrease is only accepted as a reset when the reading's date falls on one
 # of these (month, day) pairs — Brunata's year-end reset happens on Dec 31 or
@@ -135,9 +136,9 @@ class BrunataSensor(CoordinatorEntity, SensorEntity):
             if self._last_value is None or value >= self._last_value:
                 accept = True
             elif self._may_reset and (reading_date.month, reading_date.day) in RESET_WINDOW_MONTH_DAYS:
-                # Radiator/allocator meters are reset by Brunata at the end of
-                # the accounting year, so a drop reported on Dec 31 or Jan 1
-                # is the real new state.
+                # Heat cost allocator meters (meter_type "Radiator") are reset
+                # by Brunata at the end of the accounting year, so a drop
+                # reported on Dec 31 or Jan 1 is the real new state.
                 _LOGGER.info(
                     "Meter %s reset detected: %s -> %s",
                     self._meter_id,
