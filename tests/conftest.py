@@ -1,6 +1,7 @@
 """Fixtures for Brunata integration tests."""
 import sys
 import types
+from datetime import date
 from unittest.mock import MagicMock, patch
 import pytest
 
@@ -8,8 +9,6 @@ import pytest
 # real dependency installed.
 brunata_api = types.ModuleType("brunata_api")
 brunata_api.const = types.ModuleType("brunata_api.const")
-brunata_api.const.OAUTH2_URL = "https://example.com/oauth"
-brunata_api.const.CLIENT_ID = "client-id"
 brunata_api.const.API_URL = "https://example.com/api"
 brunata_api.const.METERS_URL = "https://example.com/meters"
 
@@ -66,7 +65,7 @@ def mock_meter():
     
     reading = MagicMock(spec=Reading)
     reading.value = 100.5
-    reading.date = "2024-01-01"
+    reading.date = date(2024, 1, 1)
     
     meter.latest_reading = reading
     return meter
