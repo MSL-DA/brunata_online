@@ -38,7 +38,7 @@ _LOGGER = logging.getLogger(__name__)
 async def _check_connectivity(host: str, port: int = 443, timeout: float = 5.0) -> bool:
     """Quick TCP check to verify network reachability before invoking the library."""
     try:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         await asyncio.wait_for(
             loop.run_in_executor(None, socket.create_connection, (host, port)),
             timeout=timeout,
