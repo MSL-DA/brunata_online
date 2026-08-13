@@ -1,4 +1,4 @@
-# Brunata Online
+# Brunata
 
 The **Brunata Integration** for Home Assistant allows you to monitor your Brunata meters (water, energy, and heat cost allocator) directly in your dashboard. Meters are automatically discovered and grouped under devices for easy management.
 
