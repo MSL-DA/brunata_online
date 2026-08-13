@@ -23,7 +23,6 @@ except ImportError:
 
 import brunata_api as _brunata_api
 from brunata_api import Client
-from brunata_api.const import OAUTH2_URL, CLIENT_ID
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
@@ -47,38 +46,6 @@ async def _check_connectivity(host: str, port: int = 443, timeout: float = 5.0) 
         return True
     except Exception:
         return False
-
-
-# Monkeypatch to fix bug in brunata_api library where it awaits a dict in _renew_tokens
-async def _renew_tokens_fixed(self) -> dict:
-    """Renew access token using refresh token."""
-    if self._is_token_valid("access_token"):
-        _LOGGER.debug(
-            "Token is not expired, expires in %d seconds",
-            self._tokens.get("expires_on") - int(datetime.now().timestamp()),
-        )
-        return self._tokens
-    # Get OAuth 2.0 token object
-    try:
-        tokens = await self.api_wrapper(
-            method="POST",
-            url=f"{OAUTH2_URL}/token",
-            data={
-                "grant_type": "refresh_token",
-                "refresh_token": self._tokens.get("refresh_token"),
-                "CLIENT_ID": CLIENT_ID,
-            },
-        )
-    except UnboundLocalError:
-        # Library bug: api_wrapper catches ConnectError but then tries to return an
-        # unassigned 'response' variable — treat this as a network connectivity error.
-        raise ConnectionError("Brunata token server unreachable") from None
-    except Exception:
-        _LOGGER.exception("An error occurred while trying to renew tokens")
-        raise
-    return tokens.json()
-
-Client._renew_tokens = _renew_tokens_fixed
 
 
 # --- Keycloak login override -------------------------------------------------
@@ -334,10 +301,10 @@ class BrunataDataUpdateCoordinator(DataUpdateCoordinator):
             # for all meters. Brunata's API returns the first measurement in a period
             # if startdate is specified, which gives outdated data.
             
-            # The library has a bug where it tries to await a dict
-            # in _get_tokens -> _renew_tokens and _b2c_auth.
-            # We wrap it in a try-except to provide a better error message
-            # if it fails in the library.
+            # _get_tokens is fully overridden by _keycloak_get_tokens (see above),
+            # so it can no longer hit the library's original "await dict" bug in
+            # _renew_tokens/_b2c_auth. This try/except is a harmless legacy safety
+            # net kept in case a future brunata_api update reintroduces it.
             try:
                 _LOGGER.debug("Refreshing tokens and initializing mappers")
                 await self.client._get_tokens()
@@ -454,9 +421,9 @@ class BrunataDataUpdateCoordinator(DataUpdateCoordinator):
             # must propagate so HA starts the re-authentication flow.
             raise
         except _CONNECT_ERRORS as err:
-            # Covers httpx.ConnectError/ConnectTimeout/ReadTimeout (network unavailable),
-            # ConnectionError (raised by _renew_tokens_fixed), and UnboundLocalError
-            # (library bug in api_wrapper when a ConnectError occurs mid-call).
+            # Covers httpx.ConnectError/ConnectTimeout/ReadTimeout (network unavailable)
+            # and UnboundLocalError (library bug in api_wrapper when a ConnectError
+            # occurs mid-call). ConnectionError is kept as a generic fallback.
             if self.data is not None:
                 # Keep sensors available with their last known values instead of going unavailable.
                 _LOGGER.info("Cannot connect to Brunata — keeping last known values")
