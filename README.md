@@ -1,4 +1,4 @@
-# Brunata Home Assistant Integration
+# Brunata Online
 
 The **Brunata Integration** for Home Assistant allows you to monitor your Brunata meters (water, energy, and heat cost allocator) directly in your dashboard. Meters are automatically discovered and grouped under devices for easy management.
 
@@ -54,17 +54,6 @@ https://github.com/MSL-DA/brunata_online
 
 Special thanks to the [brunata-api](https://pypi.org/project/brunata-api/) project for providing the Python library that makes this integration possible.
 
-This project is a derivative work based on
-https://github.com/vondk/brunata_hacs
+The original project was created by [vondk](https://github.com/vondk/brunata_hacs) and is licensed under the [MIT License](https://github.com/MSL-DA/brunata_online/blob/main/LICENSE)
 
-The original project was created by vondk and is licensed under the MIT License.
-This repository contains modifications and additional functionality by MSL-DA while
-continuing to be distributed under the MIT License.
-
----
-
-## 📄 License
-
-MIT License
-
-See [LICENSE](https://github.com/MSL-DA/brunata_online/blob/main/LICENSE) for details.
+This repository contains modifications and additional functionality.
