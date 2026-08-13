@@ -28,13 +28,8 @@ async def validate_input(hass: HomeAssistant, data: dict[str, str]) -> dict[str,
     try:
         # Attempt to fetch meters to validate login
         _LOGGER.debug("Attempting to validate login by fetching meters for %s", data[CONF_EMAIL])
-        # The library has a bug with await on dict in _renew_tokens/_b2c_auth
         try:
             meters = await client.get_meters()
-        except TypeError as err:
-            if "await" in str(err) and "dict" in str(err):
-                _LOGGER.error("Error in brunata-api library: 'object dict can't be used in await expression'")
-            raise InvalidAuth from err
         except UnboundLocalError as err:
             # brunata_api bug: when the network is unavailable, api_wrapper raises
             # ConnectError which the library catches internally, but then continues
