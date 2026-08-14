@@ -22,7 +22,8 @@ except ImportError:
     _CONNECT_ERRORS = (ConnectionError, UnboundLocalError)
 
 import brunata_api as _brunata_api
-from brunata_api import Client
+from brunata_api import Client, Meter
+from brunata_api.const import METERS_URL
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
@@ -35,12 +36,18 @@ from .const import DOMAIN, CONF_EMAIL, CONF_PASSWORD, CONF_DEBUG_LOGGING
 _LOGGER = logging.getLogger(__name__)
 
 
+def _sync_check_connection(host: str, port: int, timeout: float) -> None:
+    """Open and immediately close a TCP connection. Runs in an executor thread."""
+    with socket.create_connection((host, port), timeout=timeout):
+        pass
+
+
 async def _check_connectivity(host: str, port: int = 443, timeout: float = 5.0) -> bool:
     """Quick TCP check to verify network reachability before invoking the library."""
     try:
         loop = asyncio.get_running_loop()
         await asyncio.wait_for(
-            loop.run_in_executor(None, socket.create_connection, (host, port)),
+            loop.run_in_executor(None, _sync_check_connection, host, port, timeout),
             timeout=timeout,
         )
         return True
@@ -223,12 +230,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # Initial data refresh
     _LOGGER.debug("Performing initial data refresh")
-    try:
-        await coordinator.async_config_entry_first_refresh()
-    except UpdateFailed as err:
-        if "authentication failed" in str(err).lower():
-            raise ConfigEntryAuthFailed from err
-        raise
+    # async_config_entry_first_refresh() itself converts a failed first
+    # refresh into ConfigEntryAuthFailed (if raised) or ConfigEntryNotReady
+    # (otherwise) — it never lets UpdateFailed propagate. So both exceptions
+    # are simply allowed to bubble up here.
+    await coordinator.async_config_entry_first_refresh()
 
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN][entry.entry_id] = coordinator
@@ -265,8 +271,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     return True
 
 async def async_update_options(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Update options."""
-    await hass.config_entries.async_reload(entry.entry_id)
+    """Update options.
+
+    The only option today is debug logging, which doesn't require tearing
+    down and rebuilding the Client (new Keycloak login, new data fetch) —
+    just adjust the log level directly.
+    """
+    level = logging.DEBUG if entry.options.get(CONF_DEBUG_LOGGING) else logging.NOTSET
+    _LOGGER.setLevel(level)
+    logging.getLogger("brunata_api").setLevel(level)
+    _LOGGER.debug("Debug logging %s via settings", "enabled" if level == logging.DEBUG else "disabled")
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
@@ -293,6 +307,19 @@ class BrunataDataUpdateCoordinator(DataUpdateCoordinator):
             # the integration was last reloaded.
         )
 
+    def _handle_connect_error(self, err: Exception):
+        """Handle a network-level failure from a single API call.
+
+        Returns last known data if we have any (keeps sensors available),
+        otherwise raises UpdateFailed. Kept as one place so the "keep last
+        known values" behavior stays consistent across call sites, without
+        wrapping unrelated code (like response parsing) in the same catch.
+        """
+        if self.data is not None:
+            _LOGGER.info("Cannot connect to Brunata — keeping last known values")
+            return self.data
+        raise UpdateFailed("Cannot connect to Brunata — will retry next interval") from err
+
     async def _async_update_data(self):
         """Fetch data from API."""
         _LOGGER.debug("Starting data update from Brunata API")
@@ -313,21 +340,30 @@ class BrunataDataUpdateCoordinator(DataUpdateCoordinator):
                 if "await" in str(err) and "dict" in str(err):
                     _LOGGER.error("Error in brunata-api library: 'object dict can't be used in await expression'. Ensure you have a fixed version of the library or contact the developer.")
                 raise UpdateFailed(f"Error communicating with Brunata API via library: {err}") from err
+            except _CONNECT_ERRORS as err:
+                # Covers httpx.ConnectError/ConnectTimeout/ReadTimeout (network
+                # unavailable) and UnboundLocalError (known library bug in
+                # api_wrapper when a ConnectError occurs mid-call). Scoped to
+                # this call only, not the response-parsing code below, so an
+                # unrelated UnboundLocalError elsewhere isn't silently treated
+                # as a network hiccup.
+                return self._handle_connect_error(err)
 
             # Note: API_URL_V2 (not the library's stale v1 const) — the v1
             # data API now returns 401 for authenticated requests.
-            from brunata_api.const import METERS_URL
-            from brunata_api import Meter
 
             # Fetch all meters with their latest status
             _LOGGER.debug("Fetching meters from %s/consumer/meters", API_URL_V2)
-            response = await self.client.api_wrapper(
-                method="GET",
-                url=f"{API_URL_V2}/consumer/meters",
-                headers={
-                    "Referer": METERS_URL,
-                },
-            )
+            try:
+                response = await self.client.api_wrapper(
+                    method="GET",
+                    url=f"{API_URL_V2}/consumer/meters",
+                    headers={
+                        "Referer": METERS_URL,
+                    },
+                )
+            except _CONNECT_ERRORS as err:
+                return self._handle_connect_error(err)
 
             if response is None:
                 _LOGGER.warning("No response from API (timeout or connection error)")
@@ -464,21 +500,20 @@ class BrunataDataUpdateCoordinator(DataUpdateCoordinator):
                 except Exception as get_meters_err:
                     _LOGGER.error("Error calling get_meters(): %s", get_meters_err)
 
-            # Return a copy of the dictionary to ensure the coordinator detects changes
+            # Return a copy: DataUpdateCoordinator always notifies listeners on
+            # update regardless of equality (always_update defaults to True), so
+            # this isn't needed for change detection. It protects the returned
+            # data from later mutation of self.client._meters by the next update.
             _LOGGER.debug("Data update complete. Total meters: %s", len(self.client._meters))
             return dict(self.client._meters)
         except (UpdateFailed, ConfigEntryAuthFailed):
             # ConfigEntryAuthFailed (e.g. bad credentials during Keycloak login)
             # must propagate so HA starts the re-authentication flow.
             raise
-        except _CONNECT_ERRORS as err:
-            # Covers httpx.ConnectError/ConnectTimeout/ReadTimeout (network unavailable)
-            # and UnboundLocalError (library bug in api_wrapper when a ConnectError
-            # occurs mid-call). ConnectionError is kept as a generic fallback.
-            if self.data is not None:
-                # Keep sensors available with their last known values instead of going unavailable.
-                _LOGGER.info("Cannot connect to Brunata — keeping last known values")
-                return self.data
-            raise UpdateFailed("Cannot connect to Brunata — will retry next interval") from err
         except Exception as err:
+            # Anything reaching here is unexpected — not a known network
+            # error (those are caught at their call sites above) — so it's
+            # surfaced as a visible failure rather than silently falling
+            # back to last known values.
             raise UpdateFailed(f"Unexpected error fetching data: {err}") from err
+
