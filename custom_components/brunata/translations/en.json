@@ -7,6 +7,13 @@
           "password": "Password"
         },
         "description": "Please enter your Brunata credentials."
+      },
+      "reauth_confirm": {
+        "data": {
+          "email": "Email",
+          "password": "Password"
+        },
+        "description": "Your Brunata credentials are no longer valid. Please re-enter them to continue."
       }
     },
     "error": {
@@ -15,7 +22,8 @@
       "unknown": "Unexpected error"
     },
     "abort": {
-      "already_configured": "Device is already configured"
+      "already_configured": "Device is already configured",
+      "reauth_successful": "Re-authentication was successful"
     }
   },
   "options": {
