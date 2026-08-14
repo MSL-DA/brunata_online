@@ -333,7 +333,55 @@ class BrunataDataUpdateCoordinator(DataUpdateCoordinator):
                 _LOGGER.warning("No response from API (timeout or connection error)")
                 return dict(self.client._meters)
 
-            _LOGGER.debug("API response from /consumer/meters: %s", response.text)
+            status = response.status_code
+            _LOGGER.debug("API response status %s from /consumer/meters", status)
+
+            # Auth failures: the account's credentials are no longer accepted.
+            # Detected via status code, not by parsing the body, since Brunata's
+            # error-body shape is not guaranteed to be consistent (e.g. Keycloak
+            # vs. the v2 data API may format errors differently).
+            if status in (401, 403):
+                _LOGGER.error(
+                    "Brunata API returned %s — authentication no longer valid", status
+                )
+                raise ConfigEntryAuthFailed(
+                    f"Brunata API returned {status}. Check credentials and account access."
+                )
+
+            # Rate limiting: back off for the duration the server asks for,
+            # rather than retrying immediately. See:
+            # https://developers.home-assistant.io/blog/2025/11/17/retry-after-update-failed/
+            if status == 429:
+                retry_after = 60.0
+                header_value = response.headers.get("Retry-After")
+                if header_value is not None:
+                    try:
+                        retry_after = float(header_value)
+                    except ValueError:
+                        _LOGGER.debug(
+                            "Non-numeric Retry-After header from Brunata: %s", header_value
+                        )
+                _LOGGER.warning(
+                    "Brunata API rate limit hit (429) — backing off for %s seconds",
+                    retry_after,
+                )
+                raise UpdateFailed("Brunata API rate limit hit (429)", retry_after=retry_after)
+
+            # Transient server-side errors: retry at the next scheduled update,
+            # no reauth needed.
+            if status >= 500:
+                _LOGGER.warning("Brunata API server error (%s) — will retry next interval", status)
+                raise UpdateFailed(f"Brunata API server error: {status}")
+
+            # Endpoint moved/removed. Not an auth problem and not transient —
+            # flagged distinctly so it isn't mistaken for one of the above.
+            if status == 404:
+                _LOGGER.error(
+                    "Brunata API returned 404 for %s/consumer/meters — endpoint may have "
+                    "moved (see the API_URL_V2 note above)",
+                    API_URL_V2,
+                )
+                raise UpdateFailed(f"Brunata API endpoint not found (404): {API_URL_V2}/consumer/meters")
 
             try:
                 result = response.json()
@@ -353,6 +401,9 @@ class BrunataDataUpdateCoordinator(DataUpdateCoordinator):
                         error_code,
                         error_message,
                     )
+                    # Status-code check above already handles 401/403. This stays
+                    # as a fallback for auth errors Brunata reports with a 200
+                    # status and an error body instead of a proper 401/403.
                     if error_code == "WB_WEBSERVICES_0011" or (
                         isinstance(error_message, str)
                         and "Not authorized" in error_message
