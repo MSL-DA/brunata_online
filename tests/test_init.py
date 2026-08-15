@@ -1,9 +1,7 @@
 """Test Brunata integration setup."""
 import logging
 from unittest.mock import AsyncMock, MagicMock, patch
-import pytest
 from homeassistant.core import HomeAssistant
-from homeassistant.setup import async_setup_component
 from custom_components.brunata import BrunataDataUpdateCoordinator, async_update_options
 from custom_components.brunata.const import DOMAIN, CONF_DEBUG_LOGGING
 from pytest_homeassistant_custom_component.common import MockConfigEntry
