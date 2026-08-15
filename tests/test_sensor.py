@@ -1,6 +1,5 @@
 """Test Brunata sensor."""
 from unittest.mock import patch, MagicMock, AsyncMock
-import pytest
 from homeassistant.core import HomeAssistant
 from homeassistant.components.sensor import DOMAIN as SENSOR_DOMAIN
 from datetime import date
