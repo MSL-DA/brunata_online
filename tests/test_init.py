@@ -20,6 +20,9 @@ async def test_setup_entry(hass: HomeAssistant, mock_brunata_client):
     entry.add_to_hass(hass)
 
     with patch(
+        "custom_components.brunata._check_connectivity",
+        AsyncMock(return_value=True),
+    ), patch(
         "custom_components.brunata.BrunataDataUpdateCoordinator._async_update_data",
         return_value={},
     ):
@@ -41,6 +44,9 @@ async def test_unload_entry(hass: HomeAssistant, mock_brunata_client):
     entry.add_to_hass(hass)
 
     with patch(
+        "custom_components.brunata._check_connectivity",
+        AsyncMock(return_value=True),
+    ), patch(
         "custom_components.brunata.BrunataDataUpdateCoordinator._async_update_data",
         return_value={},
     ):
@@ -73,6 +79,7 @@ async def test_coordinator_fetches_meter_data(hass: HomeAssistant, mock_brunata_
     ]
 
     response = MagicMock()
+    response.status_code = 200
     response.json.return_value = api_response
     response.text = str(api_response)
     mock_brunata_client.api_wrapper = AsyncMock(return_value=response)
