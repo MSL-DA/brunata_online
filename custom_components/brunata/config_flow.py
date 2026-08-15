@@ -11,6 +11,7 @@ from brunata_api import Client
 from homeassistant import config_entries
 from homeassistant.core import HomeAssistant
 from homeassistant.config_entries import ConfigFlowResult
+from homeassistant.data_entry_flow import AbortFlow
 from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
 from homeassistant.core import callback
 
@@ -118,6 +119,11 @@ class BrunataConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 errors["base"] = "cannot_connect"
             except InvalidAuth:
                 errors["base"] = "invalid_auth"
+            except AbortFlow:
+                # Raised internally by _abort_if_unique_id_mismatch(); must
+                # propagate so the flow manager turns it into a proper
+                # FlowResultType.ABORT instead of being swallowed here.
+                raise
             except Exception:  # pylint: disable=broad-except
                 _LOGGER.exception("Unexpected error during re-authentication")
                 errors["base"] = "unknown"
