@@ -3,7 +3,7 @@
 ![Hassfest](https://img.shields.io/github/actions/workflow/status/MSL-DA/brunata_online/hassfest.yml?branch=main&label=Hassfest)
 ![HACS](https://img.shields.io/github/actions/workflow/status/MSL-DA/brunata_online/hacs.yml?branch=main&label=HACS)
 
-<img src="custom_components/brunata/brand/logo.png" alt="Brunata logo" width="350">
+![Brunata logo](custom_components/brunata/brand/logo_readme.png)
 
 # Brunata for Home Assistant
 
