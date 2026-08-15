@@ -23,7 +23,8 @@
     },
     "abort": {
       "already_configured": "Kontoen er allerede konfigureret",
-      "reauth_successful": "Gen-autentificering lykkedes"
+      "reauth_successful": "Gen-autentificering lykkedes",
+      "wrong_account": "Den angivne e-mail tilhører en anden konto end den, der gen-autentificeres. Log venligst ind med den oprindelige konto."
     }
   },
   "options": {
