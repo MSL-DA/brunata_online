@@ -1,5 +1,5 @@
 """Test Brunata sensor."""
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, AsyncMock
 import pytest
 from homeassistant.core import HomeAssistant
 from homeassistant.components.sensor import DOMAIN as SENSOR_DOMAIN
@@ -22,6 +22,9 @@ async def test_sensor_setup(hass: HomeAssistant, mock_brunata_client, mock_meter
     
     # Mock DataUpdateCoordinator._async_update_data to return the mock meters
     with patch(
+        "custom_components.brunata._check_connectivity",
+        AsyncMock(return_value=True),
+    ), patch(
         "custom_components.brunata.BrunataDataUpdateCoordinator._async_update_data",
         return_value={"12345": mock_meter},
     ):

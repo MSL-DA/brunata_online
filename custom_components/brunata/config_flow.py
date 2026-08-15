@@ -96,8 +96,13 @@ class BrunataConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     async def async_step_reauth(self, user_input=None) -> ConfigFlowResult:
         """Handle re-authentication when credentials are no longer valid."""
-        entry = self.hass.config_entries.async_get_entry(self.context["entry_id"])
-        assert entry is not None
+        self._reauth_entry = self.hass.config_entries.async_get_entry(self.context["entry_id"])
+        assert self._reauth_entry is not None
+        return await self.async_step_reauth_confirm()
+
+    async def async_step_reauth_confirm(self, user_input=None) -> ConfigFlowResult:
+        """Confirm re-authentication dialog."""
+        entry = self._reauth_entry
         errors = {}
 
         if user_input is not None:
