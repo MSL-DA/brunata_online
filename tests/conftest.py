@@ -49,7 +49,6 @@ def mock_brunata_client():
         mock_init_client_class.return_value = mock_client
         
         # Setup default mock behavior
-        mock_client.get_meters.return_value = []
         mock_client._meters = {}
         
         yield mock_client
