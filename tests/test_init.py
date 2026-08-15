@@ -1,10 +1,11 @@
 """Test Brunata integration setup."""
+import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from homeassistant.core import HomeAssistant
 from homeassistant.setup import async_setup_component
-from custom_components.brunata import BrunataDataUpdateCoordinator
-from custom_components.brunata.const import DOMAIN
+from custom_components.brunata import BrunataDataUpdateCoordinator, async_update_options
+from custom_components.brunata.const import DOMAIN, CONF_DEBUG_LOGGING
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 async def test_setup_entry(hass: HomeAssistant, mock_brunata_client):
@@ -83,3 +84,45 @@ async def test_coordinator_fetches_meter_data(hass: HomeAssistant, mock_brunata_
     assert "12345" in meter_data
     assert meter_data["12345"] is mock_meter
     mock_meter.add_reading.assert_called_once_with(api_response[0]["reading"])
+
+
+async def test_update_options_sets_debug_log_level_without_reload(hass: HomeAssistant, mock_brunata_client):
+    """Enabling debug logging via options should adjust log levels directly,
+    not trigger a full reload of the config entry (new login, new data fetch)."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            "email": "test@example.com",
+            "password": "password123",
+        },
+        options={CONF_DEBUG_LOGGING: True},
+    )
+    entry.add_to_hass(hass)
+
+    with patch(
+        "homeassistant.config_entries.ConfigEntries.async_reload",
+        new_callable=AsyncMock,
+    ) as mock_reload:
+        await async_update_options(hass, entry)
+
+    mock_reload.assert_not_called()
+    assert logging.getLogger("custom_components.brunata").level == logging.DEBUG
+    assert logging.getLogger("brunata_api").level == logging.DEBUG
+
+
+async def test_update_options_clears_debug_log_level(hass: HomeAssistant, mock_brunata_client):
+    """Disabling debug logging via options should reset the log levels."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            "email": "test@example.com",
+            "password": "password123",
+        },
+        options={CONF_DEBUG_LOGGING: False},
+    )
+    entry.add_to_hass(hass)
+
+    await async_update_options(hass, entry)
+
+    assert logging.getLogger("custom_components.brunata").level == logging.NOTSET
+    assert logging.getLogger("brunata_api").level == logging.NOTSET
