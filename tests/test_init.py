@@ -84,7 +84,7 @@ async def test_coordinator_fetches_meter_data(hass: HomeAssistant, mock_brunata_
     response.text = str(api_response)
     mock_brunata_client.api_wrapper = AsyncMock(return_value=response)
 
-    with patch("brunata_api.Meter", return_value=mock_meter):
+    with patch("custom_components.brunata.Meter", return_value=mock_meter):
         coordinator = BrunataDataUpdateCoordinator(hass, mock_brunata_client)
         meter_data = await coordinator._async_update_data()
 
