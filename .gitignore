@@ -12,9 +12,23 @@ env/
 
 # Testing
 .pytest_cache/
+.tox/
+.hypothesis/
 .coverage
 .coverage.*
 htmlcov/
+
+# mypy / type checking (omit if unused)
+.mypy_cache/
+
+# Distribution / packaging
+build/
+dist/
+*.egg
+
+# Environment variables (in case a .env with local test credentials is ever added)
+.env
+.env.local
 
 # Editors / OS
 .vscode/
