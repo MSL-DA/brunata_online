@@ -1,27 +1,27 @@
-![Version](https://img.shields.io/github/v/release/MSL-DA/brunata_online)
-![Tests](https://img.shields.io/github/actions/workflow/status/MSL-DA/brunata_online/pytest.yml?branch=main&label=Tests)
-![Hassfest](https://img.shields.io/github/actions/workflow/status/MSL-DA/brunata_online/hassfest.yml?branch=main&label=Hassfest)
-![HACS](https://img.shields.io/github/actions/workflow/status/MSL-DA/brunata_online/hacs.yml?branch=main&label=HACS)
+[![Version](https://img.shields.io/github/v/release/MSL-DA/brunata_online?label=Version)](https://github.com/MSL-DA/brunata_online/releases)
+[![Tests](https://img.shields.io/github/actions/workflow/status/MSL-DA/brunata_online/pytest.yml?branch=main&label=Tests)](https://github.com/MSL-DA/brunata_online/actions/workflows/pytest.yml)
+[![Hassfest](https://img.shields.io/github/actions/workflow/status/MSL-DA/brunata_online/hassfest.yml?branch=main&label=Hassfest)](https://github.com/MSL-DA/brunata_online/actions/workflows/hassfest.yml)
+[![HACS](https://img.shields.io/github/actions/workflow/status/MSL-DA/brunata_online/hacs.yml?branch=main&label=HACS)](https://github.com/MSL-DA/brunata_online/actions/workflows/hacs.yml)
 
-![Brunata logo](custom_components/brunata/brand/logo_readme.png)
+![Brunata logo](images/logo_readme.png)
 
 # Brunata for Home Assistant
 
 The **Brunata Integration** for Home Assistant allows you to monitor your Brunata meters (water, energy, and heat cost allocator) directly in your dashboard. Meters are automatically discovered and grouped under devices for easy management.
 
-The integration is designed for Brunata Online accounts. If [Brunata Online](https://online.brunata.com) is available in your country, this integration is expected to work.
+Built for [Brunata Online](https://online.brunata.com) accounts. If Brunata Online is available in your country, this integration is expected to work.
 
-> ⚠️ **NOT OFFICIALLY SUPPORTED BY BRUNATA**
+> ⚠️ **This is a community integration and is not affiliated with or supported by Brunata.**
 
 ---
 
 ## ✨ Features
 
-- Automatically discovers your Brunata meters
-- Supports water (`m³`, `l`), energy (`kWh`, `MWh`) and heat cost allocator (`units`) meters
+- Automatic discovery of all meters on your Brunata Online account
+- Supports water (`m³`, `l`), energy (`kWh`, `MWh`), and heat cost allocator (`units`) meters
 - Groups sensors under devices for easy management
-- Uses standard Home Assistant device classes and state classes (Long Term Statistics supported)
-- Reliable data fetching using `DataUpdateCoordinator`, scheduled every hour at xx:59:30
+- Standard Home Assistant device classes and state classes, with full Long Term Statistics support
+- Reliable polling via `DataUpdateCoordinator`, scheduled every hour at xx:59:30
 
 ---
 
