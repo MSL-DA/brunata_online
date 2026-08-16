@@ -1,4 +1,4 @@
-![Version](https://img.shields.io/github/v/release/MSL-DA/brunata_online)
+![Version](https://img.shields.io/github/v/release/MSL-DA/brunata_online?label=Version)
 ![Tests](https://img.shields.io/github/actions/workflow/status/MSL-DA/brunata_online/pytest.yml?branch=main&label=Tests)
 ![Hassfest](https://img.shields.io/github/actions/workflow/status/MSL-DA/brunata_online/hassfest.yml?branch=main&label=Hassfest)
 ![HACS](https://img.shields.io/github/actions/workflow/status/MSL-DA/brunata_online/hacs.yml?branch=main&label=HACS)
