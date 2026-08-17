@@ -11,7 +11,8 @@ The **Brunata Integration** for Home Assistant allows you to monitor your Brunat
 
 Built for [Brunata Online](https://online.brunata.com) accounts. If Brunata Online is available in your country, this integration is expected to work.
 
-> ⚠️ **This is a community integration and is not affiliated with or supported by Brunata.**
+> [!IMPORTANT]
+> This is a community integration and is not affiliated with or supported by Brunata.
 
 ---
 
