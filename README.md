@@ -57,6 +57,12 @@ https://github.com/MSL-DA/brunata_online
 
 ---
 
+## 📖 Documentation
+
+See the [wiki](https://github.com/MSL-DA/brunata_online/wiki) for details on using the sensors — including which meters work in the Energy dashboard and why consumption graphs show 0 right after setup.
+
+---
+
 ## 🔗 Credits
 
 Special thanks to the [brunata-api](https://pypi.org/project/brunata-api/) project for providing the Python library that makes this integration possible.
