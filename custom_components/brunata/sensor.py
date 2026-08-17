@@ -123,10 +123,13 @@ class BrunataSensor(CoordinatorEntity, SensorEntity):
     @property
     def native_value(self):
         """Return the state of the sensor.
-
-        The API only refreshes once a day (or less). When there is no fresh
-        reading we keep returning the last known value instead of None, so the
-        sensor never goes unknown/unavailable and statistics stay intact.
+        
+        How often a fresh reading is available depends on the meter's
+        reporting setup — this can be hourly when there's been consumption,
+        or as infrequently as once a day for some setups. When there is no
+        fresh reading we keep returning the last known value instead of
+        None, so the sensor never goes unknown/unavailable and statistics
+        stay intact.
         """
         meter = self.coordinator.data.get(self._meter_id)
         if meter and meter.latest_reading:
