@@ -1,9 +1,10 @@
 """Test Brunata config flow."""
-from unittest.mock import patch
+import logging
+from unittest.mock import AsyncMock, patch
 from homeassistant import config_entries, data_entry_flow
 from homeassistant.core import HomeAssistant
 from pytest_homeassistant_custom_component.common import MockConfigEntry
-from custom_components.brunata.const import DOMAIN
+from custom_components.brunata.const import DOMAIN, CONF_DEBUG_LOGGING
 
 async def test_flow_user_init(hass: HomeAssistant):
     """Test the initialization of the form in the config flow."""
@@ -209,3 +210,48 @@ async def test_flow_reauth_wrong_account(hass: HomeAssistant, mock_brunata_clien
     assert result2["reason"] == "wrong_account"
     assert entry.data["email"] == "test@example.com"
     assert entry.data["password"] == "old_password"
+
+async def test_options_flow_reloads_entry_and_applies_debug_logging(
+    hass: HomeAssistant, mock_brunata_client
+):
+    """Saving the options form should reload the config entry automatically
+    (BrunataOptionsFlowHandler subclasses OptionsFlowWithReload — see
+    https://developers.home-assistant.io/docs/core/integration/options_flow/#options-flow-with-automatic-reload)
+    instead of relying on a hand-rolled entry.add_update_listener(), and the
+    resulting reload should pick up the new debug-logging option."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            "email": "test@example.com",
+            "password": "password123",
+        },
+    )
+    entry.add_to_hass(hass)
+
+    with patch(
+        "custom_components.brunata._check_connectivity",
+        AsyncMock(return_value=True),
+    ), patch(
+        "custom_components.brunata.BrunataDataUpdateCoordinator._async_update_data",
+        return_value={},
+    ):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        assert result["type"] == data_entry_flow.FlowResultType.FORM
+        assert result["step_id"] == "init"
+
+        result2 = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            {CONF_DEBUG_LOGGING: True},
+        )
+        await hass.async_block_till_done()
+
+    assert result2["type"] == data_entry_flow.FlowResultType.CREATE_ENTRY
+    # OptionsFlowWithReload triggers the reload itself; a fully successful
+    # reload leaves the entry loaded again and, per async_setup_entry,
+    # having picked up the new option.
+    assert entry.state is config_entries.ConfigEntryState.LOADED
+    assert logging.getLogger("custom_components.brunata").level == logging.DEBUG
+    assert logging.getLogger("brunata_api").level == logging.DEBUG
