@@ -10,7 +10,7 @@ from brunata_api import Client
 
 from homeassistant import config_entries
 from homeassistant.core import HomeAssistant
-from homeassistant.config_entries import ConfigFlowResult
+from homeassistant.config_entries import ConfigFlowResult, OptionsFlowWithReload
 from homeassistant.data_entry_flow import AbortFlow
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.core import callback
@@ -111,12 +111,10 @@ class BrunataConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 await self.async_set_unique_id(user_input[CONF_EMAIL])
                 self._abort_if_unique_id_mismatch(reason="wrong_account")
                 _LOGGER.debug("Re-authentication successful for %s", user_input[CONF_EMAIL])
-                result = self.async_update_and_abort(
+                return self.async_update_reload_and_abort(
                     reauth_entry,
                     data_updates=user_input,
                 )
-                self.hass.config_entries.async_schedule_reload(reauth_entry.entry_id)
-                return result
             except CannotConnect:
                 errors["base"] = "cannot_connect"
             except InvalidAuth:
@@ -149,8 +147,15 @@ class BrunataConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Get the options flow for this handler."""
         return BrunataOptionsFlowHandler()
 
-class BrunataOptionsFlowHandler(config_entries.OptionsFlow):
-    """Handle Brunata options."""
+class BrunataOptionsFlowHandler(OptionsFlowWithReload):
+    """Handle Brunata options.
+
+    Subclassing OptionsFlowWithReload (instead of plain OptionsFlow) makes
+    Home Assistant automatically reload the config entry after the options
+    form is saved — the recommended replacement for a manual
+    entry.add_update_listener() whose only job is to trigger a reload. See
+    async_setup_entry() in __init__.py for the corresponding note.
+    """
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
