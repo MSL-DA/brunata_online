@@ -12,7 +12,6 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.device_registry import DeviceInfo
-from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
@@ -59,7 +58,7 @@ async def async_setup_entry(
     _add_new_meters()
     entry.async_on_unload(coordinator.async_add_listener(_add_new_meters))
 
-class BrunataSensor(CoordinatorEntity, RestoreEntity, SensorEntity):
+class BrunataSensor(CoordinatorEntity, SensorEntity):
     """Representation of a Brunata meter."""
 
     def __init__(self, coordinator, meter):
@@ -120,28 +119,6 @@ class BrunataSensor(CoordinatorEntity, RestoreEntity, SensorEntity):
             model=meter.meter_type,
         )
         _LOGGER.debug("Initialized BrunataSensor for meter %s (%s)", self._meter_id, meter.meter_type)
-
-    async def async_added_to_hass(self) -> None:
-        """Restore the last known reading across restarts and reloads.
-
-        _last_value/_last_reading_date are plain in-memory attributes, so
-        they reset to None whenever this entity is torn down and recreated
-        — a HA restart or any reload. available() then depends entirely on
-        the coordinator already having a fresh meter.latest_reading at the
-        exact moment the new entity is created, which is more likely to be
-        momentarily empty for meter types that report less often (heat cost
-        allocators vs. water). Restoring from HA's own last known state
-        closes that gap.
-        """
-        await super().async_added_to_hass()
-        last_state = await self.async_get_last_state()
-        if last_state is None or last_state.state in (None, "unknown", "unavailable"):
-            return
-        try:
-            self._last_value = float(last_state.state)
-        except (TypeError, ValueError):
-            return
-        self._last_reading_date = last_state.attributes.get("reading_date")
 
     @property
     def native_value(self):
