@@ -111,10 +111,12 @@ class BrunataConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 await self.async_set_unique_id(user_input[CONF_EMAIL])
                 self._abort_if_unique_id_mismatch(reason="wrong_account")
                 _LOGGER.debug("Re-authentication successful for %s", user_input[CONF_EMAIL])
-                return self.async_update_reload_and_abort(
+                result = self.async_update_and_abort(
                     reauth_entry,
                     data_updates=user_input,
                 )
+                self.hass.config_entries.async_schedule_reload(reauth_entry.entry_id)
+                return result
             except CannotConnect:
                 errors["base"] = "cannot_connect"
             except InvalidAuth:
