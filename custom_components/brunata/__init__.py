@@ -83,10 +83,14 @@ async def _keycloak_get_tokens(self, force: bool = False) -> bool:
     Raises ``ConfigEntryAuthFailed`` on bad credentials so HA can prompt for
     re-authentication.
 
-    Set ``force=True`` to skip the cached-token shortcut and always perform a
-    fresh login — used when a token that looked locally valid was rejected
-    by the server (e.g. invalidated by a Brunata backend restart), so a stale
-    token isn't mistaken for genuinely bad credentials.
+    :param force: Skip the cached-token reuse check below and always perform
+        a brand-new login. Used by the coordinator when the API rejects a
+        token that *looked* locally valid (e.g. ``expires_in`` says it's
+        still good, but Keycloak has revoked the underlying session, or
+        there's clock drift between this token's local expiry calculation
+        and the server's own). Without this escape hatch there was no way
+        to force a real re-login short of unloading and re-adding the whole
+        config entry.
     """
     session = self._session
 
@@ -271,22 +275,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     _LOGGER.debug("Forwarding setups to platforms: %s", PLATFORMS)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-    
-    entry.async_on_unload(entry.add_update_listener(async_update_options))
+
+    # No manual update listener here on purpose. BrunataOptionsFlowHandler
+    # (config_flow.py) subclasses OptionsFlowWithReload, so Home Assistant
+    # automatically reloads the config entry — re-running async_setup_entry,
+    # which re-reads entry.options.get(CONF_DEBUG_LOGGING) above — whenever
+    # the options are saved. A hand-rolled entry.add_update_listener() for
+    # "reload on options change" is deprecated as of HA 2026.12; see
+    # https://developers.home-assistant.io/docs/core/integration/options_flow/#options-flow-with-automatic-reload
 
     return True
-
-async def async_update_options(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Update options.
-
-    The only option today is debug logging, which doesn't require tearing
-    down and rebuilding the Client (new Keycloak login, new data fetch) —
-    just adjust the log level directly.
-    """
-    level = logging.DEBUG if entry.options.get(CONF_DEBUG_LOGGING) else logging.NOTSET
-    _LOGGER.setLevel(level)
-    logging.getLogger("brunata_api").setLevel(level)
-    _LOGGER.debug("Debug logging %s via settings", "enabled" if level == logging.DEBUG else "disabled")
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
@@ -326,53 +324,75 @@ class BrunataDataUpdateCoordinator(DataUpdateCoordinator):
             return self.data
         raise UpdateFailed("Cannot connect to Brunata — will retry next interval") from err
 
+    async def _authenticate_and_fetch_meters(self, force_relogin: bool = False):
+        """Get tokens, init mappers, and GET /consumer/meters once.
+
+        Returns the ``httpx`` response on success. On a network-level failure
+        it returns whatever ``_handle_connect_error`` decides (either the
+        last known meter dict, as a fallback, or it raises ``UpdateFailed``).
+        This never itself raises ``ConfigEntryAuthFailed`` — the caller
+        decides whether a 401/403 is final or worth a retry.
+
+        :param force_relogin: Passed straight to the patched
+            ``Client._get_tokens`` to bypass its cached-token reuse check
+            (see ``_keycloak_get_tokens`` above) and force a brand-new
+            Keycloak login.
+        """
+        # We fetch meters without startdate to get the absolute latest measurements
+        # for all meters. Brunata's API returns the first measurement in a period
+        # if startdate is specified, which gives outdated data.
+
+        # _get_tokens is fully overridden by _keycloak_get_tokens (see above),
+        # so it can no longer hit the library's original "await dict" bug in
+        # _renew_tokens/_b2c_auth. This try/except is a harmless legacy safety
+        # net kept in case a future brunata_api update reintroduces it.
+        try:
+            _LOGGER.debug(
+                "Refreshing tokens (force_relogin=%s) and initializing mappers",
+                force_relogin,
+            )
+            await self.client._get_tokens(force=force_relogin)
+            await self.client._init_mappers()
+        except TypeError as err:
+            if "await" in str(err) and "dict" in str(err):
+                _LOGGER.error("Error in brunata-api library: 'object dict can't be used in await expression'. Ensure you have a fixed version of the library or contact the developer.")
+            raise UpdateFailed(f"Error communicating with Brunata API via library: {err}") from err
+        except _CONNECT_ERRORS as err:
+            # Covers httpx.ConnectError/ConnectTimeout/ReadTimeout (network
+            # unavailable) and UnboundLocalError (known library bug in
+            # api_wrapper when a ConnectError occurs mid-call). Scoped to
+            # this call only, not the response-parsing code below, so an
+            # unrelated UnboundLocalError elsewhere isn't silently treated
+            # as a network hiccup.
+            return self._handle_connect_error(err)
+
+        # Note: API_URL_V2 (not the library's stale v1 const) — the v1
+        # data API now returns 401 for authenticated requests.
+
+        # Fetch all meters with their latest status
+        _LOGGER.debug("Fetching meters from %s/consumer/meters", API_URL_V2)
+        try:
+            return await self.client.api_wrapper(
+                method="GET",
+                url=f"{API_URL_V2}/consumer/meters",
+                headers={
+                    "Referer": METERS_URL,
+                },
+            )
+        except _CONNECT_ERRORS as err:
+            return self._handle_connect_error(err)
+
     async def _async_update_data(self):
         """Fetch data from API."""
         _LOGGER.debug("Starting data update from Brunata API")
         try:
-            # We fetch meters without startdate to get the absolute latest measurements
-            # for all meters. Brunata's API returns the first measurement in a period
-            # if startdate is specified, which gives outdated data.
-            
-            # _get_tokens is fully overridden by _keycloak_get_tokens (see above),
-            # so it can no longer hit the library's original "await dict" bug in
-            # _renew_tokens/_b2c_auth. This try/except is a harmless legacy safety
-            # net kept in case a future brunata_api update reintroduces it.
-            try:
-                _LOGGER.debug("Refreshing tokens and initializing mappers")
-                await self.client._get_tokens()
-                await self.client._init_mappers()
-            except TypeError as err:
-                if "await" in str(err) and "dict" in str(err):
-                    _LOGGER.error("Error in brunata-api library: 'object dict can't be used in await expression'. Ensure you have a fixed version of the library or contact the developer.")
-                raise UpdateFailed(f"Error communicating with Brunata API via library: {err}") from err
-            except _CONNECT_ERRORS as err:
-                # Covers httpx.ConnectError/ConnectTimeout/ReadTimeout (network
-                # unavailable) and UnboundLocalError (known library bug in
-                # api_wrapper when a ConnectError occurs mid-call). Scoped to
-                # this call only, not the response-parsing code below, so an
-                # unrelated UnboundLocalError elsewhere isn't silently treated
-                # as a network hiccup.
-                return self._handle_connect_error(err)
+            response = await self._authenticate_and_fetch_meters()
 
-            # Note: API_URL_V2 (not the library's stale v1 const) — the v1
-            # data API now returns 401 for authenticated requests.
-
-            # Fetch all meters with their latest status
-            async def _fetch_meters():
-                return await self.client.api_wrapper(
-                    method="GET",
-                    url=f"{API_URL_V2}/consumer/meters",
-                    headers={
-                        "Referer": METERS_URL,
-                    },
-                )
-
-            _LOGGER.debug("Fetching meters from %s/consumer/meters", API_URL_V2)
-            try:
-                response = await _fetch_meters()
-            except _CONNECT_ERRORS as err:
-                return self._handle_connect_error(err)
+            # A dict here means _handle_connect_error already resolved this
+            # to the last known meter data (network unavailable) — return it
+            # as-is rather than treating it as an httpx response below.
+            if isinstance(response, dict):
+                return response
 
             if response is None:
                 _LOGGER.warning("No response from API (timeout or connection error)")
@@ -381,59 +401,45 @@ class BrunataDataUpdateCoordinator(DataUpdateCoordinator):
             status = response.status_code
             _LOGGER.debug("API response status %s from /consumer/meters", status)
 
-            # Auth failures: the account's credentials are no longer accepted.
-            # Detected via status code, not by parsing the body, since Brunata's
-            # error-body shape is not guaranteed to be consistent (e.g. Keycloak
-            # vs. the v2 data API may format errors differently).
-            #
-            # A 401/403 here doesn't necessarily mean the credentials are
-            # wrong: _get_tokens() reuses a cached token as long as it looks
-            # locally valid by its own expiry timestamp, but Brunata may have
-            # invalidated that token server-side in the meantime (e.g. a brief
-            # backend restart or maintenance window). Force one fresh login
-            # and retry once before concluding the credentials themselves are
-            # the problem — a genuinely bad password will still fail the
-            # fresh login and raise ConfigEntryAuthFailed from there.
+            # A cached token can look locally valid (unexpired per its own
+            # "expires_in") while the server no longer accepts it — e.g. the
+            # Keycloak session was revoked server-side, or there's clock
+            # drift between our expiry calculation and the server's. Rather
+            # than immediately treat every 401/403 as "wrong email/password"
+            # and force the user to re-enter credentials that haven't
+            # changed, drop the cached token and perform exactly one
+            # brand-new Keycloak login, then retry the call. Only a
+            # 401/403 on *this* fresh-token attempt means the credentials
+            # themselves are no longer accepted.
             if status in (401, 403):
                 _LOGGER.warning(
-                    "Brunata API returned %s — the cached token may have been "
-                    "invalidated server-side even though it looked locally valid. "
-                    "Forcing a fresh login and retrying once before treating this "
-                    "as an authentication failure.",
+                    "Brunata API returned %s with a cached token — retrying "
+                    "once with a fresh Keycloak login before giving up",
                     status,
                 )
-                try:
-                    await self.client._get_tokens(force=True)
-                except TypeError as err:
-                    if "await" in str(err) and "dict" in str(err):
-                        _LOGGER.error("Error in brunata-api library: 'object dict can't be used in await expression'. Ensure you have a fixed version of the library or contact the developer.")
-                    raise UpdateFailed(f"Error communicating with Brunata API via library: {err}") from err
-                except _CONNECT_ERRORS as err:
-                    return self._handle_connect_error(err)
-                # ConfigEntryAuthFailed raised by a forced fresh login means
-                # Keycloak genuinely rejected the credentials; let it
-                # propagate unchanged so HA starts the reauth flow.
+                response = await self._authenticate_and_fetch_meters(force_relogin=True)
 
-                try:
-                    response = await _fetch_meters()
-                except _CONNECT_ERRORS as err:
-                    return self._handle_connect_error(err)
-
+                if isinstance(response, dict):
+                    return response
                 if response is None:
-                    _LOGGER.warning("No response from API (timeout or connection error) after retry")
+                    _LOGGER.warning("No response from API (timeout or connection error)")
                     return dict(self.client._meters)
 
                 status = response.status_code
-                _LOGGER.debug("API response status %s from /consumer/meters (after retry)", status)
+                _LOGGER.debug(
+                    "API response status %s from /consumer/meters after fresh login",
+                    status,
+                )
 
                 if status in (401, 403):
                     _LOGGER.error(
-                        "Brunata API still returned %s after a fresh login — "
-                        "authentication genuinely invalid", status
+                        "Brunata API returned %s — authentication no longer valid "
+                        "even after a fresh login. Credentials are no longer accepted.",
+                        status,
                     )
                     raise ConfigEntryAuthFailed(
                         f"Brunata API returned {status}. Check credentials and account access."
-                )
+                    )
 
             # Rate limiting: back off for the duration the server asks for,
             # rather than retrying immediately. See:
