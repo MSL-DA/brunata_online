@@ -73,7 +73,7 @@ _KC_FORM_ACTION_RE = re.compile(r'id="kc-form-login"[^>]*action="([^"]+)"', re.I
 _REDIRECT_STATUSES = (301, 302, 303, 307, 308)
 
 
-async def _keycloak_get_tokens(self) -> bool:
+async def _keycloak_get_tokens(self, force: bool = False) -> bool:
     """Authenticate against Brunata's Keycloak realm using the OAuth 2.0
     Authorization Code + PKCE flow, and store the access token on the session.
 
@@ -82,17 +82,23 @@ async def _keycloak_get_tokens(self) -> bool:
     ``_password`` attributes, so it is independent of the library's internals.
     Raises ``ConfigEntryAuthFailed`` on bad credentials so HA can prompt for
     re-authentication.
+
+    Set ``force=True`` to skip the cached-token shortcut and always perform a
+    fresh login — used when a token that looked locally valid was rejected
+    by the server (e.g. invalidated by a Brunata backend restart), so a stale
+    token isn't mistaken for genuinely bad credentials.
     """
     session = self._session
 
     # Reuse a still-valid token. The library calls _get_tokens() several times
     # per update cycle (directly, then via _init_mappers/get_meters); without
     # this we would perform a full browser login on every call.
-    try:
-        if self._is_token_valid("access_token") and session.headers.get("Authorization"):
-            return True
-    except Exception:  # noqa: BLE001 — be defensive about library internals
-        pass
+    if not force:
+        try:
+            if self._is_token_valid("access_token") and session.headers.get("Authorization"):
+                return True
+        except Exception:  # noqa: BLE001 — be defensive about library internals
+            pass
 
     # Drop any stale Authorization header before logging in again.
     session.headers.pop("Authorization", None)
@@ -353,15 +359,18 @@ class BrunataDataUpdateCoordinator(DataUpdateCoordinator):
             # data API now returns 401 for authenticated requests.
 
             # Fetch all meters with their latest status
-            _LOGGER.debug("Fetching meters from %s/consumer/meters", API_URL_V2)
-            try:
-                response = await self.client.api_wrapper(
+            async def _fetch_meters():
+                return await self.client.api_wrapper(
                     method="GET",
                     url=f"{API_URL_V2}/consumer/meters",
                     headers={
                         "Referer": METERS_URL,
                     },
                 )
+
+            _LOGGER.debug("Fetching meters from %s/consumer/meters", API_URL_V2)
+            try:
+                response = await _fetch_meters()
             except _CONNECT_ERRORS as err:
                 return self._handle_connect_error(err)
 
@@ -376,12 +385,54 @@ class BrunataDataUpdateCoordinator(DataUpdateCoordinator):
             # Detected via status code, not by parsing the body, since Brunata's
             # error-body shape is not guaranteed to be consistent (e.g. Keycloak
             # vs. the v2 data API may format errors differently).
+            #
+            # A 401/403 here doesn't necessarily mean the credentials are
+            # wrong: _get_tokens() reuses a cached token as long as it looks
+            # locally valid by its own expiry timestamp, but Brunata may have
+            # invalidated that token server-side in the meantime (e.g. a brief
+            # backend restart or maintenance window). Force one fresh login
+            # and retry once before concluding the credentials themselves are
+            # the problem — a genuinely bad password will still fail the
+            # fresh login and raise ConfigEntryAuthFailed from there.
             if status in (401, 403):
-                _LOGGER.error(
-                    "Brunata API returned %s — authentication no longer valid", status
+                _LOGGER.warning(
+                    "Brunata API returned %s — the cached token may have been "
+                    "invalidated server-side even though it looked locally valid. "
+                    "Forcing a fresh login and retrying once before treating this "
+                    "as an authentication failure.",
+                    status,
                 )
-                raise ConfigEntryAuthFailed(
-                    f"Brunata API returned {status}. Check credentials and account access."
+                try:
+                    await self.client._get_tokens(force=True)
+                except TypeError as err:
+                    if "await" in str(err) and "dict" in str(err):
+                        _LOGGER.error("Error in brunata-api library: 'object dict can't be used in await expression'. Ensure you have a fixed version of the library or contact the developer.")
+                    raise UpdateFailed(f"Error communicating with Brunata API via library: {err}") from err
+                except _CONNECT_ERRORS as err:
+                    return self._handle_connect_error(err)
+                # ConfigEntryAuthFailed raised by a forced fresh login means
+                # Keycloak genuinely rejected the credentials; let it
+                # propagate unchanged so HA starts the reauth flow.
+
+                try:
+                    response = await _fetch_meters()
+                except _CONNECT_ERRORS as err:
+                    return self._handle_connect_error(err)
+
+                if response is None:
+                    _LOGGER.warning("No response from API (timeout or connection error) after retry")
+                    return dict(self.client._meters)
+
+                status = response.status_code
+                _LOGGER.debug("API response status %s from /consumer/meters (after retry)", status)
+
+                if status in (401, 403):
+                    _LOGGER.error(
+                        "Brunata API still returned %s after a fresh login — "
+                        "authentication genuinely invalid", status
+                    )
+                    raise ConfigEntryAuthFailed(
+                        f"Brunata API returned {status}. Check credentials and account access."
                 )
 
             # Rate limiting: back off for the duration the server asks for,
