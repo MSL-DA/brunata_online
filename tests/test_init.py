@@ -1,9 +1,11 @@
 """Test Brunata integration setup."""
 import logging
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
+import pytest
 from homeassistant.core import HomeAssistant
-from custom_components.brunata import BrunataDataUpdateCoordinator, async_update_options
-from custom_components.brunata.const import DOMAIN, CONF_DEBUG_LOGGING
+from homeassistant.exceptions import ConfigEntryAuthFailed
+from custom_components.brunata import BrunataDataUpdateCoordinator
+from custom_components.brunata.const import DOMAIN
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 async def test_setup_entry(hass: HomeAssistant, mock_brunata_client):
@@ -91,43 +93,77 @@ async def test_coordinator_fetches_meter_data(hass: HomeAssistant, mock_brunata_
     mock_meter.add_reading.assert_called_once_with(api_response[0]["reading"])
 
 
-async def test_update_options_sets_debug_log_level_without_reload(hass: HomeAssistant, mock_brunata_client):
-    """Enabling debug logging via options should adjust log levels directly,
-    not trigger a full reload of the config entry (new login, new data fetch)."""
-    entry = MockConfigEntry(
-        domain=DOMAIN,
-        data={
-            "email": "test@example.com",
-            "password": "password123",
-        },
-        options={CONF_DEBUG_LOGGING: True},
+async def test_coordinator_retries_with_fresh_login_after_401_then_succeeds(
+    hass: HomeAssistant, mock_brunata_client, mock_meter
+):
+    """A 401 with a (locally) still-valid cached token should trigger exactly
+    one forced re-login and retry — not an immediate ConfigEntryAuthFailed —
+    per https://github.com/MSL-DA/brunata_online 401-after-cached-token report."""
+    mock_brunata_client._meters = {}
+    mock_brunata_client._get_tokens = AsyncMock(return_value=None)
+    mock_brunata_client._init_mappers = AsyncMock(return_value=None)
+
+    api_response = [
+        {
+            "meter": {
+                "meterId": "12345",
+                "meterNo": "M12345",
+                "meterType": "Heat",
+                "meterUnit": "kWh",
+                "superAllocationUnit": 1,
+            },
+            "reading": {"value": 100.5, "readingDate": "2024-01-01"},
+        }
+    ]
+
+    unauthorized_response = MagicMock()
+    unauthorized_response.status_code = 401
+
+    ok_response = MagicMock()
+    ok_response.status_code = 200
+    ok_response.json.return_value = api_response
+    ok_response.text = str(api_response)
+
+    mock_brunata_client.api_wrapper = AsyncMock(
+        side_effect=[unauthorized_response, ok_response]
     )
-    entry.add_to_hass(hass)
 
-    with patch(
-        "homeassistant.config_entries.ConfigEntries.async_reload",
-        new_callable=AsyncMock,
-    ) as mock_reload:
-        await async_update_options(hass, entry)
+    with patch("custom_components.brunata.Meter", return_value=mock_meter):
+        coordinator = BrunataDataUpdateCoordinator(hass, mock_brunata_client)
+        meter_data = await coordinator._async_update_data()
 
-    mock_reload.assert_not_called()
-    assert logging.getLogger("custom_components.brunata").level == logging.DEBUG
-    assert logging.getLogger("brunata_api").level == logging.DEBUG
+    assert "12345" in meter_data
+    assert mock_brunata_client.api_wrapper.call_count == 2
+    # First attempt reuses whatever cached token _get_tokens() decides on its
+    # own (force=False); the retry after the 401 must force a brand-new login.
+    assert mock_brunata_client._get_tokens.call_args_list == [
+        call(force=False),
+        call(force=True),
+    ]
 
 
-async def test_update_options_clears_debug_log_level(hass: HomeAssistant, mock_brunata_client):
-    """Disabling debug logging via options should reset the log levels."""
-    entry = MockConfigEntry(
-        domain=DOMAIN,
-        data={
-            "email": "test@example.com",
-            "password": "password123",
-        },
-        options={CONF_DEBUG_LOGGING: False},
-    )
-    entry.add_to_hass(hass)
+async def test_coordinator_raises_auth_failed_when_fresh_login_still_401(
+    hass: HomeAssistant, mock_brunata_client
+):
+    """If the API still returns 401/403 after a forced fresh Keycloak login,
+    the credentials themselves are no longer valid — HA should be told via
+    ConfigEntryAuthFailed so it prompts for re-authentication. There must be
+    only one retry, not an unbounded loop."""
+    mock_brunata_client._meters = {}
+    mock_brunata_client._get_tokens = AsyncMock(return_value=None)
+    mock_brunata_client._init_mappers = AsyncMock(return_value=None)
 
-    await async_update_options(hass, entry)
+    unauthorized_response = MagicMock()
+    unauthorized_response.status_code = 401
+    mock_brunata_client.api_wrapper = AsyncMock(return_value=unauthorized_response)
 
-    assert logging.getLogger("custom_components.brunata").level == logging.NOTSET
-    assert logging.getLogger("brunata_api").level == logging.NOTSET
+    coordinator = BrunataDataUpdateCoordinator(hass, mock_brunata_client)
+
+    with pytest.raises(ConfigEntryAuthFailed):
+        await coordinator._async_update_data()
+
+    assert mock_brunata_client.api_wrapper.call_count == 2
+    assert mock_brunata_client._get_tokens.call_args_list == [
+        call(force=False),
+        call(force=True),
+    ]
