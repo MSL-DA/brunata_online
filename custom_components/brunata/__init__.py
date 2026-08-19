@@ -107,6 +107,13 @@ async def _keycloak_get_tokens(self, force: bool = False) -> bool:
     # Drop any stale Authorization header before logging in again.
     session.headers.pop("Authorization", None)
 
+    if force:
+        # A forced login means the server rejected a token we believed was
+        # valid. Keycloak's SSO cookies live on this same session, so without
+        # clearing them the authorize request below would simply hand back a
+        # token minted from the very session that was just rejected.
+        session.cookies.clear()
+
     # PKCE challenge
     code_verifier = re.sub(
         "[^a-zA-Z0-9]+", "", base64.urlsafe_b64encode(os.urandom(40)).decode("utf-8")
@@ -132,36 +139,46 @@ async def _keycloak_get_tokens(self, force: bool = False) -> bool:
     )
     page.raise_for_status()
 
-    match = _KC_FORM_ACTION_RE.search(page.text)
-    if not match:
-        _LOGGER.error("Brunata Keycloak login form not found — auth flow may have changed")
-        raise ConfigEntryAuthFailed("Brunata login form not found (Keycloak flow changed)")
-    form_action = html.unescape(match.group(1))
+    # If a Keycloak SSO session is still alive, the authorize request is
+    # redirected straight to the redirect URI carrying ?code=... and no login
+    # form is rendered at all. That is a success, not a failure — treating it
+    # as one would raise ConfigEntryAuthFailed and prompt the user to re-enter
+    # credentials that are perfectly valid.
+    auth_code = parse_qs(urlparse(str(page.url)).query).get("code", [None])[0]
 
-    # 2) Submit credentials. On success Keycloak issues a 302 to the redirect
-    #    URI carrying the authorization code; on failure it re-renders the form.
-    auth = await session.post(
-        form_action,
-        data={
-            "username": self._username,
-            "password": self._password,
-            "credentialId": "",
-        },
-        follow_redirects=False,
-    )
-    if auth.status_code not in _REDIRECT_STATUSES:
-        _LOGGER.error("Brunata authentication failed (status %s) — check credentials", auth.status_code)
-        raise ConfigEntryAuthFailed("Brunata authentication failed — check email and password")
+    if auth_code is None:
+        match = _KC_FORM_ACTION_RE.search(page.text)
+        if not match:
+            _LOGGER.error("Brunata Keycloak login form not found — auth flow may have changed")
+            raise ConfigEntryAuthFailed("Brunata login form not found (Keycloak flow changed)")
+        form_action = html.unescape(match.group(1))
 
-    location = auth.headers.get("Location", "")
-    if not location.startswith(KC_REDIRECT_URI):
-        _LOGGER.error("Unexpected redirect after Brunata login: %s", location)
-        raise ConfigEntryAuthFailed("Unexpected redirect after Brunata login")
+        # 2) Submit credentials. On success Keycloak issues a 302 to the redirect
+        #    URI carrying the authorization code; on failure it re-renders the form.
+        auth = await session.post(
+            form_action,
+            data={
+                "username": self._username,
+                "password": self._password,
+                "credentialId": "",
+            },
+            follow_redirects=False,
+        )
+        if auth.status_code not in _REDIRECT_STATUSES:
+            _LOGGER.error("Brunata authentication failed (status %s) — check credentials", auth.status_code)
+            raise ConfigEntryAuthFailed("Brunata authentication failed — check email and password")
 
-    auth_code = parse_qs(urlparse(location).query).get("code", [None])[0]
-    if not auth_code:
-        _LOGGER.error("No authorization code returned by Brunata login")
-        raise ConfigEntryAuthFailed("No authorization code returned by Brunata")
+        location = auth.headers.get("Location", "")
+        if not location.startswith(KC_REDIRECT_URI):
+            _LOGGER.error("Unexpected redirect after Brunata login: %s", location)
+            raise ConfigEntryAuthFailed("Unexpected redirect after Brunata login")
+
+        auth_code = parse_qs(urlparse(location).query).get("code", [None])[0]
+        if not auth_code:
+            _LOGGER.error("No authorization code returned by Brunata login")
+            raise ConfigEntryAuthFailed("No authorization code returned by Brunata")
+    else:
+        _LOGGER.debug("Brunata SSO session still active — reusing it, no login form needed")
 
     # 3) Exchange the code for tokens (public client + PKCE, no secret needed).
     token_resp = await session.post(
@@ -215,9 +232,15 @@ PLATFORMS: list[str] = ["sensor"]
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Brunata from a config entry."""
-    if entry.options.get(CONF_DEBUG_LOGGING):
-        _LOGGER.setLevel(logging.DEBUG)
-        logging.getLogger("brunata_api").setLevel(logging.DEBUG)
+    # Always set the level explicitly, in both directions. Setting only the
+    # DEBUG case would leave the loggers stuck at DEBUG until the next Home
+    # Assistant restart once the option is turned back off. NOTSET makes the
+    # loggers inherit from their parent again, which is the default state.
+    debug_logging = bool(entry.options.get(CONF_DEBUG_LOGGING))
+    log_level = logging.DEBUG if debug_logging else logging.NOTSET
+    _LOGGER.setLevel(log_level)
+    logging.getLogger("brunata_api").setLevel(log_level)
+    if debug_logging:
         _LOGGER.debug("Debug logging enabled via settings")
 
     email = entry.data[CONF_EMAIL]
@@ -290,7 +313,13 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
-        hass.data[DOMAIN].pop(entry.entry_id)
+        coordinator = hass.data[DOMAIN].pop(entry.entry_id, None)
+        if coordinator is not None:
+            # The library owns an httpx.AsyncClient holding keep-alive
+            # connections. Without closing it here, every reload — including
+            # the automatic one after saving options or completing a reauth —
+            # leaks sockets for the lifetime of the Home Assistant process.
+            await coordinator.client._session.aclose()
 
     return unload_ok
 
@@ -573,4 +602,3 @@ class BrunataDataUpdateCoordinator(DataUpdateCoordinator):
             # surfaced as a visible failure rather than silently falling
             # back to last known values.
             raise UpdateFailed(f"Unexpected error fetching data: {err}") from err
-
