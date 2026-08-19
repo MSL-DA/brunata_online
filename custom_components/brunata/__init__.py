@@ -73,6 +73,63 @@ _KC_FORM_ACTION_RE = re.compile(r'id="kc-form-login"[^>]*action="([^"]+)"', re.I
 _REDIRECT_STATUSES = (301, 302, 303, 307, 308)
 
 
+async def _keycloak_refresh(client) -> bool:
+    """Try the OAuth refresh_token grant. Return True if a new token was stored.
+
+    We already request the ``offline_access`` scope at login, so Keycloak
+    issues a refresh token — it was simply never used. Redeeming it turns a
+    token renewal into a single POST instead of a three-request browser login,
+    which is faster, avoids touching the login form at all, and is far less
+    likely to trip Brunata's bot protection.
+
+    Returns False (rather than raising) whenever the refresh token is missing
+    or rejected, so the caller can fall back to the full login. Network errors
+    are allowed to propagate — those are the coordinator's business.
+    """
+    refresh_token = client._tokens.get("refresh_token")
+    if not refresh_token:
+        return False
+
+    response = await client._session.post(
+        KC_TOKEN_URL,
+        data={
+            "grant_type": "refresh_token",
+            "client_id": KC_CLIENT_ID,
+            "refresh_token": refresh_token,
+        },
+        follow_redirects=False,
+    )
+    if response.status_code != 200:
+        _LOGGER.debug(
+            "Brunata refresh_token rejected (status %s) — falling back to a full login",
+            response.status_code,
+        )
+        return False
+
+    tokens = response.json()
+    if not tokens.get("access_token"):
+        _LOGGER.debug("Brunata refresh response carried no access_token")
+        return False
+
+    _store_tokens(client, tokens)
+    _LOGGER.debug("Brunata access token renewed via refresh_token")
+    return True
+
+
+def _store_tokens(client, tokens: dict) -> None:
+    """Normalise expiry fields to what the library's helpers expect, then store."""
+    now = int(datetime.now().timestamp())
+    if tokens.get("expires_in") is not None:
+        tokens["expires_on"] = now + int(tokens["expires_in"])
+    if tokens.get("refresh_expires_in") is not None:
+        tokens["refresh_token_expires_on"] = now + int(tokens["refresh_expires_in"])
+
+    client._session.headers.update(
+        {"Authorization": f"{tokens.get('token_type', 'Bearer')} {tokens['access_token']}"}
+    )
+    client._tokens.update(tokens)
+
+
 async def _keycloak_get_tokens(self, force: bool = False) -> bool:
     """Authenticate against Brunata's Keycloak realm using the OAuth 2.0
     Authorization Code + PKCE flow, and store the access token on the session.
@@ -111,8 +168,13 @@ async def _keycloak_get_tokens(self, force: bool = False) -> bool:
         # A forced login means the server rejected a token we believed was
         # valid. Keycloak's SSO cookies live on this same session, so without
         # clearing them the authorize request below would simply hand back a
-        # token minted from the very session that was just rejected.
+        # token minted from the very session that was just rejected. For the
+        # same reason we do not attempt a refresh_token here.
         session.cookies.clear()
+    elif await _keycloak_refresh(self):
+        # The cached access token has expired, but the refresh token may still
+        # be good — that is one request instead of a full login.
+        return True
 
     # PKCE challenge
     code_verifier = re.sub(
@@ -200,17 +262,7 @@ async def _keycloak_get_tokens(self, force: bool = False) -> bool:
         _LOGGER.error("Brunata token endpoint returned no access_token")
         raise ConfigEntryAuthFailed("Brunata did not return an access token")
 
-    # Normalise expiry fields to what the library's helpers expect, then store.
-    now = int(datetime.now().timestamp())
-    if tokens.get("expires_in") is not None:
-        tokens["expires_on"] = now + int(tokens["expires_in"])
-    if tokens.get("refresh_expires_in") is not None:
-        tokens["refresh_token_expires_on"] = now + int(tokens["refresh_expires_in"])
-
-    session.headers.update(
-        {"Authorization": f"{tokens.get('token_type', 'Bearer')} {tokens['access_token']}"}
-    )
-    self._tokens.update(tokens)
+    _store_tokens(self, tokens)
     return True
 
 
@@ -230,7 +282,13 @@ _brunata_api.API_URL = API_URL_V2
 
 PLATFORMS: list[str] = ["sensor"]
 
-async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+# C4: the coordinator is stored on the entry itself rather than in
+# hass.data[DOMAIN], which is the pattern Home Assistant recommends and gives
+# the platforms a typed handle on it.
+type BrunataConfigEntry = ConfigEntry[BrunataDataUpdateCoordinator]
+
+
+async def async_setup_entry(hass: HomeAssistant, entry: BrunataConfigEntry) -> bool:
     """Set up Brunata from a config entry."""
     # Always set the level explicitly, in both directions. Setting only the
     # DEBUG case would leave the loggers stuck at DEBUG until the next Home
@@ -259,18 +317,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if _httpx is not None:
         client._session.timeout = _httpx.Timeout(15.0)
 
-    coordinator = BrunataDataUpdateCoordinator(hass, client)
+    coordinator = BrunataDataUpdateCoordinator(hass, entry, client)
 
     # Initial data refresh
     _LOGGER.debug("Performing initial data refresh")
     # async_config_entry_first_refresh() itself converts a failed first
     # refresh into ConfigEntryAuthFailed (if raised) or ConfigEntryNotReady
     # (otherwise) — it never lets UpdateFailed propagate. So both exceptions
-    # are simply allowed to bubble up here.
-    await coordinator.async_config_entry_first_refresh()
+    # are simply allowed to bubble up here. It also runs the coordinator's
+    # _async_setup() hook exactly once, which is where the mappers are loaded.
+    try:
+        await coordinator.async_config_entry_first_refresh()
+    except Exception:
+        # Setup is being aborted, so nothing will ever call async_unload_entry
+        # for this attempt — close the client here or the retry leaks one.
+        await client._session.aclose()
+        raise
 
-    hass.data.setdefault(DOMAIN, {})
-    hass.data[DOMAIN][entry.entry_id] = coordinator
+    entry.runtime_data = coordinator
 
     @callback
     def _handle_scheduled_refresh(now) -> None:
@@ -309,11 +373,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     return True
 
-async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+async def async_unload_entry(hass: HomeAssistant, entry: BrunataConfigEntry) -> bool:
     """Unload a config entry."""
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
-        coordinator = hass.data[DOMAIN].pop(entry.entry_id, None)
+        coordinator: BrunataDataUpdateCoordinator | None = getattr(
+            entry, "runtime_data", None
+        )
         if coordinator is not None:
             # The library owns an httpx.AsyncClient holding keep-alive
             # connections. Without closing it here, every reload — including
@@ -323,15 +389,22 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     return unload_ok
 
-class BrunataDataUpdateCoordinator(DataUpdateCoordinator):
+class BrunataDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Meter]]):
     """Class to manage fetching Brunata data."""
 
-    def __init__(self, hass: HomeAssistant, client: Client):
+    def __init__(
+        self, hass: HomeAssistant, entry: BrunataConfigEntry, client: Client
+    ) -> None:
         """Initialize."""
         self.client = client
         super().__init__(
             hass,
             _LOGGER,
+            # C5: passed explicitly rather than picked up from the ContextVar.
+            # The implicit lookup only works because the coordinator happens to
+            # be constructed inside async_setup_entry, and it is what lets the
+            # coordinator start the reauth flow on ConfigEntryAuthFailed.
+            config_entry=entry,
             name=DOMAIN,
             # No update_interval: polling is instead driven by an
             # async_track_time_change listener (xx:59:30 every hour, see
@@ -339,6 +412,21 @@ class BrunataDataUpdateCoordinator(DataUpdateCoordinator):
             # time rather than drifting from whenever HA last started or
             # the integration was last reloaded.
         )
+
+    async def _async_setup(self) -> None:
+        """Load one-off data before the first refresh.
+
+        C6: the mapper data is static metadata, so re-fetching it on every
+        hourly poll was one wasted request per hour per user. This hook is run
+        exactly once by async_config_entry_first_refresh(), with the same
+        error handling as a normal update.
+        """
+        _LOGGER.debug("Initializing mappers (once, during setup)")
+        try:
+            await self.client._get_tokens(force=False)
+            await self.client._init_mappers()
+        except _CONNECT_ERRORS as err:
+            raise UpdateFailed(f"Cannot connect to Brunata: {err}") from err
 
     def _handle_connect_error(self, err: Exception):
         """Handle a network-level failure from a single API call.
@@ -375,13 +463,12 @@ class BrunataDataUpdateCoordinator(DataUpdateCoordinator):
         # so it can no longer hit the library's original "await dict" bug in
         # _renew_tokens/_b2c_auth. This try/except is a harmless legacy safety
         # net kept in case a future brunata_api update reintroduces it.
+        #
+        # _init_mappers() is deliberately NOT called here: it loads static
+        # metadata and now runs once from _async_setup().
         try:
-            _LOGGER.debug(
-                "Refreshing tokens (force_relogin=%s) and initializing mappers",
-                force_relogin,
-            )
+            _LOGGER.debug("Refreshing tokens (force_relogin=%s)", force_relogin)
             await self.client._get_tokens(force=force_relogin)
-            await self.client._init_mappers()
         except TypeError as err:
             if "await" in str(err) and "dict" in str(err):
                 _LOGGER.error("Error in brunata-api library: 'object dict can't be used in await expression'. Ensure you have a fixed version of the library or contact the developer.")
