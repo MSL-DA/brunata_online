@@ -294,6 +294,50 @@ async def test_options_flow_turns_debug_logging_back_off(
     assert logging.getLogger("brunata_api").level == logging.NOTSET
 
 
+async def test_credential_fields_use_selectors(hass: HomeAssistant, mock_brunata_client):
+    """The password field must render masked, in both the initial and the
+    reauth form. A bare `str` in the schema gives an ordinary text box, so the
+    password was visible while being typed."""
+    from homeassistant.helpers import selector
+
+    def _field(schema, key):
+        for marker in schema.schema:
+            if marker == key:
+                return schema.schema[marker]
+        raise AssertionError(f"{key} missing from schema")
+
+    def _assert_credential_fields(schema):
+        email = _field(schema, "email")
+        password = _field(schema, "password")
+        assert isinstance(email, selector.TextSelector)
+        assert isinstance(password, selector.TextSelector)
+        assert email.config["type"] == selector.TextSelectorType.EMAIL
+        assert password.config["type"] == selector.TextSelectorType.PASSWORD
+        # Lets password managers offer the stored credentials.
+        assert email.config["autocomplete"] == "username"
+        assert password.config["autocomplete"] == "current-password"
+
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": config_entries.SOURCE_USER}
+    )
+    assert result["step_id"] == "user"
+    _assert_credential_fields(result["data_schema"])
+
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        unique_id="test@example.com",
+        data={"email": "test@example.com", "password": "old_password"},
+    )
+    entry.add_to_hass(hass)
+
+    reauth = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={"source": config_entries.SOURCE_REAUTH, "entry_id": entry.entry_id},
+    )
+    assert reauth["step_id"] == "reauth_confirm"
+    _assert_credential_fields(reauth["data_schema"])
+
+
 async def test_flow_user_normalises_email_for_unique_id(
     hass: HomeAssistant, mock_brunata_client
 ):
