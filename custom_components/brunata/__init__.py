@@ -689,3 +689,4 @@ class BrunataDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Meter]]):
             # surfaced as a visible failure rather than silently falling
             # back to last known values.
             raise UpdateFailed(f"Unexpected error fetching data: {err}") from err
+
