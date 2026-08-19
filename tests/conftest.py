@@ -2,7 +2,7 @@
 import sys
 import types
 from datetime import date
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 # Provide a lightweight local stub for brunata_api so tests can run without the
@@ -50,7 +50,11 @@ def mock_brunata_client():
         
         # Setup default mock behavior
         mock_client._meters = {}
-        
+        # async_unload_entry closes the underlying httpx client, so aclose()
+        # has to be awaitable.
+        mock_client._session = MagicMock()
+        mock_client._session.aclose = AsyncMock()
+
         yield mock_client
 
 @pytest.fixture
