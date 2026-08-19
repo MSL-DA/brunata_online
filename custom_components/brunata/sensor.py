@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import logging
+from datetime import date, datetime
 
 from homeassistant.components.sensor import (
     SensorDeviceClass,
     SensorEntity,
     SensorStateClass,
 )
+from homeassistant.const import UnitOfEnergy, UnitOfVolume
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -32,6 +34,39 @@ RESETTING_METER_TYPES = ("radiator",)
 # Jan 1. A decrease reported on any other date is treated as an API glitch,
 # regardless of its size.
 RESET_WINDOW_MONTH_DAYS = {(12, 31), (1, 1)}
+
+# Brunata reports units as free-form strings whose casing is not guaranteed
+# ("kWh", "KWH", "l", "L", "m3", "m³"). Map them onto Home Assistant's
+# canonical unit constants: a device class combined with a non-canonical unit
+# string is rejected by HA's unit validation, which logs an error and discards
+# the entity's long term statistics. Keys are lowercased and stripped.
+UNIT_MAP: dict[str, str] = {
+    "m3": UnitOfVolume.CUBIC_METERS,
+    "m³": UnitOfVolume.CUBIC_METERS,
+    "l": UnitOfVolume.LITERS,
+    "kwh": UnitOfEnergy.KILO_WATT_HOUR,
+    "mwh": UnitOfEnergy.MEGA_WATT_HOUR,
+}
+
+VOLUME_UNITS = (UnitOfVolume.CUBIC_METERS, UnitOfVolume.LITERS)
+ENERGY_UNITS = (UnitOfEnergy.KILO_WATT_HOUR, UnitOfEnergy.MEGA_WATT_HOUR)
+
+# Unit used for meters that report no unit at all, e.g. heat cost allocators.
+UNITLESS_UNIT = "pts"
+
+
+def _as_iso(value) -> str | None:
+    """Return a reading date as an ISO string.
+
+    The API hands us date objects, while a state restored after a restart
+    yields the string it was serialised as. Normalising here keeps the
+    reading_date attribute a single type across restarts, so templates and
+    automations reading it don't break on reload.
+    """
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
+    return value
+
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -76,26 +111,31 @@ class BrunataSensor(CoordinatorEntity, RestoreEntity, SensorEntity):
         self._attr_translation_key = "consumption"
         self._attr_suggested_object_id = f"brunata_{self._meter_id}_consumption"
 
-        # Handle unit and map m3 to m³
-        raw_unit = meter.meter_unit or ""
-        unit = raw_unit.lower()
-        if unit == "m3":
-            self._attr_native_unit_of_measurement = "m³"
-        elif not unit:
-            # For meters without unit (e.g. radiator meters) we use 'pts' (points)
-            self._attr_native_unit_of_measurement = "pts"
+        # Resolve the reported unit to a canonical Home Assistant unit.
+        raw_unit = (meter.meter_unit or "").strip()
+        meter_type = (meter.meter_type or "").lower()
+        unit = UNIT_MAP.get(raw_unit.lower())
+
+        if unit is not None:
+            self._attr_native_unit_of_measurement = unit
+        elif not raw_unit:
+            # Meters without a unit (e.g. heat cost allocators) report points.
+            self._attr_native_unit_of_measurement = UNITLESS_UNIT
         else:
+            # Unrecognised unit: pass it through unchanged, but deliberately
+            # claim no device class for it — HA would reject the combination.
             self._attr_native_unit_of_measurement = raw_unit
 
-        # Determine device class and icon
-        meter_type = (meter.meter_type or "").lower()
-        if unit in ["m³", "m3", "l"]:
-            if "gas" in meter_type:
+        # Determine device class and icon from the canonical unit.
+        if unit in VOLUME_UNITS:
+            # SensorDeviceClass.GAS only accepts volume units like m³, never
+            # litres, so a litre-reporting gas meter stays on WATER.
+            if "gas" in meter_type and unit == UnitOfVolume.CUBIC_METERS:
                 self._attr_device_class = SensorDeviceClass.GAS
             else:
                 self._attr_device_class = SensorDeviceClass.WATER
             self._attr_icon = "mdi:water"
-        elif unit in ["kwh", "mwh"]:
+        elif unit in ENERGY_UNITS:
             self._attr_device_class = SensorDeviceClass.ENERGY
             self._attr_icon = "mdi:lightning-bolt"
         else:
@@ -141,7 +181,8 @@ class BrunataSensor(CoordinatorEntity, RestoreEntity, SensorEntity):
             self._last_value = float(last_state.state)
         except (TypeError, ValueError):
             return
-        self._last_reading_date = last_state.attributes.get("reading_date")
+        # Already an ISO string here, matching what native_value stores.
+        self._last_reading_date = _as_iso(last_state.attributes.get("reading_date"))
 
     @property
     def native_value(self):
@@ -195,7 +236,7 @@ class BrunataSensor(CoordinatorEntity, RestoreEntity, SensorEntity):
 
             if accept:
                 self._last_value = value
-                self._last_reading_date = reading_date
+                self._last_reading_date = _as_iso(reading_date)
         return self._last_value
 
     @property
