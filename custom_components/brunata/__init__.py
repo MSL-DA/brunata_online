@@ -348,7 +348,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: BrunataConfigEntry) -> b
         """
         hass.async_create_task(coordinator.async_request_refresh())
 
-    # Poll 2 minutes before every new hour (xx:59:30), instead of relying on
+    # Poll 30 seconds before every new hour (xx:59:30), instead of relying on
     # DataUpdateCoordinator's rolling update_interval, which drifts based on
     # whenever HA last started or the integration was last reloaded.
     entry.async_on_unload(
