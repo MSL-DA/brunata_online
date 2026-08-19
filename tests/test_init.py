@@ -57,6 +57,9 @@ async def test_unload_entry(hass: HomeAssistant, mock_brunata_client):
     await hass.async_block_till_done()
 
     assert entry.entry_id not in hass.data[DOMAIN]
+    # The library's httpx client must be closed, or every reload leaks
+    # keep-alive sockets for the lifetime of the process.
+    mock_brunata_client._session.aclose.assert_awaited_once()
 
 
 async def test_coordinator_fetches_meter_data(hass: HomeAssistant, mock_brunata_client, mock_meter):
