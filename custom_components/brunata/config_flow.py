@@ -9,12 +9,11 @@ import voluptuous as vol
 from brunata_api import Client
 
 from homeassistant import config_entries
-from homeassistant.core import HomeAssistant
 from homeassistant.config_entries import ConfigFlowResult, OptionsFlowWithReload
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.data_entry_flow import AbortFlow
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import selector
-from homeassistant.core import callback
 
 from .const import DOMAIN, CONF_EMAIL, CONF_PASSWORD, CONF_DEBUG_LOGGING
 
