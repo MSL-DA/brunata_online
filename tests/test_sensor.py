@@ -42,7 +42,50 @@ async def test_sensor_setup(hass: HomeAssistant, mock_brunata_client, mock_meter
 
     state = hass.states.get(entity_id)
     assert state.attributes["friendly_name"] == "Brunata Heat (12345) Consumption"
-    assert state.attributes["reading_date"] == date(2024, 1, 1)
+    # Always an ISO string, whether the value came from the API or from a
+    # restored state after a restart.
+    assert state.attributes["reading_date"] == "2024-01-01"
+
+
+async def test_sensor_unit_is_normalised(mock_meter):
+    """A unit reported with unexpected casing must still resolve to the
+    canonical Home Assistant unit. Passing the raw string through would give
+    e.g. device_class 'energy' with unit 'KWH', which HA rejects and whose
+    long term statistics are then discarded."""
+    from homeassistant.components.sensor import SensorDeviceClass
+    from homeassistant.const import UnitOfEnergy, UnitOfVolume
+
+    from custom_components.brunata.sensor import BrunataSensor
+
+    coordinator = MagicMock()
+    coordinator.data = {"12345": mock_meter}
+
+    for raw_unit, expected_unit, expected_class in (
+        ("KWH", UnitOfEnergy.KILO_WATT_HOUR, SensorDeviceClass.ENERGY),
+        ("kWh", UnitOfEnergy.KILO_WATT_HOUR, SensorDeviceClass.ENERGY),
+        ("l", UnitOfVolume.LITERS, SensorDeviceClass.WATER),
+        ("m3", UnitOfVolume.CUBIC_METERS, SensorDeviceClass.WATER),
+        ("m³", UnitOfVolume.CUBIC_METERS, SensorDeviceClass.WATER),
+    ):
+        mock_meter.meter_unit = raw_unit
+        with patch(
+            "homeassistant.helpers.update_coordinator.CoordinatorEntity.__init__",
+            return_value=None,
+        ):
+            entity = BrunataSensor(coordinator, mock_meter)
+        assert entity.native_unit_of_measurement == expected_unit
+        assert entity.device_class == expected_class
+
+    # An unrecognised unit is passed through, but must not claim a device
+    # class HA would then reject.
+    mock_meter.meter_unit = "widgets"
+    with patch(
+        "homeassistant.helpers.update_coordinator.CoordinatorEntity.__init__",
+        return_value=None,
+    ):
+        entity = BrunataSensor(coordinator, mock_meter)
+    assert entity.native_unit_of_measurement == "widgets"
+    assert entity.device_class is None
 
 
 async def test_sensor_reset_detection(mock_meter):
