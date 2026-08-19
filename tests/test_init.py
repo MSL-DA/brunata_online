@@ -1,7 +1,7 @@
 """Test Brunata integration setup."""
-import logging
 from unittest.mock import AsyncMock, MagicMock, call, patch
 import pytest
+from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from custom_components.brunata import BrunataDataUpdateCoordinator
@@ -29,8 +29,8 @@ async def test_setup_entry(hass: HomeAssistant, mock_brunata_client):
         assert await hass.config_entries.async_setup(entry.entry_id)
         await hass.async_block_till_done()
 
-    assert DOMAIN in hass.data
-    assert entry.entry_id in hass.data[DOMAIN]
+    # C4: the coordinator lives on the entry, not in hass.data[DOMAIN].
+    assert isinstance(entry.runtime_data, BrunataDataUpdateCoordinator)
 
 async def test_unload_entry(hass: HomeAssistant, mock_brunata_client):
     """Test unloading the integration."""
@@ -56,14 +56,24 @@ async def test_unload_entry(hass: HomeAssistant, mock_brunata_client):
     assert await hass.config_entries.async_unload(entry.entry_id)
     await hass.async_block_till_done()
 
-    assert entry.entry_id not in hass.data[DOMAIN]
+    assert entry.state is ConfigEntryState.NOT_LOADED
     # The library's httpx client must be closed, or every reload leaks
     # keep-alive sockets for the lifetime of the process.
     mock_brunata_client._session.aclose.assert_awaited_once()
 
 
 async def test_coordinator_fetches_meter_data(hass: HomeAssistant, mock_brunata_client, mock_meter):
-    """Test that the coordinator pulls meter data from the API."""
+    """Test that the coordinator pulls meter data from the API.
+
+    _init_mappers() is deliberately not asserted here: it now runs once from
+    _async_setup() during config entry setup, not on every update.
+    """
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={"email": "test@example.com", "password": "password123"},
+    )
+    entry.add_to_hass(hass)
+
     mock_brunata_client._meters = {}
     mock_brunata_client._get_tokens = AsyncMock(return_value=None)
     mock_brunata_client._init_mappers = AsyncMock(return_value=None)
@@ -88,7 +98,7 @@ async def test_coordinator_fetches_meter_data(hass: HomeAssistant, mock_brunata_
     mock_brunata_client.api_wrapper = AsyncMock(return_value=response)
 
     with patch("custom_components.brunata.Meter", return_value=mock_meter):
-        coordinator = BrunataDataUpdateCoordinator(hass, mock_brunata_client)
+        coordinator = BrunataDataUpdateCoordinator(hass, entry, mock_brunata_client)
         meter_data = await coordinator._async_update_data()
 
     assert "12345" in meter_data
@@ -102,6 +112,12 @@ async def test_coordinator_retries_with_fresh_login_after_401_then_succeeds(
     """A 401 with a (locally) still-valid cached token should trigger exactly
     one forced re-login and retry — not an immediate ConfigEntryAuthFailed —
     per https://github.com/MSL-DA/brunata_online 401-after-cached-token report."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={"email": "test@example.com", "password": "password123"},
+    )
+    entry.add_to_hass(hass)
+
     mock_brunata_client._meters = {}
     mock_brunata_client._get_tokens = AsyncMock(return_value=None)
     mock_brunata_client._init_mappers = AsyncMock(return_value=None)
@@ -132,7 +148,7 @@ async def test_coordinator_retries_with_fresh_login_after_401_then_succeeds(
     )
 
     with patch("custom_components.brunata.Meter", return_value=mock_meter):
-        coordinator = BrunataDataUpdateCoordinator(hass, mock_brunata_client)
+        coordinator = BrunataDataUpdateCoordinator(hass, entry, mock_brunata_client)
         meter_data = await coordinator._async_update_data()
 
     assert "12345" in meter_data
@@ -152,6 +168,12 @@ async def test_coordinator_raises_auth_failed_when_fresh_login_still_401(
     the credentials themselves are no longer valid — HA should be told via
     ConfigEntryAuthFailed so it prompts for re-authentication. There must be
     only one retry, not an unbounded loop."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={"email": "test@example.com", "password": "password123"},
+    )
+    entry.add_to_hass(hass)
+
     mock_brunata_client._meters = {}
     mock_brunata_client._get_tokens = AsyncMock(return_value=None)
     mock_brunata_client._init_mappers = AsyncMock(return_value=None)
@@ -160,7 +182,7 @@ async def test_coordinator_raises_auth_failed_when_fresh_login_still_401(
     unauthorized_response.status_code = 401
     mock_brunata_client.api_wrapper = AsyncMock(return_value=unauthorized_response)
 
-    coordinator = BrunataDataUpdateCoordinator(hass, mock_brunata_client)
+    coordinator = BrunataDataUpdateCoordinator(hass, entry, mock_brunata_client)
 
     with pytest.raises(ConfigEntryAuthFailed):
         await coordinator._async_update_data()
