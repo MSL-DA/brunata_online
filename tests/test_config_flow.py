@@ -255,3 +255,73 @@ async def test_options_flow_reloads_entry_and_applies_debug_logging(
     assert entry.state is config_entries.ConfigEntryState.LOADED
     assert logging.getLogger("custom_components.brunata").level == logging.DEBUG
     assert logging.getLogger("brunata_api").level == logging.DEBUG
+
+
+async def test_options_flow_turns_debug_logging_back_off(
+    hass: HomeAssistant, mock_brunata_client
+):
+    """Disabling the option must reset the log level. Setting only the DEBUG
+    case would leave both loggers stuck at DEBUG until the next restart."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            "email": "test@example.com",
+            "password": "password123",
+        },
+        options={CONF_DEBUG_LOGGING: True},
+    )
+    entry.add_to_hass(hass)
+
+    with patch(
+        "custom_components.brunata._check_connectivity",
+        AsyncMock(return_value=True),
+    ), patch(
+        "custom_components.brunata.BrunataDataUpdateCoordinator._async_update_data",
+        return_value={},
+    ):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+        assert logging.getLogger("brunata_api").level == logging.DEBUG
+
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            {CONF_DEBUG_LOGGING: False},
+        )
+        await hass.async_block_till_done()
+
+    assert logging.getLogger("custom_components.brunata").level == logging.NOTSET
+    assert logging.getLogger("brunata_api").level == logging.NOTSET
+
+
+async def test_flow_user_normalises_email_for_unique_id(
+    hass: HomeAssistant, mock_brunata_client
+):
+    """The unique_id must be case-insensitive, otherwise the same account can
+    be added twice with different casing."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        unique_id="test@example.com",
+        data={"email": "test@example.com", "password": "password123"},
+    )
+    entry.add_to_hass(hass)
+
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": config_entries.SOURCE_USER}
+    )
+
+    with patch(
+        "custom_components.brunata.config_flow.validate_input",
+        return_value={"title": "Test@Example.com"},
+    ):
+        result2 = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            {
+                "email": "  Test@Example.COM  ",
+                "password": "password123",
+            },
+        )
+        await hass.async_block_till_done()
+
+    assert result2["type"] == data_entry_flow.FlowResultType.ABORT
+    assert result2["reason"] == "already_configured"
