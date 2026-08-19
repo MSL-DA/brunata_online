@@ -45,8 +45,13 @@ UNIT_MAP: dict[str, str] = {
 VOLUME_UNITS = (UnitOfVolume.CUBIC_METERS, UnitOfVolume.LITERS)
 ENERGY_UNITS = (UnitOfEnergy.KILO_WATT_HOUR, UnitOfEnergy.MEGA_WATT_HOUR)
 
-# Unit used for meters that report no unit at all, e.g. heat cost allocators.
-UNITLESS_UNIT = "pts"
+# Fallback for the rare case where Brunata omits meterUnit entirely. Heat cost
+# allocators — the only meters that could plausibly arrive without a unit —
+# report "units", so that is the sensible guess and keeps such a sensor
+# consistent with its siblings. Note this is only a fallback for a *missing*
+# field: a meter that reports "units" normally takes the pass-through branch
+# below, which deliberately preserves Brunata's own capitalisation.
+FALLBACK_UNIT = "units"
 
 
 def _as_iso(value) -> str | None:
@@ -142,8 +147,8 @@ class BrunataSensor(
         if unit is not None:
             self._attr_native_unit_of_measurement = unit
         elif not raw_unit:
-            # Meters without a unit (e.g. heat cost allocators) report points.
-            self._attr_native_unit_of_measurement = UNITLESS_UNIT
+            # meterUnit missing from the API response — see FALLBACK_UNIT.
+            self._attr_native_unit_of_measurement = FALLBACK_UNIT
         else:
             # Unrecognised unit: pass it through unchanged, but deliberately
             # claim no device class for it — HA would reject the combination.
