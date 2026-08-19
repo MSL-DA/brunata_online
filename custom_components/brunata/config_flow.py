@@ -19,6 +19,12 @@ from .const import DOMAIN, CONF_EMAIL, CONF_PASSWORD, CONF_DEBUG_LOGGING
 
 _LOGGER = logging.getLogger(__name__)
 
+
+def _normalise_email(email: str) -> str:
+    """Return the email in the canonical form used for the entry's unique_id."""
+    return email.strip().lower()
+
+
 async def validate_input(hass: HomeAssistant, data: dict[str, str]) -> dict[str, str]:
     """Validate the user input allows us to connect.
 
@@ -46,7 +52,13 @@ async def validate_input(hass: HomeAssistant, data: dict[str, str]) -> dict[str,
             meters.get("errorCode") is not None
             or meters.get("errorMessage") is not None
         ):
-            _LOGGER.error("Brunata API returned error response during login validation: %s", meters)
+            # Log only the error fields — the full body can carry address and
+            # account details.
+            _LOGGER.error(
+                "Brunata API returned error during login validation: %s %s",
+                meters.get("errorCode"),
+                meters.get("errorMessage"),
+            )
             raise InvalidAuth
 
         if meters:
@@ -68,10 +80,15 @@ class BrunataConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     async def async_step_user(self, user_input=None) -> ConfigFlowResult:
         """Handle the initial step."""
-        _LOGGER.debug("async_step_user called with input: %s", user_input)
+        # Never log user_input itself: it contains the password, and debug logs
+        # are routinely attached to bug reports.
+        _LOGGER.debug("async_step_user called (form submitted: %s)", user_input is not None)
         errors = {}
         if user_input is not None:
-            await self.async_set_unique_id(user_input[CONF_EMAIL])
+            # Normalise before using it as the unique_id, otherwise
+            # "Bruger@example.com" and "bruger@example.com" are treated as two
+            # separate accounts and the duplicate check never fires.
+            await self.async_set_unique_id(_normalise_email(user_input[CONF_EMAIL]))
             self._abort_if_unique_id_configured()
             try:
                 info = await validate_input(self.hass, user_input)
@@ -108,7 +125,10 @@ class BrunataConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             try:
                 await validate_input(self.hass, user_input)
-                await self.async_set_unique_id(user_input[CONF_EMAIL])
+                # Same normalisation as in async_step_user, so re-entering the
+                # correct address with different casing is not rejected as a
+                # different account.
+                await self.async_set_unique_id(_normalise_email(user_input[CONF_EMAIL]))
                 self._abort_if_unique_id_mismatch(reason="wrong_account")
                 _LOGGER.debug("Re-authentication successful for %s", user_input[CONF_EMAIL])
                 return self.async_update_reload_and_abort(
