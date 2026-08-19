@@ -13,6 +13,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.config_entries import ConfigFlowResult, OptionsFlowWithReload
 from homeassistant.data_entry_flow import AbortFlow
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import selector
 from homeassistant.core import callback
 
 from .const import DOMAIN, CONF_EMAIL, CONF_PASSWORD, CONF_DEBUG_LOGGING
@@ -23,6 +24,24 @@ _LOGGER = logging.getLogger(__name__)
 def _normalise_email(email: str) -> str:
     """Return the email in the canonical form used for the entry's unique_id."""
     return email.strip().lower()
+
+
+# A bare `str` in the schema renders as an ordinary text box, so the password
+# was shown in cleartext while being typed and password managers had nothing to
+# latch onto. TextSelector gives the frontend the field type it needs: a masked
+# input for the password and an email keyboard on mobile for the address.
+EMAIL_SELECTOR = selector.TextSelector(
+    selector.TextSelectorConfig(
+        type=selector.TextSelectorType.EMAIL,
+        autocomplete="username",
+    )
+)
+PASSWORD_SELECTOR = selector.TextSelector(
+    selector.TextSelectorConfig(
+        type=selector.TextSelectorType.PASSWORD,
+        autocomplete="current-password",
+    )
+)
 
 
 async def validate_input(hass: HomeAssistant, data: dict[str, str]) -> dict[str, str]:
@@ -106,8 +125,8 @@ class BrunataConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             step_id="user",
             data_schema=vol.Schema(
                 {
-                    vol.Required(CONF_EMAIL): str,
-                    vol.Required(CONF_PASSWORD): str,
+                    vol.Required(CONF_EMAIL): EMAIL_SELECTOR,
+                    vol.Required(CONF_PASSWORD): PASSWORD_SELECTOR,
                 }
             ),
             errors=errors,
@@ -152,8 +171,10 @@ class BrunataConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             step_id="reauth_confirm",
             data_schema=vol.Schema(
                 {
-                    vol.Required(CONF_EMAIL, default=reauth_entry.data.get(CONF_EMAIL)): str,
-                    vol.Required(CONF_PASSWORD): str,
+                    vol.Required(
+                        CONF_EMAIL, default=reauth_entry.data.get(CONF_EMAIL)
+                    ): EMAIL_SELECTOR,
+                    vol.Required(CONF_PASSWORD): PASSWORD_SELECTOR,
                 }
             ),
             errors=errors,
