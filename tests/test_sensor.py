@@ -91,11 +91,39 @@ async def test_sensor_unit_is_normalised(mock_meter):
     assert entity.device_class is None
 
 
+async def test_sensor_allocator_unit_is_passed_through_verbatim(mock_meter):
+    """Heat cost allocators report "units", which has no Home Assistant
+    equivalent and is passed straight through.
+
+    The casing must be preserved exactly as Brunata sends it. Normalising it
+    would change native_unit_of_measurement on existing entities, which Home
+    Assistant treats as a unit change on a TOTAL_INCREASING sensor and which
+    forces users to migrate or discard their long term statistics."""
+    from custom_components.brunata.sensor import FALLBACK_UNIT
+
+    coordinator = MagicMock()
+    coordinator.data = {"12345": mock_meter}
+    mock_meter.meter_type = "Radiator"
+
+    for raw_unit in ("units", "Units"):
+        mock_meter.meter_unit = raw_unit
+        entity = _make_entity(coordinator, mock_meter)
+        assert entity.native_unit_of_measurement == raw_unit
+        assert entity.device_class is None
+
+    # Only a genuinely absent meterUnit falls back to the default.
+    for missing in ("", "   ", None):
+        mock_meter.meter_unit = missing
+        entity = _make_entity(coordinator, mock_meter)
+        assert entity.native_unit_of_measurement == FALLBACK_UNIT
+        assert entity.device_class is None
+
+
 async def test_sensor_reset_detection(mock_meter):
     """Heat cost allocators are zeroed on 1 January, so a decrease at the turn
     of the year is real. A decrease at any other time is an API glitch."""
     mock_meter.meter_type = "Radiator"
-    mock_meter.meter_unit = ""
+    mock_meter.meter_unit = "units"
 
     coordinator = MagicMock()
     coordinator.data = {"12345": mock_meter}
@@ -127,7 +155,7 @@ async def test_sensor_reset_accepted_when_first_reading_arrives_late(mock_meter)
     rejected those, and since the cached value is never lowered the sensor then
     stayed frozen at the pre-reset value for the rest of the year."""
     mock_meter.meter_type = "Radiator"
-    mock_meter.meter_unit = ""
+    mock_meter.meter_unit = "units"
 
     coordinator = MagicMock()
     coordinator.data = {"12345": mock_meter}
