@@ -54,6 +54,14 @@ def mock_brunata_client():
         # has to be awaitable.
         mock_client._session = MagicMock()
         mock_client._session.aclose = AsyncMock()
+        # The coordinator's _async_setup() hook runs on every config entry
+        # setup — even when _async_update_data is patched out — so these have
+        # to be awaitable or setup fails with ConfigEntryNotReady. Individual
+        # tests override them where the call itself is what's being asserted.
+        mock_client._get_tokens = AsyncMock(return_value=True)
+        mock_client._init_mappers = AsyncMock(return_value=None)
+        mock_client.api_wrapper = AsyncMock()
+        mock_client.get_meters = AsyncMock(return_value={})
 
         yield mock_client
 
