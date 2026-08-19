@@ -93,6 +93,62 @@ async def test_coordinator_fetches_meter_data(hass: HomeAssistant, mock_brunata_
     mock_meter.add_reading.assert_called_once_with(api_response[0]["reading"])
 
 
+async def test_coordinator_logs_diagnostic_for_meters_missing_a_reading(
+    hass: HomeAssistant, mock_brunata_client, mock_meter, caplog
+):
+    """Meters that come back without a usable reading should be logged at
+    INFO level individually and summarised per meter type, so a user can
+    confirm from their own logs whether this is systematic for a given
+    meter type (e.g. 'Radiator') rather than random. See conversation about
+    radiator sensors reporting 'unknown' on first login while water
+    sensors don't."""
+    mock_brunata_client._meters = {}
+    mock_brunata_client._get_tokens = AsyncMock(return_value=None)
+    mock_brunata_client._init_mappers = AsyncMock(return_value=None)
+
+    api_response = [
+        {
+            "meter": {
+                "meterId": "11111",
+                "meterNo": "M11111",
+                "meterType": "Radiator",
+                "meterUnit": "",
+                "superAllocationUnit": 1,
+            },
+            "reading": None,
+        },
+        {
+            "meter": {
+                "meterId": "22222",
+                "meterNo": "M22222",
+                "meterType": "Water",
+                "meterUnit": "m3",
+                "superAllocationUnit": 1,
+            },
+            "reading": {"value": 42.0, "readingDate": "2024-01-01"},
+        },
+    ]
+
+    response = MagicMock()
+    response.status_code = 200
+    response.json.return_value = api_response
+    response.text = str(api_response)
+    mock_brunata_client.api_wrapper = AsyncMock(return_value=response)
+
+    with patch("custom_components.brunata.Meter", return_value=mock_meter), caplog.at_level(
+        logging.INFO, logger="custom_components.brunata"
+    ):
+        coordinator = BrunataDataUpdateCoordinator(hass, mock_brunata_client)
+        await coordinator._async_update_data()
+
+    assert "11111" in caplog.text
+    assert "Radiator" in caplog.text
+    assert "no usable reading" in caplog.text
+    assert "missing by meter type" in caplog.text
+    assert "'Radiator': 1" in caplog.text
+    assert "'Water': 1" in caplog.text
+
+
 async def test_coordinator_retries_with_fresh_login_after_401_then_succeeds(
     hass: HomeAssistant, mock_brunata_client, mock_meter
 ):
