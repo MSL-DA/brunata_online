@@ -3,7 +3,10 @@ import logging
 from unittest.mock import AsyncMock, patch
 from homeassistant import config_entries, data_entry_flow
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import selector
 from pytest_homeassistant_custom_component.common import MockConfigEntry
+
+from custom_components.brunata.config_flow import CannotConnect, InvalidAuth
 from custom_components.brunata.const import DOMAIN, CONF_DEBUG_LOGGING
 
 async def test_flow_user_init(hass: HomeAssistant):
@@ -42,8 +45,6 @@ async def test_flow_user_success(hass: HomeAssistant, mock_brunata_client):
 
 async def test_flow_user_invalid_auth(hass: HomeAssistant, mock_brunata_client):
     """Test invalid authentication handling."""
-    from custom_components.brunata.config_flow import InvalidAuth
-
     result = await hass.config_entries.flow.async_init(
         DOMAIN, context={"source": config_entries.SOURCE_USER}
     )
@@ -105,8 +106,6 @@ async def test_flow_reauth(hass: HomeAssistant, mock_brunata_client):
 
 async def test_flow_reauth_invalid_auth(hass: HomeAssistant, mock_brunata_client):
     """Test that invalid credentials during reauth show an error and keep the old data."""
-    from custom_components.brunata.config_flow import InvalidAuth
-
     entry = MockConfigEntry(
         domain=DOMAIN,
         unique_id="test@example.com",
@@ -142,8 +141,6 @@ async def test_flow_reauth_invalid_auth(hass: HomeAssistant, mock_brunata_client
 
 async def test_flow_reauth_cannot_connect(hass: HomeAssistant, mock_brunata_client):
     """Test that a connection error during reauth is shown as cannot_connect, not unknown."""
-    from custom_components.brunata.config_flow import CannotConnect
-
     entry = MockConfigEntry(
         domain=DOMAIN,
         unique_id="test@example.com",
@@ -298,8 +295,6 @@ async def test_credential_fields_use_selectors(hass: HomeAssistant, mock_brunata
     """The password field must render masked, in both the initial and the
     reauth form. A bare `str` in the schema gives an ordinary text box, so the
     password was visible while being typed."""
-    from homeassistant.helpers import selector
-
     def _field(schema, key):
         for marker in schema.schema:
             if marker == key:
