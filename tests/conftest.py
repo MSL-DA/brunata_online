@@ -1,88 +1,53 @@
-"""Fixtures for Brunata integration tests."""
-import sys
-import types
+"""Fixtures for Brunata integration tests.
+
+The brunata_api stub that used to live here is gone: the integration no longer
+depends on an external library, so there is nothing left to stub. Tests now
+patch the integration's own BrunataApiClient, whose surface is small and under
+our control.
+"""
+
 from datetime import date
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
+
 import pytest
 
-# Provide a lightweight local stub for brunata_api so tests can run without the
-# real dependency installed.
-brunata_api = types.ModuleType("brunata_api")
-brunata_api.const = types.ModuleType("brunata_api.const")
-brunata_api.const.API_URL = "https://example.com/api"
-brunata_api.const.METERS_URL = "https://example.com/meters"
+from custom_components.brunata.api import BrunataMeter
 
-class Client:
-    pass
-
-class Meter:
-    def __init__(self, client=None, json_meter=None):
-        self._meter_id = None
-
-    def add_reading(self, reading):
-        pass
-
-class Reading:
-    pass
-
-brunata_api.Client = Client
-brunata_api.Meter = Meter
-brunata_api.Reading = Reading
-
-sys.modules["brunata_api"] = brunata_api
-sys.modules["brunata_api.const"] = brunata_api.const
-
-# Imported after the stub above is injected into sys.modules, so this
-# deliberately breaks the usual import-at-top rule.
-from brunata_api import Meter, Reading  # noqa: E402
 
 @pytest.fixture(autouse=True)
 def auto_enable_custom_integrations(enable_custom_integrations):
     yield
 
+
 @pytest.fixture
 def mock_brunata_client():
-    """Mock a Brunata client."""
+    """Patch the API client in both places the integration constructs one."""
     with (
         patch(
-            "custom_components.brunata.config_flow.Client", autospec=True
-        ) as mock_client_class,
-        patch("custom_components.brunata.Client", autospec=True) as mock_init_client_class,
+            "custom_components.brunata.BrunataApiClient", autospec=True
+        ) as setup_client_class,
+        patch(
+            "custom_components.brunata.config_flow.BrunataApiClient", autospec=True
+        ) as config_flow_client_class,
     ):
+        client = setup_client_class.return_value
+        config_flow_client_class.return_value = client
 
-        mock_client = MagicMock()
-        mock_client_class.return_value = mock_client
-        mock_init_client_class.return_value = mock_client
+        client.async_get_meters = AsyncMock(return_value={})
+        client.async_validate_credentials = AsyncMock(return_value=None)
+        client.async_close = AsyncMock(return_value=None)
 
-        # Setup default mock behavior
-        mock_client._meters = {}
-        # async_unload_entry closes the underlying httpx client, so aclose()
-        # has to be awaitable.
-        mock_client._session = MagicMock()
-        mock_client._session.aclose = AsyncMock()
-        # The coordinator's _async_setup() hook runs on every config entry
-        # setup — even when _async_update_data is patched out — so these have
-        # to be awaitable or setup fails with ConfigEntryNotReady. Individual
-        # tests override them where the call itself is what's being asserted.
-        mock_client._get_tokens = AsyncMock(return_value=True)
-        mock_client._init_mappers = AsyncMock(return_value=None)
-        mock_client.api_wrapper = AsyncMock()
-        mock_client.get_meters = AsyncMock(return_value={})
+        yield client
 
-        yield mock_client
 
 @pytest.fixture
 def mock_meter():
-    """Mock a Brunata meter."""
-    meter = MagicMock(spec=Meter)
-    meter._meter_id = "12345"
-    meter.meter_no = "M12345"
-    meter.meter_type = "Heat"
-    meter.meter_unit = "kWh"
-
-    reading = MagicMock(spec=Reading)
-    reading.value = 100.5
-    reading.date = date(2024, 1, 1)
-
-    meter.latest_reading = reading
-    return meter
+    """A single meter with a reading, as the API layer would return it."""
+    return BrunataMeter(
+        meter_id="12345",
+        meter_no="M12345",
+        meter_type="Heat",
+        unit="kWh",
+        value=100.5,
+        reading_date=date(2024, 1, 1),
+    )
