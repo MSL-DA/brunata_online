@@ -33,7 +33,7 @@ async def test_sensor_setup(hass: HomeAssistant, mock_brunata_client, mock_meter
     entry.add_to_hass(hass)
 
     mock_brunata_client._meters = {"12345": mock_meter}
-    
+
     # Mock DataUpdateCoordinator._async_update_data to return the mock meters
     with patch(
         "custom_components.brunata._check_connectivity",
