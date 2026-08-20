@@ -37,19 +37,17 @@ def test_declared_minimum_is_not_newer_than_the_tested_version():
     )
 
 
-def test_manifest_declares_the_library_logger():
-    """Without this, Home Assistant's built-in debug logging toggle covers only
-    the integration's own logger, not brunata_api's."""
-    assert "brunata_api" in MANIFEST.get("loggers", [])
+def test_no_external_requirements():
+    """The Brunata client is vendored in api.py. Reintroducing an external
+    dependency means reintroducing a third party who can break the integration
+    at runtime — if it is ever added back, pin it exactly and say so here."""
+    assert MANIFEST["requirements"] == []
 
 
-def test_manifest_requirement_is_pinned_exactly():
-    """The integration reaches into brunata_api's private API, so an
-    open-ended requirement would let a breaking release in unannounced."""
-    requirements = MANIFEST["requirements"]
-    assert requirements, "no requirements declared"
-    for requirement in requirements:
-        assert "==" in requirement, f"{requirement} is not pinned to an exact version"
+def test_no_third_party_loggers_declared():
+    """loggers exists to route a dependency's log output through Home
+    Assistant's debug toggle. With no dependency, there is nothing to route."""
+    assert "loggers" not in MANIFEST
 
 
 def test_manifest_and_hacs_agree_on_the_name():
