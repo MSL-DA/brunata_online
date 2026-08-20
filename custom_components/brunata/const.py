@@ -1,6 +1,7 @@
 """Constants for the Brunata integration."""
 
+# CONF_EMAIL and CONF_PASSWORD are imported from homeassistant.const wherever
+# they are used; they are not redefined here.
+
 DOMAIN = "brunata"
-CONF_EMAIL = "email"
-CONF_PASSWORD = "password"
 CONF_DEBUG_LOGGING = "debug_logging"
