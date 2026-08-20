@@ -213,7 +213,8 @@ async def test_options_flow_reloads_entry_and_applies_debug_logging(
 ):
     """Saving the options form should reload the config entry automatically
     (BrunataOptionsFlowHandler subclasses OptionsFlowWithReload — see
-    https://developers.home-assistant.io/docs/core/integration/options_flow/#options-flow-with-automatic-reload)
+    https://developers.home-assistant.io/docs/core/integration/options_flow/
+    #options-flow-with-automatic-reload)
     instead of relying on a hand-rolled entry.add_update_listener(), and the
     resulting reload should pick up the new debug-logging option."""
     entry = MockConfigEntry(
