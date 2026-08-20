@@ -64,6 +64,24 @@ _EXPIRY_MARGIN_SECONDS = 30
 
 REQUEST_TIMEOUT = 15.0
 
+# Brunata's v2 payload identifies the meter type by a numeric code rather than
+# a name; the old library resolved these through a separate mapping call.
+# These two are confirmed against live accounts. Unknown codes are carried
+# through as the raw number and logged, so they can be reported and added here
+# rather than silently producing a device called "4".
+METER_TYPE_NAMES: dict[str, str] = {
+    "1": "Radiator",
+    "2": "Water",
+}
+
+# The v2 payload does not carry meterUnit, so the unit is implied by the meter
+# type. Water meters report cubic metres; heat cost allocators report unitless
+# "units". If a payload ever does carry a unit, that wins over this table.
+UNIT_BY_METER_TYPE: dict[str, str] = {
+    "1": "units",
+    "2": "m³",
+}
+
 
 class BrunataError(Exception):
     """Base class for every error this client raises."""
@@ -115,6 +133,22 @@ def _as_text(raw: Any) -> str:
     if isinstance(raw, str):
         return raw
     return str(raw)
+
+
+def _meter_type_name(raw: Any) -> str:
+    """Resolve Brunata's numeric meter type code to a readable name."""
+    code = _as_text(raw)
+    if not code:
+        return ""
+    name = METER_TYPE_NAMES.get(code)
+    if name is None:
+        _LOGGER.warning(
+            "Unknown Brunata meter type code %r. The device will be named after "
+            "the raw code; please report it so it can be mapped properly.",
+            code,
+        )
+        return code
+    return name
 
 
 def _parse_reading_date(raw: Any) -> date | None:
@@ -479,13 +513,12 @@ def _parse_meters(payload: Any) -> dict[str, BrunataMeter]:
             continue
 
         _LOGGER.debug(
-            "Item %s: meter keys=%s, meterId=%r, superAllocationUnit=%r, "
-            "meterType=%r, meterUnit=%r, has reading=%s",
+            "Item %s: meterId=%r, meterType=%r, superAllocationUnit=%r, "
+            "meterUnit=%r, has reading=%s",
             index,
-            sorted(raw_meter),
             raw_meter.get("meterId"),
-            raw_meter.get("superAllocationUnit"),
             raw_meter.get("meterType"),
+            raw_meter.get("superAllocationUnit"),
             raw_meter.get("meterUnit"),
             isinstance(item.get("reading"), dict),
         )
@@ -504,11 +537,16 @@ def _parse_meters(payload: Any) -> dict[str, BrunataMeter]:
         reading = item.get("reading")
         value = reading.get("value") if isinstance(reading, dict) else None
 
+        type_code = _as_text(raw_meter.get("meterType"))
+
         meters[str(raw_id)] = BrunataMeter(
             meter_id=str(raw_id),
             meter_no=raw_meter.get("meterNo"),
-            meter_type=_as_text(raw_meter.get("meterType")),
-            unit=_as_text(raw_meter.get("meterUnit")),
+            meter_type=_meter_type_name(type_code),
+            unit=(
+                _as_text(raw_meter.get("meterUnit"))
+                or UNIT_BY_METER_TYPE.get(type_code, "")
+            ),
             value=float(value) if value is not None else None,
             reading_date=(
                 _parse_reading_date(reading.get("readingDate"))
