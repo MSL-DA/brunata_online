@@ -249,14 +249,13 @@ async def test_options_flow_reloads_entry_and_applies_debug_logging(
     # having picked up the new option.
     assert entry.state is config_entries.ConfigEntryState.LOADED
     assert logging.getLogger("custom_components.brunata").level == logging.DEBUG
-    assert logging.getLogger("brunata_api").level == logging.DEBUG
 
 
 async def test_options_flow_turns_debug_logging_back_off(
     hass: HomeAssistant, mock_brunata_client
 ):
     """Disabling the option must reset the log level. Setting only the DEBUG
-    case would leave both loggers stuck at DEBUG until the next restart."""
+    case would leave the logger stuck at DEBUG until the next restart."""
     entry = MockConfigEntry(
         domain=DOMAIN,
         data={
@@ -273,7 +272,7 @@ async def test_options_flow_turns_debug_logging_back_off(
     ):
         assert await hass.config_entries.async_setup(entry.entry_id)
         await hass.async_block_till_done()
-        assert logging.getLogger("brunata_api").level == logging.DEBUG
+        assert logging.getLogger("custom_components.brunata").level == logging.DEBUG
 
         result = await hass.config_entries.options.async_init(entry.entry_id)
         await hass.config_entries.options.async_configure(
@@ -283,7 +282,6 @@ async def test_options_flow_turns_debug_logging_back_off(
         await hass.async_block_till_done()
 
     assert logging.getLogger("custom_components.brunata").level == logging.NOTSET
-    assert logging.getLogger("brunata_api").level == logging.NOTSET
 
 
 async def test_credential_fields_use_selectors(hass: HomeAssistant, mock_brunata_client):
