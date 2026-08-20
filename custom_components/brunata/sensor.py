@@ -17,6 +17,7 @@ from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from . import BrunataConfigEntry, BrunataDataUpdateCoordinator
+from .api import BrunataMeter
 from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
@@ -120,11 +121,11 @@ class BrunataSensor(
     """Representation of a Brunata meter."""
 
     def __init__(
-        self, coordinator: BrunataDataUpdateCoordinator, meter
+        self, coordinator: BrunataDataUpdateCoordinator, meter: BrunataMeter
     ) -> None:
         """Initialize the sensor."""
         super().__init__(coordinator)
-        self._meter_id = meter._meter_id
+        self._meter_id = meter.meter_id
         self._attr_unique_id = f"brunata_{self._meter_id}_consumption"
         # Cache the last known good reading so the sensor keeps its value (and
         # stays available) between the infrequent API updates instead of going
@@ -140,8 +141,8 @@ class BrunataSensor(
         self._attr_suggested_object_id = f"brunata_{self._meter_id}_consumption"
 
         # Resolve the reported unit to a canonical Home Assistant unit.
-        raw_unit = (meter.meter_unit or "").strip()
-        meter_type = (meter.meter_type or "").lower()
+        raw_unit = meter.unit.strip()
+        meter_type = meter.meter_type.lower()
         unit = UNIT_MAP.get(raw_unit.lower())
 
         if unit is not None:
@@ -199,7 +200,7 @@ class BrunataSensor(
         The cached value and reading date are plain in-memory attributes, so
         they reset to None whenever this entity is torn down and recreated — a
         HA restart or any reload. available() would then depend entirely on the
-        coordinator already having a fresh meter.latest_reading at the exact
+        coordinator already holding a fresh reading for this meter at the exact
         moment the new entity is created, which is more likely to be
         momentarily empty for meter types that report less often (heat cost
         allocators vs. water). Restoring from HA's own last known state closes
@@ -256,20 +257,15 @@ class BrunataSensor(
         unknown/unavailable and statistics stay intact.
         """
         meter = (self.coordinator.data or {}).get(self._meter_id)
-        reading = getattr(meter, "latest_reading", None)
-        if reading is None:
+        if meter is None or meter.value is None:
             return
 
-        value = reading.value
-        if value is None:
+        if not self._accept_reading(meter.value, meter.reading_date):
             return
 
-        if not self._accept_reading(value, reading.date):
-            return
-
-        self._attr_native_value = value
-        self._last_reading_date = _as_iso(reading.date)
-        self._last_reading_day = _as_date(reading.date)
+        self._attr_native_value = meter.value
+        self._last_reading_date = _as_iso(meter.reading_date)
+        self._last_reading_day = meter.reading_date
 
     def _accept_reading(self, value, reading_date) -> bool:
         """Decide whether a reading should replace the cached value.
