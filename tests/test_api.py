@@ -31,13 +31,23 @@ class FakeResponse:
         return self._json_data
 
 
+METER_TYPES = ["Pulse Collector", "Radiator", "Water", "Energy"]
+MEASUREMENT_UNITS = ["", "units", "m3", "kWh"]
+
+
+def _parse(payload):
+    return _parse_meters(
+        payload, meter_types=METER_TYPES, measurement_units=MEASUREMENT_UNITS
+    )
+
+
 def _meter_item(meter_id="12345", *, super_allocation="HEAT", reading=True, value=42.0):
     item = {
         "meter": {
             "meterId": meter_id,
             "meterNo": f"M{meter_id}",
-            "meterType": "Radiator",
-            "meterUnit": "units",
+            "meterType": 1,
+            "unit": 1,
             "superAllocationUnit": super_allocation,
         }
     }
@@ -96,7 +106,7 @@ def test_successful_payload_is_returned_untouched():
 
 
 def test_parses_meter_and_reading():
-    meters = _parse_meters([_meter_item("abc", value=13.5)])
+    meters = _parse([_meter_item("abc", value=13.5)])
 
     assert set(meters) == {"abc"}
     meter = meters["abc"]
@@ -111,14 +121,14 @@ def test_parses_meter_and_reading():
 def test_meter_without_a_reading_has_no_value():
     """A meter can exist before it has reported. It must still appear, so the
     entity is created and can pick up a value later."""
-    meters = _parse_meters([_meter_item("abc", reading=False)])
+    meters = _parse([_meter_item("abc", reading=False)])
 
     assert meters["abc"].value is None
     assert meters["abc"].reading_date is None
 
 
 def test_meters_without_super_allocation_unit_are_skipped():
-    meters = _parse_meters(
+    meters = _parse(
         [_meter_item("keep"), _meter_item("drop", super_allocation=None)]
     )
     assert set(meters) == {"keep"}
@@ -130,12 +140,12 @@ def test_meter_without_an_id_is_skipped():
     item = _meter_item("x")
     item["meter"]["meterId"] = None
 
-    assert _parse_meters([item]) == {}
+    assert _parse([item]) == {}
 
 
 def test_malformed_entries_are_skipped_not_fatal():
     """One bad row must not cost the user every other meter."""
-    meters = _parse_meters(
+    meters = _parse(
         ["not a dict", {}, {"meter": "not a dict"}, _meter_item("good")]
     )
     assert set(meters) == {"good"}
@@ -145,7 +155,7 @@ def test_unparseable_reading_date_leaves_the_value_intact():
     item = _meter_item("abc")
     item["reading"]["readingDate"] = "not-a-date"
 
-    meter = _parse_meters([item])["abc"]
+    meter = _parse([item])["abc"]
     assert meter.value == 42.0
     assert meter.reading_date is None
 
@@ -154,61 +164,49 @@ def test_timestamp_reading_date_is_accepted():
     item = _meter_item("abc")
     item["reading"]["readingDate"] = "2026-01-01T04:00:00Z"
 
-    assert _parse_meters([item])["abc"].reading_date == date(2026, 1, 1)
+    assert _parse([item])["abc"].reading_date == date(2026, 1, 1)
 
 
 @pytest.mark.parametrize(
-    ("code", "expected_type", "expected_unit"),
-    [(1, "Radiator", "units"), (2, "Water", "m³")],
+    ("type_code", "unit_code", "expected_type", "expected_unit"),
+    [(1, 1, "Radiator", "units"), (2, 2, "Water", "m3")],
 )
-def test_meter_type_code_gives_the_name_and_the_unit(code, expected_type, expected_unit):
-    """The v2 payload carries neither a type name nor a unit, only a numeric
-    type code. Getting the unit wrong is not cosmetic: Home Assistant refuses
-    to continue long term statistics when a sensor's unit changes, so water
-    meters silently stopped recording."""
+def test_codes_are_resolved_through_the_lookup_tables(
+    type_code, unit_code, expected_type, expected_unit
+):
+    """The payload carries indices, not names. Resolving them wrong is not
+    cosmetic: the device is named after the type, and Home Assistant suppresses
+    a sensor's long term statistics when its unit changes, so water meters
+    silently stopped recording."""
     item = _meter_item("abc")
-    item["meter"]["meterType"] = code
-    del item["meter"]["meterUnit"]
+    item["meter"]["meterType"] = type_code
+    item["meter"]["unit"] = unit_code
 
-    meter = _parse_meters([item])["abc"]
+    meter = _parse(item and [item])["abc"]
     assert meter.meter_type == expected_type
     assert meter.unit == expected_unit
 
 
-def test_explicit_unit_in_the_payload_wins():
-    """If Brunata ever does send a unit, it beats the type-derived default —
-    water meters that report litres would otherwise be mislabelled."""
-    item = _meter_item("abc")
-    item["meter"]["meterType"] = 2
-    item["meter"]["meterUnit"] = "l"
-
-    assert _parse_meters([item])["abc"].unit == "l"
-
-
-@pytest.mark.parametrize(("code", "expected"), [(1, "Radiator"), (2, "Water")])
-def test_known_meter_type_codes_are_resolved_to_names(code, expected):
-    """Brunata's v2 payload identifies the meter type by number. The device is
-    named after it, so an unresolved code shows up in the UI as "Device info
-    2 by Brunata"."""
-    item = _meter_item("abc")
-    item["meter"]["meterType"] = code
-
-    assert _parse_meters([item])["abc"].meter_type == expected
-
-
-def test_unknown_meter_codes_do_not_crash():
-    """Passing a numeric code through as-is crashed the whole sensor platform
-    on meter.meter_type.lower(), so every entity was lost — not just the one
-    with the unrecognised code."""
+def test_unknown_codes_fall_back_to_the_raw_value():
+    """An index past the end of the table must not take down the platform —
+    passing a code through as-is once crashed every entity on
+    meter.meter_type.lower(), not just the unrecognised one."""
     item = _meter_item("abc")
     item["meter"]["meterType"] = 99
-    item["meter"]["meterUnit"] = 7
+    item["meter"]["unit"] = 99
 
-    meter = _parse_meters([item])["abc"]
+    meter = _parse([item])["abc"]
     assert meter.meter_type == "99"
-    assert meter.unit == "7"
+    assert meter.unit == "99"
+
+
+def test_missing_lookup_tables_do_not_crash():
+    """If the locale resource ever fails to load, entities should still be
+    created rather than the platform failing outright."""
+    meter = _parse_meters([_meter_item("abc")])["abc"]
+    assert meter.meter_type == "1"
 
 
 def test_non_list_payload_raises_api_error():
     with pytest.raises(BrunataApiError, match="Expected a list"):
-        _parse_meters({"unexpected": True})
+        _parse({"unexpected": True})
