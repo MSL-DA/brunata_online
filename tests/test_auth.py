@@ -100,10 +100,7 @@ class FakeHttpClient:
 
 def make_client(http, *, access_token=None, refresh_token=None, expires_at=0.0):
     """Build a BrunataApiClient wired to a fake HTTP client."""
-    client = BrunataApiClient.__new__(BrunataApiClient)
-    client._email = "user@example.com"
-    client._password = "s3cret"
-    client._client = http
+    client = BrunataApiClient("user@example.com", "s3cret", http)
     client._access_token = access_token
     client._token_type = "Bearer"
     client._refresh_token = refresh_token
