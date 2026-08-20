@@ -6,6 +6,7 @@ import logging
 from datetime import datetime
 
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import CONF_EMAIL, CONF_PASSWORD, Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.event import async_track_time_change
@@ -18,11 +19,11 @@ from .api import (
     BrunataConnectionError,
     BrunataMeter,
 )
-from .const import CONF_DEBUG_LOGGING, CONF_EMAIL, CONF_PASSWORD, DOMAIN
+from .const import CONF_DEBUG_LOGGING, DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS: list[str] = ["sensor"]
+PLATFORMS: list[Platform] = [Platform.SENSOR]
 
 type BrunataConfigEntry = ConfigEntry[BrunataDataUpdateCoordinator]
 
