@@ -86,7 +86,10 @@ async def _login_get_code(session: httpx.AsyncClient, email: str, password: str)
         follow_redirects=False,
     )
     if auth.status_code not in (301, 302, 303, 307, 308):
-        raise RuntimeError(f"credential POST not redirected (status {auth.status_code}) — bad credentials?")
+        raise RuntimeError(
+            f"credential POST not redirected (status {auth.status_code}) "
+            "— bad credentials?"
+        )
     loc = auth.headers.get("Location", "")
     code = parse_qs(urlparse(loc).query).get("code", [None])[0]
     if not code:
@@ -97,7 +100,9 @@ async def _login_get_code(session: httpx.AsyncClient, email: str, password: str)
 async def _test_meters(token_type: str, access_token: str) -> None:
     auth_header = f"{token_type or 'Bearer'} {access_token}"
     print("    aud/scope:", _decode_aud(access_token))
-    async with httpx.AsyncClient(timeout=15, headers={**HEADERS, "Authorization": auth_header}) as s:
+    async with httpx.AsyncClient(
+        timeout=15, headers={**HEADERS, "Authorization": auth_header}
+    ) as s:
         for ver in ("v1", "v2"):
             url = f"{BASE}/online-webservice/{ver}/rest/consumer/meters"
             r = await s.get(url, headers={"Referer": f"{BASE}/react-online/meters-values"})
