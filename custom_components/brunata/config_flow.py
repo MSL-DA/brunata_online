@@ -6,7 +6,6 @@ from collections.abc import Mapping
 from typing import Any
 
 import voluptuous as vol
-from brunata_api import Client
 
 from homeassistant import config_entries
 from homeassistant.config_entries import ConfigFlowResult, OptionsFlowWithReload
@@ -15,6 +14,12 @@ from homeassistant.data_entry_flow import AbortFlow
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import selector
 
+from .api import (
+    BrunataApiClient,
+    BrunataApiError,
+    BrunataAuthError,
+    BrunataConnectionError,
+)
 from .const import DOMAIN, CONF_EMAIL, CONF_PASSWORD, CONF_DEBUG_LOGGING
 
 _LOGGER = logging.getLogger(__name__)
@@ -43,53 +48,30 @@ PASSWORD_SELECTOR = selector.TextSelector(
 )
 
 
-async def validate_input(hass: HomeAssistant, data: dict[str, str]) -> dict[str, str]:
-    """Validate the user input allows us to connect.
+async def validate_input(hass: HomeAssistant, data: dict[str, Any]) -> dict[str, Any]:
+    """Validate the credentials by performing a real login.
 
-    Data has the keys from STEP_USER_DATA_SCHEMA with values provided by the user.
+    Errors are mapped from the API layer's own exception types, so a network
+    problem is reported as one instead of being mistaken for a bad password —
+    which previously sent people off changing credentials that were fine.
     """
-    _LOGGER.debug("Validating input for %s", data[CONF_EMAIL])
-    client = await hass.async_add_executor_job(Client, data[CONF_EMAIL], data[CONF_PASSWORD])
-
+    client = BrunataApiClient(hass, data[CONF_EMAIL], data[CONF_PASSWORD])
     try:
-        # Attempt to fetch meters to validate login
-        _LOGGER.debug("Attempting to validate login by fetching meters for %s", data[CONF_EMAIL])
-        try:
-            meters = await client.get_meters()
-        except UnboundLocalError as err:
-            # brunata_api bug: when the network is unavailable, api_wrapper raises
-            # ConnectError which the library catches internally, but then continues
-            # and tries to use the 'response' variable that was never assigned.
-            # This surfaces as an UnboundLocalError instead of a connection error.
-            if "'response'" in str(err):
-                _LOGGER.error("Cannot connect to Brunata API (network error): %s", err)
-                raise CannotConnect from err
-            raise InvalidAuth from err
-
-        if isinstance(meters, dict) and (
-            meters.get("errorCode") is not None
-            or meters.get("errorMessage") is not None
-        ):
-            # Log only the error fields — the full body can carry address and
-            # account details.
-            _LOGGER.error(
-                "Brunata API returned error during login validation: %s %s",
-                meters.get("errorCode"),
-                meters.get("errorMessage"),
-            )
-            raise InvalidAuth
-
-        if meters:
-            _LOGGER.debug("Login validated, found %s meters", len(meters))
-        else:
-            _LOGGER.warning("Login validated, but no meters found")
-    except (InvalidAuth, CannotConnect):
-        raise
-    except Exception as err:
-        _LOGGER.error("Could not validate Brunata login: %s", err)
+        await client.async_validate_credentials()
+    except BrunataAuthError as err:
         raise InvalidAuth from err
+    except BrunataConnectionError as err:
+        raise CannotConnect from err
+    except BrunataApiError as err:
+        _LOGGER.error("Brunata rejected the login attempt: %s", err)
+        raise CannotConnect from err
+    finally:
+        # The client owns an httpx session; without this every login attempt,
+        # successful or not, leaks one.
+        await client.async_close()
 
-    return {"title": data[CONF_EMAIL]}
+    return {"title": f"Brunata ({data[CONF_EMAIL]})"}
+
 
 class BrunataConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Brunata."""
