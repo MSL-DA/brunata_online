@@ -1,6 +1,6 @@
 """Test Brunata config flow."""
 import logging
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 from homeassistant import config_entries, data_entry_flow
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import selector
@@ -227,9 +227,6 @@ async def test_options_flow_reloads_entry_and_applies_debug_logging(
     entry.add_to_hass(hass)
 
     with patch(
-        "custom_components.brunata._check_connectivity",
-        AsyncMock(return_value=True),
-    ), patch(
         "custom_components.brunata.BrunataDataUpdateCoordinator._async_update_data",
         return_value={},
     ):
@@ -271,9 +268,6 @@ async def test_options_flow_turns_debug_logging_back_off(
     entry.add_to_hass(hass)
 
     with patch(
-        "custom_components.brunata._check_connectivity",
-        AsyncMock(return_value=True),
-    ), patch(
         "custom_components.brunata.BrunataDataUpdateCoordinator._async_update_data",
         return_value={},
     ):
