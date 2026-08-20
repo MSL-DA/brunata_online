@@ -38,10 +38,32 @@ _LOGGER = logging.getLogger(__name__)
 # Brunata retired the v1 data API alongside the Keycloak migration: with a
 # valid token, /online-webservice/v1/rest/consumer/meters answers 401 while v2
 # returns the meter data.
-API_URL = "https://online.brunata.com/online-webservice/v2/rest"
+BASE_URL = "https://online.brunata.com"
+API_URL = f"{BASE_URL}/online-webservice/v2/rest"
 
-# Sent as the Referer on API calls, matching what the web app does.
-METERS_URL = "https://online.brunata.com/consumption-overview"
+# Sent as the Referer on API calls. Taken from brunata-api 0.1.6, which is what
+# the endpoints were verified against.
+METERS_URL = f"{BASE_URL}/react-online/meters-values"
+
+# Brunata's API is fronted by bot protection, so the requests are made to look
+# like the web app's. brunata-api randomised the Edge version through
+# fake_useragent; a fixed, plausible string avoids that dependency.
+DEFAULT_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0"
+    ),
+    "Sec-Ch-Ua": (
+        '"Not/A)Brand";v="8", "Chromium";v="130", "Microsoft Edge";v="130"'
+    ),
+    "Sec-Ch-Ua-Mobile": "?0",
+    "Sec-Ch-Ua-Platform": '"Windows"',
+    "Accept-Language": "en",
+}
+
+# The locale resource carries the lookup tables that turn the numeric codes in
+# the meter payload into names and units.
+LOCALE = "en"
 
 KC_REALM_BASE = (
     "https://online.brunata.com/iam/realms/online-prod/protocol/openid-connect"
@@ -63,24 +85,6 @@ _REDIRECT_STATUSES = (301, 302, 303, 307, 308)
 _EXPIRY_MARGIN_SECONDS = 30
 
 REQUEST_TIMEOUT = 15.0
-
-# Brunata's v2 payload identifies the meter type by a numeric code rather than
-# a name; the old library resolved these through a separate mapping call.
-# These two are confirmed against live accounts. Unknown codes are carried
-# through as the raw number and logged, so they can be reported and added here
-# rather than silently producing a device called "4".
-METER_TYPE_NAMES: dict[str, str] = {
-    "1": "Radiator",
-    "2": "Water",
-}
-
-# The v2 payload does not carry meterUnit, so the unit is implied by the meter
-# type. Water meters report cubic metres; heat cost allocators report unitless
-# "units". If a payload ever does carry a unit, that wins over this table.
-UNIT_BY_METER_TYPE: dict[str, str] = {
-    "1": "units",
-    "2": "m³",
-}
 
 
 class BrunataError(Exception):
@@ -135,20 +139,28 @@ def _as_text(raw: Any) -> str:
     return str(raw)
 
 
-def _meter_type_name(raw: Any) -> str:
-    """Resolve Brunata's numeric meter type code to a readable name."""
+def _lookup(table: list[str], raw: Any, what: str) -> str:
+    """Resolve a numeric code against one of the locale lookup tables.
+
+    The meter payload carries indices, not names: meterType 2 means whatever
+    sits at index 2 of the meterType table. An unresolved code falls back to
+    the raw number so the entity is still created, rather than taking down the
+    whole platform.
+    """
     code = _as_text(raw)
     if not code:
         return ""
-    name = METER_TYPE_NAMES.get(code)
-    if name is None:
+    try:
+        return table[int(code)]
+    except (ValueError, IndexError):
         _LOGGER.warning(
-            "Unknown Brunata meter type code %r. The device will be named after "
-            "the raw code; please report it so it can be mapped properly.",
+            "Brunata %s code %r is not in the lookup table (%s entries). "
+            "Falling back to the raw code.",
+            what,
             code,
+            len(table),
         )
         return code
-    return name
 
 
 def _parse_reading_date(raw: Any) -> date | None:
@@ -169,6 +181,9 @@ class BrunataApiClient:
         self._email = email
         self._password = password
         self._client = http_client
+
+        self._meter_types: list[str] = []
+        self._measurement_units: list[str] = []
 
         self._access_token: str | None = None
         self._token_type: str = "Bearer"
@@ -192,7 +207,11 @@ class BrunataApiClient:
         the event loop.
         """
         http_client = await hass.async_add_executor_job(
-            partial(httpx.AsyncClient, timeout=httpx.Timeout(REQUEST_TIMEOUT))
+            partial(
+                httpx.AsyncClient,
+                timeout=httpx.Timeout(REQUEST_TIMEOUT),
+                headers=DEFAULT_HEADERS,
+            )
         )
         return cls(email, password, http_client)
 
@@ -221,6 +240,8 @@ class BrunataApiClient:
         Meters are fetched without a start date: with one, Brunata returns the
         first measurement of the period rather than the most recent.
         """
+        await self._async_ensure_lookup_tables()
+
         response = await self._async_get_meters_once(force_login=False)
 
         # A cached token can look locally valid while the server no longer
@@ -243,7 +264,43 @@ class BrunataApiClient:
                     "fresh login. Check credentials and account access."
                 )
 
-        return _parse_meters(_payload(response))
+        return _parse_meters(
+            _payload(response),
+            meter_types=self._meter_types,
+            measurement_units=self._measurement_units,
+        )
+
+    async def _async_ensure_lookup_tables(self) -> None:
+        """Fetch the locale resource once per client.
+
+        The meter payload identifies type and unit by index into these tables,
+        so without them a water meter's unit is unknown — which Home Assistant
+        treats as a unit change and responds to by suppressing the sensor's
+        long term statistics.
+        """
+        if self._meter_types:
+            return
+
+        await self._async_login()
+        response = await self._async_request(
+            "GET",
+            f"{API_URL}/locales/{LOCALE}/common",
+            headers={
+                "Authorization": f"{self._token_type} {self._access_token}",
+                "Referer": METERS_URL,
+            },
+        )
+        mappers = (_payload(response) or {}).get("mappers")
+        if not isinstance(mappers, dict):
+            raise BrunataApiError("Brunata locale resource carried no mappers")
+
+        self._meter_types = list(mappers.get("meterType") or [])
+        self._measurement_units = list(mappers.get("measurementUnit") or [])
+        _LOGGER.debug(
+            "Loaded Brunata lookup tables: %s meter types, %s units",
+            len(self._meter_types),
+            len(self._measurement_units),
+        )
 
     # --- HTTP ---------------------------------------------------------------
 
@@ -485,7 +542,12 @@ def _payload(response: httpx.Response) -> Any:
     return payload
 
 
-def _parse_meters(payload: Any) -> dict[str, BrunataMeter]:
+def _parse_meters(
+    payload: Any,
+    *,
+    meter_types: list[str] | None = None,
+    measurement_units: list[str] | None = None,
+) -> dict[str, BrunataMeter]:
     """Turn a /consumer/meters payload into meters keyed by ID."""
     if not isinstance(payload, list):
         raise BrunataApiError(
@@ -514,12 +576,12 @@ def _parse_meters(payload: Any) -> dict[str, BrunataMeter]:
 
         _LOGGER.debug(
             "Item %s: meterId=%r, meterType=%r, superAllocationUnit=%r, "
-            "meterUnit=%r, has reading=%s",
+            "unit=%r, has reading=%s",
             index,
             raw_meter.get("meterId"),
             raw_meter.get("meterType"),
             raw_meter.get("superAllocationUnit"),
-            raw_meter.get("meterUnit"),
+            raw_meter.get("unit"),
             isinstance(item.get("reading"), dict),
         )
 
@@ -537,15 +599,15 @@ def _parse_meters(payload: Any) -> dict[str, BrunataMeter]:
         reading = item.get("reading")
         value = reading.get("value") if isinstance(reading, dict) else None
 
-        type_code = _as_text(raw_meter.get("meterType"))
-
         meters[str(raw_id)] = BrunataMeter(
             meter_id=str(raw_id),
             meter_no=raw_meter.get("meterNo"),
-            meter_type=_meter_type_name(type_code),
-            unit=(
-                _as_text(raw_meter.get("meterUnit"))
-                or UNIT_BY_METER_TYPE.get(type_code, "")
+            meter_type=_lookup(
+                meter_types or [], raw_meter.get("meterType"), "meter type"
+            ),
+            # The unit index lives in "unit", not "meterUnit".
+            unit=_lookup(
+                measurement_units or [], raw_meter.get("unit"), "measurement unit"
             ),
             value=float(value) if value is not None else None,
             reading_date=(
