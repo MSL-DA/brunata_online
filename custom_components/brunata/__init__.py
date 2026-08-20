@@ -39,7 +39,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: BrunataConfigEntry) -> b
     if debug_logging:
         _LOGGER.debug("Debug logging enabled via settings")
 
-    client = BrunataApiClient(
+    client = await BrunataApiClient.async_create(
         hass, entry.data[CONF_EMAIL], entry.data[CONF_PASSWORD]
     )
     coordinator = BrunataDataUpdateCoordinator(hass, entry, client)
