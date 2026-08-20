@@ -209,11 +209,10 @@ async def test_sensor_restores_last_state_before_coordinator_has_data(
     )
     entry.add_to_hass(hass)
 
-    # Simulate no fresh reading being available yet at startup.
-    coordinator.data = {"12345": replace(mock_meter, value=None, reading_date=None)}
-
+    # No fresh reading available yet at startup, so only the restored state
+    # can give the entity a value.
     mock_brunata_client.async_get_meters = AsyncMock(
-        return_value={"12345": mock_meter}
+        return_value={"12345": replace(mock_meter, value=None, reading_date=None)}
     )
 
     await hass.config_entries.async_setup(entry.entry_id)
