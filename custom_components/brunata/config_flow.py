@@ -55,7 +55,9 @@ async def validate_input(hass: HomeAssistant, data: dict[str, Any]) -> dict[str,
     problem is reported as one instead of being mistaken for a bad password —
     which previously sent people off changing credentials that were fine.
     """
-    client = BrunataApiClient(hass, data[CONF_EMAIL], data[CONF_PASSWORD])
+    client = await BrunataApiClient.async_create(
+        hass, data[CONF_EMAIL], data[CONF_PASSWORD]
+    )
     try:
         await client.async_validate_credentials()
     except BrunataAuthError as err:
