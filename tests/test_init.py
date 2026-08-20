@@ -1,5 +1,6 @@
 """Test Brunata integration setup and teardown."""
 
+import logging
 from unittest.mock import AsyncMock, patch
 
 from homeassistant.config_entries import ConfigEntryState
@@ -88,8 +89,6 @@ async def test_debug_logging_option_is_applied_on_setup(
 ):
     """The option is read on every setup, which is how OptionsFlowWithReload
     makes it take effect without a restart."""
-    import logging
-
     entry = MockConfigEntry(
         domain=DOMAIN,
         data={"email": "test@example.com", "password": "password123"},
