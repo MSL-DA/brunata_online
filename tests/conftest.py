@@ -32,6 +32,9 @@ def mock_brunata_client():
     ):
         client = setup_client_class.return_value
         config_flow_client_class.return_value = client
+        # The integration builds its client through the async factory.
+        setup_client_class.async_create = AsyncMock(return_value=client)
+        config_flow_client_class.async_create = AsyncMock(return_value=client)
 
         client.async_get_meters = AsyncMock(return_value={})
         client.async_validate_credentials = AsyncMock(return_value=None)
