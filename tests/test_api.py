@@ -157,6 +157,19 @@ def test_timestamp_reading_date_is_accepted():
     assert _parse_meters([item])["abc"].reading_date == date(2026, 1, 1)
 
 
+def test_numeric_meter_codes_do_not_crash():
+    """Brunata's v2 payload returns meterType and meterUnit as numeric codes.
+    Passing them through as-is crashed the whole sensor platform on
+    meter.meter_type.lower(), so every entity was lost, not just the naming."""
+    item = _meter_item("abc")
+    item["meter"]["meterType"] = 3
+    item["meter"]["meterUnit"] = 7
+
+    meter = _parse_meters([item])["abc"]
+    assert meter.meter_type == "3"
+    assert meter.unit == "7"
+
+
 def test_non_list_payload_raises_api_error():
     with pytest.raises(BrunataApiError, match="Expected a list"):
         _parse_meters({"unexpected": True})
