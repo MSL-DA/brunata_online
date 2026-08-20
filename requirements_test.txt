@@ -1,3 +1,5 @@
-pytest==9.0.3
-pytest-asyncio==1.4.0
+# pytest-homeassistant-custom-component pins the exact pytest and
+# pytest-asyncio versions that the matching Home Assistant release is tested
+# against. Pinning those separately here only creates resolver conflicts the
+# next time it bumps them, so this is deliberately the single pin.
 pytest-homeassistant-custom-component==0.13.356

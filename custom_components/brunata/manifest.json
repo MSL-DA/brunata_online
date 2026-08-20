@@ -1,13 +1,17 @@
 {
   "domain": "brunata",
   "name": "Brunata",
-  "after_dependencies": ["network"],
-  "codeowners": ["@MSL-DA"],
+  "after_dependencies": [
+    "network"
+  ],
+  "codeowners": [
+    "@MSL-DA"
+  ],
   "config_flow": true,
   "documentation": "https://github.com/MSL-DA/brunata_online",
-  "integration_type": "service",
+  "integration_type": "hub",
   "iot_class": "cloud_polling",
   "issue_tracker": "https://github.com/MSL-DA/brunata_online/issues",
-  "requirements": ["brunata-api==0.1.6"],
-  "version": "1.1.8"
+  "requirements": [],
+  "version": "1.1.9"
 }

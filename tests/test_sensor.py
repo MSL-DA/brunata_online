@@ -1,15 +1,19 @@
 """Test Brunata sensor."""
 from unittest.mock import patch, MagicMock, AsyncMock
 from homeassistant.core import HomeAssistant, State
-from homeassistant.components.sensor import DOMAIN as SENSOR_DOMAIN
+from homeassistant.components.sensor import DOMAIN as SENSOR_DOMAIN, SensorDeviceClass
+from homeassistant.const import UnitOfEnergy, UnitOfVolume
 from datetime import date
-from custom_components.brunata.const import DOMAIN
+
 from pytest_homeassistant_custom_component.common import MockConfigEntry, mock_restore_cache
+
+from dataclasses import replace
+
+from custom_components.brunata.const import DOMAIN
+from custom_components.brunata.sensor import BrunataSensor, FALLBACK_UNIT
 
 def _make_entity(coordinator, meter):
     """Build a BrunataSensor without going through CoordinatorEntity.__init__."""
-    from custom_components.brunata.sensor import BrunataSensor
-
     with patch(
         "homeassistant.helpers.update_coordinator.CoordinatorEntity.__init__",
         return_value=None,
@@ -30,18 +34,12 @@ async def test_sensor_setup(hass: HomeAssistant, mock_brunata_client, mock_meter
     )
     entry.add_to_hass(hass)
 
-    mock_brunata_client._meters = {"12345": mock_meter}
-    
-    # Mock DataUpdateCoordinator._async_update_data to return the mock meters
-    with patch(
-        "custom_components.brunata._check_connectivity",
-        AsyncMock(return_value=True),
-    ), patch(
-        "custom_components.brunata.BrunataDataUpdateCoordinator._async_update_data",
-        return_value={"12345": mock_meter},
-    ):
-        await hass.config_entries.async_setup(entry.entry_id)
-        await hass.async_block_till_done()
+    mock_brunata_client.async_get_meters = AsyncMock(
+        return_value={"12345": mock_meter}
+    )
+
+    await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
 
     entity_id = next(
         (
@@ -65,9 +63,6 @@ async def test_sensor_unit_is_normalised(mock_meter):
     canonical Home Assistant unit. Passing the raw string through would give
     e.g. device_class 'energy' with unit 'KWH', which HA rejects and whose
     long term statistics are then discarded."""
-    from homeassistant.components.sensor import SensorDeviceClass
-    from homeassistant.const import UnitOfEnergy, UnitOfVolume
-
     coordinator = MagicMock()
     coordinator.data = {"12345": mock_meter}
 
@@ -78,44 +73,62 @@ async def test_sensor_unit_is_normalised(mock_meter):
         ("m3", UnitOfVolume.CUBIC_METERS, SensorDeviceClass.WATER),
         ("m³", UnitOfVolume.CUBIC_METERS, SensorDeviceClass.WATER),
     ):
-        mock_meter.meter_unit = raw_unit
-        entity = _make_entity(coordinator, mock_meter)
+        entity = _make_entity(coordinator, replace(mock_meter, unit=raw_unit))
         assert entity.native_unit_of_measurement == expected_unit
         assert entity.device_class == expected_class
 
     # An unrecognised unit is passed through, but must not claim a device
     # class HA would then reject.
-    mock_meter.meter_unit = "widgets"
-    entity = _make_entity(coordinator, mock_meter)
+    entity = _make_entity(coordinator, replace(mock_meter, unit="widgets"))
     assert entity.native_unit_of_measurement == "widgets"
     assert entity.device_class is None
+
+
+async def test_sensor_allocator_unit_is_passed_through_verbatim(mock_meter):
+    """Heat cost allocators report "units", which has no Home Assistant
+    equivalent and is passed straight through.
+
+    The casing must be preserved exactly as Brunata sends it. Normalising it
+    would change native_unit_of_measurement on existing entities, which Home
+    Assistant treats as a unit change on a TOTAL_INCREASING sensor and which
+    forces users to migrate or discard their long term statistics."""
+    coordinator = MagicMock()
+    coordinator.data = {"12345": mock_meter}
+    mock_meter = replace(mock_meter, meter_type="Radiator")
+
+    for raw_unit in ("units", "Units"):
+        entity = _make_entity(coordinator, replace(mock_meter, unit=raw_unit))
+        assert entity.native_unit_of_measurement == raw_unit
+        assert entity.device_class is None
+
+    # Only a genuinely absent meterUnit falls back to the default.
+    for missing in ("", "   ", None):
+        entity = _make_entity(coordinator, replace(mock_meter, unit=missing or ""))
+        assert entity.native_unit_of_measurement == FALLBACK_UNIT
+        assert entity.device_class is None
 
 
 async def test_sensor_reset_detection(mock_meter):
     """Heat cost allocators are zeroed on 1 January, so a decrease at the turn
     of the year is real. A decrease at any other time is an API glitch."""
-    mock_meter.meter_type = "Radiator"
-    mock_meter.meter_unit = ""
+    mock_meter = replace(mock_meter, meter_type="Radiator", unit="units")
 
     coordinator = MagicMock()
     coordinator.data = {"12345": mock_meter}
     entity = _make_entity(coordinator, mock_meter)
 
     # Last reading of the accounting year.
-    mock_meter.latest_reading.value = 4820.0
-    mock_meter.latest_reading.date = date(2024, 12, 20)
+    coordinator.data = {"12345": replace(mock_meter, value=4820.0, reading_date=date(2024, 12, 20))}
     entity._apply_latest_reading()
     assert entity.native_value == 4820.0
 
     # Decrease outside the reset window — must be rejected as a glitch.
-    mock_meter.latest_reading.value = 10.0
-    mock_meter.latest_reading.date = date(2024, 6, 15)
+    coordinator.data = {"12345": replace(mock_meter, value=10.0, reading_date=date(2024, 6, 15))}
     entity._apply_latest_reading()
     assert entity.native_value == 4820.0
 
     # The 1 January reset — must be accepted.
-    mock_meter.latest_reading.value = 0.0
-    mock_meter.latest_reading.date = date(2025, 1, 1)
+    coordinator.data = {"12345": replace(mock_meter, value=0.0, reading_date=date(2025, 1, 1))}
     entity._apply_latest_reading()
     assert entity.native_value == 0.0
     assert entity.extra_state_attributes["reading_date"] == "2025-01-01"
@@ -126,30 +139,25 @@ async def test_sensor_reset_accepted_when_first_reading_arrives_late(mock_meter)
     reset is not necessarily dated 1 January. Matching only 31 Dec / 1 Jan
     rejected those, and since the cached value is never lowered the sensor then
     stayed frozen at the pre-reset value for the rest of the year."""
-    mock_meter.meter_type = "Radiator"
-    mock_meter.meter_unit = ""
+    mock_meter = replace(mock_meter, meter_type="Radiator", unit="units")
 
     coordinator = MagicMock()
     coordinator.data = {"12345": mock_meter}
 
     # Mid-January: inside the December/January window.
     entity = _make_entity(coordinator, mock_meter)
-    mock_meter.latest_reading.value = 4820.0
-    mock_meter.latest_reading.date = date(2024, 12, 20)
+    coordinator.data = {"12345": replace(mock_meter, value=4820.0, reading_date=date(2024, 12, 20))}
     entity._apply_latest_reading()
-    mock_meter.latest_reading.value = 11.0
-    mock_meter.latest_reading.date = date(2025, 1, 17)
+    coordinator.data = {"12345": replace(mock_meter, value=11.0, reading_date=date(2025, 1, 17))}
     entity._apply_latest_reading()
     assert entity.native_value == 11.0
 
     # February: outside the window, but the calendar year has advanced since
     # the last accepted reading, which is the reliable signal.
     entity = _make_entity(coordinator, mock_meter)
-    mock_meter.latest_reading.value = 4820.0
-    mock_meter.latest_reading.date = date(2024, 12, 20)
+    coordinator.data = {"12345": replace(mock_meter, value=4820.0, reading_date=date(2024, 12, 20))}
     entity._apply_latest_reading()
-    mock_meter.latest_reading.value = 11.0
-    mock_meter.latest_reading.date = date(2025, 2, 3)
+    coordinator.data = {"12345": replace(mock_meter, value=11.0, reading_date=date(2025, 2, 3))}
     entity._apply_latest_reading()
     assert entity.native_value == 11.0
 
@@ -157,25 +165,21 @@ async def test_sensor_reset_accepted_when_first_reading_arrives_late(mock_meter)
 async def test_sensor_decrease_never_accepted_for_non_resetting_meter(mock_meter):
     """Water and energy meters are never reset, so a decrease is always a
     glitch — including in January, where a radiator meter would accept it."""
-    mock_meter.meter_type = "Water"
-    mock_meter.meter_unit = "m3"
+    mock_meter = replace(mock_meter, meter_type="Water", unit="m3")
 
     coordinator = MagicMock()
     coordinator.data = {"12345": mock_meter}
     entity = _make_entity(coordinator, mock_meter)
 
-    mock_meter.latest_reading.value = 312.5
-    mock_meter.latest_reading.date = date(2025, 1, 2)
+    coordinator.data = {"12345": replace(mock_meter, value=312.5, reading_date=date(2025, 1, 2))}
     entity._apply_latest_reading()
     assert entity.native_value == 312.5
 
-    mock_meter.latest_reading.value = 0.0
-    mock_meter.latest_reading.date = date(2025, 1, 3)
+    coordinator.data = {"12345": replace(mock_meter, value=0.0, reading_date=date(2025, 1, 3))}
     entity._apply_latest_reading()
     assert entity.native_value == 312.5
 
-    mock_meter.latest_reading.value = 313.0
-    mock_meter.latest_reading.date = date(2025, 1, 4)
+    coordinator.data = {"12345": replace(mock_meter, value=313.0, reading_date=date(2025, 1, 4))}
     entity._apply_latest_reading()
     assert entity.native_value == 313.0
 
@@ -205,19 +209,14 @@ async def test_sensor_restores_last_state_before_coordinator_has_data(
     )
     entry.add_to_hass(hass)
 
-    mock_brunata_client._meters = {"12345": mock_meter}
-    # Simulate no fresh reading being available yet at startup.
-    mock_meter.latest_reading = None
+    # No fresh reading available yet at startup, so only the restored state
+    # can give the entity a value.
+    mock_brunata_client.async_get_meters = AsyncMock(
+        return_value={"12345": replace(mock_meter, value=None, reading_date=None)}
+    )
 
-    with patch(
-        "custom_components.brunata._check_connectivity",
-        AsyncMock(return_value=True),
-    ), patch(
-        "custom_components.brunata.BrunataDataUpdateCoordinator._async_update_data",
-        return_value={"12345": mock_meter},
-    ):
-        await hass.config_entries.async_setup(entry.entry_id)
-        await hass.async_block_till_done()
+    await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
 
     state = hass.states.get(entity_id)
     assert state is not None
@@ -232,7 +231,7 @@ async def test_sensor_restore_edge_cases(mock_meter):
     coordinator = MagicMock()
     coordinator.data = {"12345": mock_meter}
     # No fresh reading, so only the restored state can set the value.
-    mock_meter.latest_reading = None
+    coordinator.data = {"12345": replace(mock_meter, value=None, reading_date=None)}
 
     async def _restore(entity, last_state):
         with patch(
