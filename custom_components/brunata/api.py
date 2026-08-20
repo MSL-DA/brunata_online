@@ -24,6 +24,7 @@ import re
 import secrets
 import time
 from dataclasses import dataclass
+from functools import partial
 from datetime import date
 from typing import Any
 from urllib.parse import parse_qs, urlparse
@@ -31,7 +32,6 @@ from urllib.parse import parse_qs, urlparse
 import httpx
 
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.httpx_client import create_async_httpx_client
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -102,6 +102,21 @@ class BrunataMeter:
     reading_date: date | None = None
 
 
+def _as_text(raw: Any) -> str:
+    """Coerce a field to text.
+
+    Brunata's v2 payload returns meterType and meterUnit as numeric codes,
+    which the old library resolved to names through a separate mapping call.
+    Until that mapping is reimplemented, the code is carried through as text so
+    the entity is still created rather than crashing the whole platform setup.
+    """
+    if raw is None:
+        return ""
+    if isinstance(raw, str):
+        return raw
+    return str(raw)
+
+
 def _parse_reading_date(raw: Any) -> date | None:
     """Parse Brunata's reading date, tolerating a full timestamp."""
     if isinstance(raw, str):
@@ -115,24 +130,37 @@ def _parse_reading_date(raw: Any) -> date | None:
 class BrunataApiClient:
     """Talks to Brunata Online on behalf of one account."""
 
-    def __init__(self, hass: HomeAssistant, email: str, password: str) -> None:
-        """Set up a client with its own cookie jar and connection pool.
-
-        create_async_httpx_client builds the SSL context in the executor, so
-        this is safe to call from the event loop, and registers the client to
-        be closed when Home Assistant stops.
-        """
+    def __init__(self, email: str, password: str, http_client: httpx.AsyncClient) -> None:
+        """Use async_create() instead; it builds the HTTP client correctly."""
         self._email = email
         self._password = password
-        self._client = create_async_httpx_client(
-            hass,
-            timeout=httpx.Timeout(REQUEST_TIMEOUT),
-        )
+        self._client = http_client
 
         self._access_token: str | None = None
         self._token_type: str = "Bearer"
         self._refresh_token: str | None = None
         self._expires_at: float = 0.0
+
+    @classmethod
+    async def async_create(
+        cls, hass: HomeAssistant, email: str, password: str
+    ) -> BrunataApiClient:
+        """Build a client with its own cookie jar and connection pool.
+
+        Deliberately not homeassistant.helpers.httpx_client: that returns a
+        client Home Assistant owns and closes at shutdown, and it warns when an
+        integration closes it. Since we hold Keycloak session cookies and a
+        bearer token, and want them gone the moment the config entry unloads,
+        we own the client ourselves.
+
+        httpx.AsyncClient loads the certificate store from disk when it builds
+        its SSL context, so it is constructed in the executor rather than on
+        the event loop.
+        """
+        http_client = await hass.async_add_executor_job(
+            partial(httpx.AsyncClient, timeout=httpx.Timeout(REQUEST_TIMEOUT))
+        )
+        return cls(email, password, http_client)
 
     async def async_close(self) -> None:
         """Close the underlying HTTP client.
@@ -430,22 +458,47 @@ def _parse_meters(payload: Any) -> dict[str, BrunataMeter]:
             f"Expected a list of meters, got {type(payload).__name__}"
         )
 
+    # Structural diagnostics only — no addresses, names or readings are logged.
+    # This distinguishes "the API returned nothing" from "everything was
+    # filtered out", which have completely different causes.
+    _LOGGER.debug("Brunata returned %s raw item(s) from /consumer/meters", len(payload))
+
     meters: dict[str, BrunataMeter] = {}
-    for item in payload:
+    for index, item in enumerate(payload):
         if not isinstance(item, dict):
+            _LOGGER.debug("Item %s skipped: not an object (%s)", index, type(item).__name__)
             continue
 
         raw_meter = item.get("meter")
         if not isinstance(raw_meter, dict):
+            _LOGGER.debug(
+                "Item %s skipped: no 'meter' object. Keys present: %s",
+                index,
+                sorted(item),
+            )
             continue
+
+        _LOGGER.debug(
+            "Item %s: meter keys=%s, meterId=%r, superAllocationUnit=%r, "
+            "meterType=%r, meterUnit=%r, has reading=%s",
+            index,
+            sorted(raw_meter),
+            raw_meter.get("meterId"),
+            raw_meter.get("superAllocationUnit"),
+            raw_meter.get("meterType"),
+            raw_meter.get("meterUnit"),
+            isinstance(item.get("reading"), dict),
+        )
 
         # Meters without a superAllocationUnit are typically inactive or
         # internal devices.
         if raw_meter.get("superAllocationUnit") is None:
+            _LOGGER.debug("Item %s skipped: superAllocationUnit is null", index)
             continue
 
         raw_id = raw_meter.get("meterId")
         if raw_id is None:
+            _LOGGER.debug("Item %s skipped: meterId is null", index)
             continue
 
         reading = item.get("reading")
@@ -454,8 +507,8 @@ def _parse_meters(payload: Any) -> dict[str, BrunataMeter]:
         meters[str(raw_id)] = BrunataMeter(
             meter_id=str(raw_id),
             meter_no=raw_meter.get("meterNo"),
-            meter_type=raw_meter.get("meterType") or "",
-            unit=raw_meter.get("meterUnit") or "",
+            meter_type=_as_text(raw_meter.get("meterType")),
+            unit=_as_text(raw_meter.get("meterUnit")),
             value=float(value) if value is not None else None,
             reading_date=(
                 _parse_reading_date(reading.get("readingDate"))
