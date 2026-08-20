@@ -9,6 +9,7 @@ import voluptuous as vol
 
 from homeassistant import config_entries
 from homeassistant.config_entries import ConfigFlowResult, OptionsFlowWithReload
+from homeassistant.const import CONF_EMAIL, CONF_PASSWORD
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.data_entry_flow import AbortFlow
 from homeassistant.exceptions import HomeAssistantError
@@ -20,7 +21,7 @@ from .api import (
     BrunataAuthError,
     BrunataConnectionError,
 )
-from .const import DOMAIN, CONF_EMAIL, CONF_PASSWORD, CONF_DEBUG_LOGGING
+from .const import CONF_DEBUG_LOGGING, DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
