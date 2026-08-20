@@ -16,7 +16,13 @@ try:
     # httpx is a dependency of brunata_api and always available at runtime.
     # The IDE may not resolve it if httpx is not installed in the dev environment.
     import httpx as _httpx
-    _CONNECT_ERRORS = (ConnectionError, UnboundLocalError, _httpx.ConnectError, _httpx.ConnectTimeout, _httpx.ReadTimeout)
+    _CONNECT_ERRORS = (
+        ConnectionError,
+        UnboundLocalError,
+        _httpx.ConnectError,
+        _httpx.ConnectTimeout,
+        _httpx.ReadTimeout,
+    )
 except ImportError:
     _httpx = None
     _CONNECT_ERRORS = (ConnectionError, UnboundLocalError)
@@ -117,17 +123,36 @@ async def _keycloak_refresh(client) -> bool:
 
 
 def _store_tokens(client, tokens: dict) -> None:
-    """Normalise expiry fields to what the library's helpers expect, then store."""
+    """Normalise expiry fields to what the library's helpers expect, then store.
+
+    The stored dict is *replaced*, not merged. Merging let a previous token's
+    ``expires_on`` survive into a response that carried no ``expires_in``, so
+    ``_is_token_valid()`` could report a dead token as usable — and the caller
+    would then skip the login it actually needed. The dict identity is kept in
+    case the library holds a reference to it.
+    """
     now = int(datetime.now().timestamp())
-    if tokens.get("expires_in") is not None:
-        tokens["expires_on"] = now + int(tokens["expires_in"])
-    if tokens.get("refresh_expires_in") is not None:
-        tokens["refresh_token_expires_on"] = now + int(tokens["refresh_expires_in"])
+    normalised = dict(tokens)
+    normalised.pop("expires_on", None)
+    normalised.pop("refresh_token_expires_on", None)
+
+    if normalised.get("expires_in") is not None:
+        normalised["expires_on"] = now + int(normalised["expires_in"])
+    if normalised.get("refresh_expires_in") is not None:
+        normalised["refresh_token_expires_on"] = now + int(
+            normalised["refresh_expires_in"]
+        )
 
     client._session.headers.update(
-        {"Authorization": f"{tokens.get('token_type', 'Bearer')} {tokens['access_token']}"}
+        {
+            "Authorization": (
+                f"{normalised.get('token_type', 'Bearer')} "
+                f"{normalised['access_token']}"
+            )
+        }
     )
-    client._tokens.update(tokens)
+    client._tokens.clear()
+    client._tokens.update(normalised)
 
 
 async def _keycloak_get_tokens(self, force: bool = False) -> bool:
@@ -227,8 +252,13 @@ async def _keycloak_get_tokens(self, force: bool = False) -> bool:
             follow_redirects=False,
         )
         if auth.status_code not in _REDIRECT_STATUSES:
-            _LOGGER.error("Brunata authentication failed (status %s) — check credentials", auth.status_code)
-            raise ConfigEntryAuthFailed("Brunata authentication failed — check email and password")
+            _LOGGER.error(
+                "Brunata authentication failed (status %s) — check credentials",
+                auth.status_code,
+            )
+            raise ConfigEntryAuthFailed(
+                "Brunata authentication failed — check email and password"
+            )
 
         location = auth.headers.get("Location", "")
         if not location.startswith(KC_REDIRECT_URI):
@@ -258,7 +288,7 @@ async def _keycloak_get_tokens(self, force: bool = False) -> bool:
     tokens = token_resp.json()
 
     if not tokens.get("access_token"):
-        self._tokens = {}
+        self._tokens.clear()
         _LOGGER.error("Brunata token endpoint returned no access_token")
         raise ConfigEntryAuthFailed("Brunata did not return an access token")
 
@@ -369,7 +399,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: BrunataConfigEntry) -> b
     # which re-reads entry.options.get(CONF_DEBUG_LOGGING) above — whenever
     # the options are saved. A hand-rolled entry.add_update_listener() for
     # "reload on options change" is deprecated as of HA 2026.12; see
-    # https://developers.home-assistant.io/docs/core/integration/options_flow/#options-flow-with-automatic-reload
+    # https://developers.home-assistant.io/docs/core/integration/options_flow/
+    #   #options-flow-with-automatic-reload
 
     return True
 
@@ -471,7 +502,11 @@ class BrunataDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Meter]]):
             await self.client._get_tokens(force=force_relogin)
         except TypeError as err:
             if "await" in str(err) and "dict" in str(err):
-                _LOGGER.error("Error in brunata-api library: 'object dict can't be used in await expression'. Ensure you have a fixed version of the library or contact the developer.")
+                _LOGGER.error(
+                    "Error in brunata-api library: 'object dict can't be used "
+                    "in await expression'. Ensure you have a fixed version of "
+                    "the library or contact the developer."
+                )
             raise UpdateFailed(f"Error communicating with Brunata API via library: {err}") from err
         except _CONNECT_ERRORS as err:
             # Covers httpx.ConnectError/ConnectTimeout/ReadTimeout (network
@@ -579,7 +614,9 @@ class BrunataDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Meter]]):
             # Transient server-side errors: retry at the next scheduled update,
             # no reauth needed.
             if status >= 500:
-                _LOGGER.warning("Brunata API server error (%s) — will retry next interval", status)
+                _LOGGER.warning(
+                    "Brunata API server error (%s) — will retry next interval", status
+                )
                 raise UpdateFailed(f"Brunata API server error: {status}")
 
             # Endpoint moved/removed. Not an auth problem and not transient —
@@ -590,12 +627,19 @@ class BrunataDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Meter]]):
                     "moved (see the API_URL_V2 note above)",
                     API_URL_V2,
                 )
-                raise UpdateFailed(f"Brunata API endpoint not found (404): {API_URL_V2}/consumer/meters")
+                raise UpdateFailed(
+                    f"Brunata API endpoint not found (404): "
+                    f"{API_URL_V2}/consumer/meters"
+                )
 
             try:
                 result = response.json()
             except Exception as json_err:
-                _LOGGER.error("Error parsing JSON from API: %s. Response: %s", json_err, response.text)
+                _LOGGER.error(
+                    "Error parsing JSON from API: %s. Response: %s",
+                    json_err,
+                    response.text,
+                )
                 return dict(self.client._meters)
 
             if not isinstance(result, list):
@@ -618,13 +662,19 @@ class BrunataDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Meter]]):
                         and "Not authorized" in error_message
                     ):
                         raise ConfigEntryAuthFailed(
-                            "Brunata API authentication failed. Check credentials and account access."
+                            "Brunata API authentication failed. "
+                            "Check credentials and account access."
                         )
                     raise UpdateFailed(
                         f"Brunata API returned error {error_code}: {error_message}"
                     )
 
-                _LOGGER.error("Unexpected API response format: expected list, got %s. Response: %s", type(result), response.text)
+                _LOGGER.error(
+                    "Unexpected API response format: expected list, got %s. "
+                    "Response: %s",
+                    type(result),
+                    response.text,
+                )
                 return dict(self.client._meters)
 
             # Clear existing meters so readings don't accumulate across updates
@@ -641,7 +691,10 @@ class BrunataDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Meter]]):
 
                 # Filter meters without superAllocationUnit (often inactive or internal devices)
                 if json_meter.get("superAllocationUnit") is None:
-                    _LOGGER.debug("Skipping meter %s as it has no superAllocationUnit", json_meter.get("meterId"))
+                    _LOGGER.debug(
+                        "Skipping meter %s as it has no superAllocationUnit",
+                        json_meter.get("meterId"),
+                    )
                     continue
 
                 json_reading = item.get("reading")
@@ -689,4 +742,3 @@ class BrunataDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Meter]]):
             # surfaced as a visible failure rather than silently falling
             # back to last known values.
             raise UpdateFailed(f"Unexpected error fetching data: {err}") from err
-
