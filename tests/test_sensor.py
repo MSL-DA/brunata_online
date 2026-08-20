@@ -1,15 +1,17 @@
 """Test Brunata sensor."""
 from unittest.mock import patch, MagicMock, AsyncMock
 from homeassistant.core import HomeAssistant, State
-from homeassistant.components.sensor import DOMAIN as SENSOR_DOMAIN
+from homeassistant.components.sensor import DOMAIN as SENSOR_DOMAIN, SensorDeviceClass
+from homeassistant.const import UnitOfEnergy, UnitOfVolume
 from datetime import date
-from custom_components.brunata.const import DOMAIN
+
 from pytest_homeassistant_custom_component.common import MockConfigEntry, mock_restore_cache
+
+from custom_components.brunata.const import DOMAIN
+from custom_components.brunata.sensor import BrunataSensor, FALLBACK_UNIT
 
 def _make_entity(coordinator, meter):
     """Build a BrunataSensor without going through CoordinatorEntity.__init__."""
-    from custom_components.brunata.sensor import BrunataSensor
-
     with patch(
         "homeassistant.helpers.update_coordinator.CoordinatorEntity.__init__",
         return_value=None,
@@ -65,9 +67,6 @@ async def test_sensor_unit_is_normalised(mock_meter):
     canonical Home Assistant unit. Passing the raw string through would give
     e.g. device_class 'energy' with unit 'KWH', which HA rejects and whose
     long term statistics are then discarded."""
-    from homeassistant.components.sensor import SensorDeviceClass
-    from homeassistant.const import UnitOfEnergy, UnitOfVolume
-
     coordinator = MagicMock()
     coordinator.data = {"12345": mock_meter}
 
@@ -99,8 +98,6 @@ async def test_sensor_allocator_unit_is_passed_through_verbatim(mock_meter):
     would change native_unit_of_measurement on existing entities, which Home
     Assistant treats as a unit change on a TOTAL_INCREASING sensor and which
     forces users to migrate or discard their long term statistics."""
-    from custom_components.brunata.sensor import FALLBACK_UNIT
-
     coordinator = MagicMock()
     coordinator.data = {"12345": mock_meter}
     mock_meter.meter_type = "Radiator"
