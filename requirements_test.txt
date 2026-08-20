@@ -1,5 +1,4 @@
-# pytest-homeassistant-custom-component pins the exact pytest and
-# pytest-asyncio versions that the matching Home Assistant release is tested
-# against. Pinning those separately here only creates resolver conflicts the
-# next time it bumps them, so this is deliberately the single pin.
+# This pin is used for local development and direct `pip install -r` runs.
+# CI runs a matrix across two pins (minimum HA and current); see
+# .github/workflows/pytest.yml for details.
 pytest-homeassistant-custom-component==0.13.356
