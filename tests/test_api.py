@@ -157,16 +157,55 @@ def test_timestamp_reading_date_is_accepted():
     assert _parse_meters([item])["abc"].reading_date == date(2026, 1, 1)
 
 
-def test_numeric_meter_codes_do_not_crash():
-    """Brunata's v2 payload returns meterType and meterUnit as numeric codes.
-    Passing them through as-is crashed the whole sensor platform on
-    meter.meter_type.lower(), so every entity was lost, not just the naming."""
+@pytest.mark.parametrize(
+    ("code", "expected_type", "expected_unit"),
+    [(1, "Radiator", "units"), (2, "Water", "m³")],
+)
+def test_meter_type_code_gives_the_name_and_the_unit(code, expected_type, expected_unit):
+    """The v2 payload carries neither a type name nor a unit, only a numeric
+    type code. Getting the unit wrong is not cosmetic: Home Assistant refuses
+    to continue long term statistics when a sensor's unit changes, so water
+    meters silently stopped recording."""
     item = _meter_item("abc")
-    item["meter"]["meterType"] = 3
+    item["meter"]["meterType"] = code
+    del item["meter"]["meterUnit"]
+
+    meter = _parse_meters([item])["abc"]
+    assert meter.meter_type == expected_type
+    assert meter.unit == expected_unit
+
+
+def test_explicit_unit_in_the_payload_wins():
+    """If Brunata ever does send a unit, it beats the type-derived default —
+    water meters that report litres would otherwise be mislabelled."""
+    item = _meter_item("abc")
+    item["meter"]["meterType"] = 2
+    item["meter"]["meterUnit"] = "l"
+
+    assert _parse_meters([item])["abc"].unit == "l"
+
+
+@pytest.mark.parametrize(("code", "expected"), [(1, "Radiator"), (2, "Water")])
+def test_known_meter_type_codes_are_resolved_to_names(code, expected):
+    """Brunata's v2 payload identifies the meter type by number. The device is
+    named after it, so an unresolved code shows up in the UI as "Device info
+    2 by Brunata"."""
+    item = _meter_item("abc")
+    item["meter"]["meterType"] = code
+
+    assert _parse_meters([item])["abc"].meter_type == expected
+
+
+def test_unknown_meter_codes_do_not_crash():
+    """Passing a numeric code through as-is crashed the whole sensor platform
+    on meter.meter_type.lower(), so every entity was lost — not just the one
+    with the unrecognised code."""
+    item = _meter_item("abc")
+    item["meter"]["meterType"] = 99
     item["meter"]["meterUnit"] = 7
 
     meter = _parse_meters([item])["abc"]
-    assert meter.meter_type == "3"
+    assert meter.meter_type == "99"
     assert meter.unit == "7"
 
 
