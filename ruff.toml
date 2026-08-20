@@ -1,0 +1,32 @@
+# Ruff configuration for the Brunata integration.
+#
+# Deliberately a narrow, high-signal rule set rather than Home Assistant core's
+# full configuration: every rule enabled here passes on the current code, so CI
+# is green from the first commit and any future failure is a real regression
+# rather than pre-existing debt.
+
+target-version = "py313"   # matches the minimum Home Assistant in hacs.json
+line-length = 100
+
+[lint]
+select = [
+    "F",        # pyflakes — unused imports and variables, undefined names
+    "E",        # pycodestyle errors, including E501 line length
+    "W",        # pycodestyle warnings, including trailing whitespace
+    "PLC0415",  # import not at top of file
+]
+
+# Rules worth adopting later, each needing a one-off `ruff check --fix` pass
+# that touches many files. Enable them deliberately, in their own commit, so
+# the diff is reviewable:
+#   "I"    — import sorting (would reorder imports across the repo)
+#   "UP"   — pyupgrade (rewrites to newer syntax)
+#   "B"    — flake8-bugbear
+#   "RUF"  — Ruff-specific rules
+ignore = []
+
+[format]
+# Formatting is not enforced in CI yet. Running `ruff format` would reflow most
+# of the codebase in a single unreviewable commit; do it deliberately when you
+# are ready, then add `ruff format --check` to the lint workflow.
+quote-style = "double"
