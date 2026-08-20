@@ -66,4 +66,4 @@ See the [wiki](https://github.com/MSL-DA/brunata_online/wiki) for details on usi
 
 ## 🔗 Credits
 
-Special thanks to the [brunata-api](https://pypi.org/project/brunata-api/) project for providing the Python library that makes this integration possible.
+Special thanks to the [brunata-api](https://pypi.org/project/brunata-api/) project, which this integration was originally built on. The client now lives in `custom_components/brunata/api.py`, so the integration has no external Python dependencies.
