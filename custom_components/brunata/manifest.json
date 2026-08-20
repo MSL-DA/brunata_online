@@ -8,6 +8,7 @@
   "integration_type": "hub",
   "iot_class": "cloud_polling",
   "issue_tracker": "https://github.com/MSL-DA/brunata_online/issues",
+  "loggers": ["brunata_api"],
   "requirements": ["brunata-api==0.1.6"],
   "version": "1.1.9-beta.0"
 }
