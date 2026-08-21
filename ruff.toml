@@ -5,7 +5,7 @@
 # is green from the first commit and any future failure is a real regression
 # rather than pre-existing debt.
 
-target-version = "py313"   # matches the minimum Home Assistant in hacs.json
+target-version = "py314"
 line-length = 100
 
 [lint]
