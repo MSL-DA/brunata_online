@@ -1,4 +1,6 @@
-# This pin is used for local development and direct `pip install -r` runs.
-# CI runs a matrix across two pins (minimum HA and current); see
-# .github/workflows/pytest.yml for details.
+# Local development only. CI does not use this file — it pins Home Assistant
+# directly and lets pip resolve the matching release, across a matrix that
+# includes the minimum declared in hacs.json. See .github/workflows/pytest.yml.
+#
+# Keep this in step with the newest entry in that matrix.
 pytest-homeassistant-custom-component==0.13.356
