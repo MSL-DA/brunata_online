@@ -23,26 +23,32 @@ jobs:
         # dependency, so pinning homeassistant here lets pip resolve the
         # matching phcc release by itself. That removes the phcc-to-HA lookup
         # table this file used to carry, which was a standing source of error:
-        # the two version schemes look nothing alike and a wrong pin fails
+        # the two version schemes look nothing alike, and a wrong pin fails
         # silently by testing the wrong version green.
+        #
+        # Python is paired with each entry rather than set once, because the
+        # Python version a Home Assistant release supports moves over time.
+        # Installing a release on an unsupported Python fails at the pip step.
         #
         # First entry must match "homeassistant" in hacs.json — that is the
         # version advertised to every HACS user, and this job is what makes the
         # promise true. tests/test_manifest.py asserts the two agree.
-        ha_version:
-          - "2025.8.0"    # minimum declared in hacs.json (OptionsFlowWithReload)
-          - "2026.8.2"    # current, matches requirements_test.txt
+        include:
+          - ha_version: "2025.8.0"    # minimum in hacs.json (OptionsFlowWithReload)
+            python_version: "3.13"
+          - ha_version: "2026.8.2"    # current, matches requirements_test.txt
+            python_version: "3.14"
 
-    name: "HA ${{ matrix.ha_version }}"
+    name: "HA ${{ matrix.ha_version }} (py${{ matrix.python_version }})"
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
-          python-version: "3.13"
+          python-version: "${{ matrix.python_version }}"
 
       - name: Install test dependencies
         run: |
