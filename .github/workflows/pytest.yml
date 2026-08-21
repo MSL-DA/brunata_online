@@ -16,19 +16,24 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Two pins: the minimum HA version declared in hacs.json and the
-        # current development pin. This catches regressions against both
-        # endpoints without requiring a full version matrix.
+        # The matrix declares Home Assistant versions, not
+        # pytest-homeassistant-custom-component versions.
         #
-        # To find the pytest-homeassistant-custom-component pin for a specific
-        # HA release, look up the matching tag on GitHub:
-        #   https://github.com/MatthewFlamm/pytest-homeassistant-custom-component/releases
-        # Each release note states "homeassistant version: X.Y.Z".
+        # Every phcc release pins one exact homeassistant release as a
+        # dependency, so pinning homeassistant here lets pip resolve the
+        # matching phcc release by itself. That removes the phcc-to-HA lookup
+        # table this file used to carry, which was a standing source of error:
+        # the two version schemes look nothing alike and a wrong pin fails
+        # silently by testing the wrong version green.
         #
-        # When bumping the minimum in hacs.json, update the first pin here.
-        phcc_version:
-          - "0.13.299"   # HA 2025.12.0  (minimum declared in hacs.json)
-          - "0.13.356"   # current development pin
+        # First entry must match "homeassistant" in hacs.json — that is the
+        # version advertised to every HACS user, and this job is what makes the
+        # promise true. tests/test_manifest.py asserts the two agree.
+        ha_version:
+          - "2025.8.0"    # minimum declared in hacs.json (OptionsFlowWithReload)
+          - "2026.8.2"    # current, matches requirements_test.txt
+
+    name: "HA ${{ matrix.ha_version }}"
 
     steps:
       - name: Checkout repository
@@ -37,12 +42,19 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.14"
+          python-version: "3.13"
 
       - name: Install test dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pytest-homeassistant-custom-component==${{ matrix.phcc_version }}
+          pip install \
+            "homeassistant==${{ matrix.ha_version }}" \
+            pytest-homeassistant-custom-component
+
+      - name: Show resolved versions
+        run: |
+          pip show homeassistant pytest-homeassistant-custom-component \
+            | grep -E "^(Name|Version)"
 
       - name: Run pytest
         run: pytest tests/ -v
