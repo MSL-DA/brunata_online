@@ -180,6 +180,12 @@ class BrunataOptionsFlowHandler(OptionsFlowWithReload):
     form is saved — the recommended replacement for a manual
     entry.add_update_listener() whose only job is to trigger a reload. See
     async_setup_entry() in __init__.py for the corresponding note.
+
+    This class was added in Home Assistant 2025.8 and is the newest core API
+    the integration uses, so it is what sets the minimum in hacs.json. On an
+    older Home Assistant this import fails and the integration will not load.
+    If this ever stops being the newest API in use, recheck that minimum
+    rather than leaving it to drift.
     """
 
     async def async_step_init(
