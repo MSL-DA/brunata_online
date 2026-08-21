@@ -1,4 +1,3 @@
----
 name: Pytest
 
 on:
@@ -13,6 +12,7 @@ on:
 
 jobs:
   pytest:
+    name: "Pytest"
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository

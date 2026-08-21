@@ -191,9 +191,8 @@ async def test_sensor_restores_last_state_before_coordinator_has_data(
     available even if the coordinator has not delivered a fresh reading yet —
     this is the exact gap async_added_to_hass()'s restore closes."""
     # has_entity_name + the device name determine the generated entity_id
-    # (it includes the meter type, e.g. "heat") rather than
-    # _attr_suggested_object_id, confirmed against the actual HA-registered
-    # entity_id in test runs.
+    # (it includes the meter type, e.g. "heat"), confirmed against the actual
+    # HA-registered entity_id in test runs.
     entity_id = "sensor.brunata_heat_12345_consumption"
     mock_restore_cache(
         hass,

@@ -1,0 +1,35 @@
+name: Pytest (latest Home Assistant)
+
+# Early warning that a new Home Assistant release breaks the integration.
+# Runs on a schedule rather than on push: a failure here is news about Home
+# Assistant, not about the commit that happened to trigger it.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 4 * * *"
+
+jobs:
+  pytest-latest:
+    name: "Pytest (latest)"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install --upgrade pytest-homeassistant-custom-component
+
+      - name: Show resolved versions
+        run: |
+          pip show homeassistant pytest-homeassistant-custom-component \
+            | grep -E "^(Name|Version)"
+
+      - name: Run pytest
+        run: pytest tests/ -v

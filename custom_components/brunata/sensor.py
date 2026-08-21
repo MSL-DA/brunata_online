@@ -138,7 +138,6 @@ class BrunataSensor(
         self._last_reading_day: date | None = None
         self._attr_has_entity_name = True
         self._attr_translation_key = "consumption"
-        self._attr_suggested_object_id = f"brunata_{self._meter_id}_consumption"
 
         # Resolve the reported unit to a canonical Home Assistant unit.
         raw_unit = meter.unit.strip()
