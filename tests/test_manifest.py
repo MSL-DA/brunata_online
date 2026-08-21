@@ -1,11 +1,21 @@
 """Tests for the integration's declared metadata.
 
-hacs.json advertises a minimum Home Assistant version to every HACS user, but
-CI only ever runs against the single version pytest-homeassistant-custom-
-component pins. Nothing connected the two, so the declared minimum was an
-untested claim: if it drifted above what the suite runs on, users on the
-version we promise to support would install a build that had never been
-executed against their Home Assistant.
+hacs.json advertises a minimum Home Assistant version to every HACS user, and
+that number decides who HACS lets install the integration at all. It is an API
+claim, not a tested one: it names the oldest release that has every core API
+the code imports. The current floor is OptionsFlowWithReload, added in 2025.8 —
+see the docstring on BrunataOptionsFlowHandler in config_flow.py, which is where
+the reason lives so it cannot drift away from the code that sets it.
+
+Testing against that floor was tried and dropped. Installing a year-old Home
+Assistant from PyPI today pulls newer releases of its loosely pinned indirect
+dependencies, which breaks the environment rather than the integration; users
+run Home Assistant in a container with everything locked, so the failures were
+about PyPI, not about this code. CI therefore runs against the pin in
+requirements_test.txt, with a scheduled job against the newest release.
+
+What is left to check here is that the advertised minimum stays a floor and
+never creeps above what is actually exercised.
 """
 
 import json
@@ -23,17 +33,23 @@ HACS = json.loads((REPO_ROOT / "hacs.json").read_text())
 
 
 def test_declared_minimum_is_not_newer_than_the_tested_version():
-    """The suite must actually run on the oldest version we claim to support.
+    """The advertised minimum must not be newer than what the suite runs on.
 
-    If this fails, either lower hacs.json to a version CI covers, or add a CI
-    job pinning the matching pytest-homeassistant-custom-component release —
-    see .github/workflows/pytest.yml.
+    The minimum is an API claim rather than a tested one, but it should still
+    be a floor: promising a release newer than the one CI exercises means
+    nobody has run the code on anything we support.
+
+    If this fails, the fix is almost always to lower hacs.json back to the
+    oldest release that has every core API the code imports. Raising the pin in
+    requirements_test.txt to match instead would shut out every user below the
+    new number, which is a real cost — see the module docstring.
     """
     declared = AwesomeVersion(HACS["homeassistant"])
     tested = AwesomeVersion(HA_VERSION)
     assert declared <= tested, (
-        f"hacs.json promises Home Assistant >= {declared}, but the test suite "
-        f"only runs against {tested}. The promise is untested."
+        f"hacs.json promises Home Assistant >= {declared}, but the suite runs "
+        f"against {tested}. The advertised minimum is newer than anything "
+        f"tested."
     )
 
 
