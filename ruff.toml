@@ -5,7 +5,7 @@
 # is green from the first commit and any future failure is a real regression
 # rather than pre-existing debt.
 
-target-version = "py314"
+target-version = "py313"
 line-length = 100
 
 [lint]
