@@ -123,10 +123,10 @@ class BrunataMeter:
     unit: str
     value: float | None = None
     reading_date: date | None = None
-    # The customer-assigned label shown in Brunata's own UI (e.g. "Bad/Køkken
-    # (Koldt)"). Not present on /consumer/meters at all — it comes from a
-    # separate call in _async_get_placements(). None if that call failed or
-    # the meter has no placement set.
+    # The customer-assigned label shown in Brunata's own UI (e.g. "Bathroom
+    # (Cold)"). Not present on /consumer/meters at all — it comes from a
+    # separate call in _async_get_placements(). None if that call failed or the
+    # meter has no placement set.
     placement: str | None = None
 
 
@@ -295,7 +295,7 @@ class BrunataApiClient:
         This is a different endpoint from /consumer/meters:
         /consumer/metersforconsumer is what the web app's own readings page
         calls, and it is the only place the "placement" a customer set for a
-        meter in Brunata's UI (e.g. "Bad/Køkken (Koldt)") is returned.
+        meter in Brunata's UI (e.g. "Bathroom (Cold)") is returned.
         /consumer/meters does not carry it at all, under any field name.
 
         Best-effort by design: this runs after async_get_meters() already has
