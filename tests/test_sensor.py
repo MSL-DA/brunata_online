@@ -430,3 +430,62 @@ async def test_sensor_extra_state_attributes_omit_placement_when_absent(mock_met
     entity = _make_entity(coordinator, mock_meter)
 
     assert "placement" not in entity.extra_state_attributes
+
+
+async def test_sensor_placement_follows_later_updates(mock_meter):
+    """Relabelling a meter in Brunata's UI has to reach the attribute.
+
+    placement is read from the coordinator on every poll, so it must be
+    refreshed in _apply_latest_reading() and not only captured in __init__ —
+    otherwise a renamed meter keeps its old label until the entry is reloaded.
+    """
+    meter = replace(mock_meter, placement="Stue")
+    coordinator = MagicMock()
+    coordinator.data = {"12345": meter}
+    entity = _make_entity(coordinator, meter)
+    assert entity.extra_state_attributes["placement"] == "Stue"
+
+    coordinator.data = {"12345": replace(meter, value=200.0, placement="Køkken")}
+    entity._apply_latest_reading()
+
+    assert entity.extra_state_attributes["placement"] == "Køkken"
+
+
+async def test_sensor_placement_updates_even_when_the_reading_is_rejected(mock_meter):
+    """A held-back reading must not hold back the label.
+
+    placement is metadata, not part of the reading, so it is applied before the
+    accept/reject decision. A meter mid-way through reset confirmation still
+    shows its current label while its value is deliberately frozen.
+    """
+    meter = replace(mock_meter, value=100.0, placement="Stue")
+    coordinator = MagicMock()
+    coordinator.data = {"12345": meter}
+    entity = _make_entity(coordinator, meter)
+    entity._apply_latest_reading()
+    assert entity.native_value == 100.0
+
+    # An unconfirmed mid-year decrease: the value is rejected, the label is not.
+    coordinator.data = {
+        "12345": replace(
+            meter, value=1.0, reading_date=date(2024, 6, 15), placement="Køkken"
+        )
+    }
+    entity._apply_latest_reading()
+
+    assert entity.native_value == 100.0
+    assert entity.extra_state_attributes["placement"] == "Køkken"
+
+
+async def test_sensor_placement_is_cleared_when_it_disappears(mock_meter):
+    """A failed placements fetch degrades to None for every meter. The attribute
+    should follow rather than serve a label the API no longer reports."""
+    meter = replace(mock_meter, placement="Stue")
+    coordinator = MagicMock()
+    coordinator.data = {"12345": meter}
+    entity = _make_entity(coordinator, meter)
+
+    coordinator.data = {"12345": replace(meter, value=200.0, placement=None)}
+    entity._apply_latest_reading()
+
+    assert "placement" not in entity.extra_state_attributes
