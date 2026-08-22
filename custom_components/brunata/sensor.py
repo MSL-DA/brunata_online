@@ -22,13 +22,21 @@ from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
-# Meter types whose value may legitimately drop. Brunata reports heat cost
-# allocators with meter_type "Radiator", and zeroes them on 1 January.
-# Water and energy meters are never reset, so a decrease on those is always an
-# API glitch. Deliberately a deny-list: anything not matching here — including
-# meter types we don't recognise — keeps the strict "never counts down" guard.
-# Only extend this with types confirmed to reset.
-RESETTING_METER_TYPES = ("radiator",)
+# Meter types that are reset on a schedule. Brunata reports heat cost
+# allocators with meter_type "Radiator" and zeroes them on 1 January, so a
+# decrease around new year needs no further evidence to be believed.
+#
+# This is not a list of the only meters that can ever drop: *any* meter starts
+# over from zero when the physical device is replaced (worn out, flat battery),
+# and that happens at any time of year. Those decreases are recognised by
+# _accept_reading() instead.
+ANNUAL_RESET_METER_TYPES = ("radiator",)
+
+# How many distinct reading dates must report a value below the cached one
+# before it is accepted as a real reset rather than an API glitch. A glitch
+# corrects itself on the next reading; a replaced meter keeps counting up from
+# zero, so every reading after it stays below the old value.
+RESET_CONFIRMATION_READINGS = 3
 
 # Brunata reports units as free-form strings whose casing is not guaranteed
 # ("kWh", "KWH", "l", "L", "m3", "m³"). Map them onto Home Assistant's
@@ -71,7 +79,7 @@ def _as_iso(value) -> str | None:
 def _as_date(value) -> date | None:
     """Return a reading date as a date object, or None if it can't be parsed.
 
-    Used only for the calendar-year comparison in _is_plausible_reset(). A
+    Used only for the calendar-year comparison in _is_annual_reset(). A
     state restored after a restart hands us the ISO string it was serialised
     as, so it has to be parsed back; anything unparseable simply disables the
     year rule and falls back to the December/January window.
@@ -127,13 +135,20 @@ class BrunataSensor(
         super().__init__(coordinator)
         self._meter_id = meter.meter_id
         self._attr_unique_id = f"brunata_{self._meter_id}_consumption"
+        # The physical meter behind this meter_id. Brunata keeps the meter_id
+        # when a device is swapped out, so a change here means the hardware was
+        # replaced and the new device counts from zero.
+        self._meter_no = meter.meter_no
+        # Reading dates that have reported a value below the cached one. Not
+        # restored across restarts — worst case the confirmation starts over.
+        self._pending_reset_dates: set[date] = set()
         # Cache the last known good reading so the sensor keeps its value (and
         # stays available) between the infrequent API updates instead of going
         # unavailable, which would break statistics rows. Updated only from
         # _apply_latest_reading(), never from a property.
         self._attr_native_value = None
         # Kept as an ISO string for the state attribute, and as a date object
-        # for the year comparison in _is_plausible_reset().
+        # for the year comparison in _is_annual_reset().
         self._last_reading_date: str | None = None
         self._last_reading_day: date | None = None
         self._attr_has_entity_name = True
@@ -169,16 +184,29 @@ class BrunataSensor(
         else:
             self._attr_icon = "mdi:gauge"
 
-        # Water/energy meter readings only ever increase, while radiator meters
-        # reset once a year. TOTAL_INCREASING covers both: it lets HA compute
+        # Readings climb until the meter is zeroed — every 1 January for a heat
+        # cost allocator, and whenever the physical device is replaced for any
+        # meter. TOTAL_INCREASING is built for exactly that: it lets HA compute
         # hourly sums and aggregate consumption, and its statistics engine
-        # already knows how to handle a periodic reset to zero.
+        # already knows how to handle a drop back to zero.
         self._attr_state_class = SensorStateClass.TOTAL_INCREASING
-        self._attr_suggested_display_precision = 2
+        # Heat cost allocators report "units" as whole numbers (e.g. 38.00) —
+        # the decimals are an artifact of the API, not meaningful precision,
+        # so the display is rounded to an integer. Water keeps 3 decimals;
+        # energy keeps 2. This only affects display: native_value and Long
+        # Term Statistics retain the full float either way.
+        if unit in VOLUME_UNITS:
+            self._attr_suggested_display_precision = 3
+        elif unit in ENERGY_UNITS:
+            self._attr_suggested_display_precision = 2
+        else:
+            self._attr_suggested_display_precision = 0
 
-        # Whether a decreasing reading is plausible for this meter at all.
-        # See RESETTING_METER_TYPES and _accept_reading().
-        self._may_reset = any(k in meter_type for k in RESETTING_METER_TYPES)
+        # Whether this meter is zeroed every 1 January. See
+        # ANNUAL_RESET_METER_TYPES and _accept_reading().
+        self._resets_annually = any(
+            k in meter_type for k in ANNUAL_RESET_METER_TYPES
+        )
 
         # Group under a device per meter
         self._attr_device_info = DeviceInfo(
@@ -259,64 +287,121 @@ class BrunataSensor(
         if meter is None or meter.value is None:
             return
 
-        if not self._accept_reading(meter.value, meter.reading_date):
+        if not self._accept_reading(meter):
             return
 
         self._attr_native_value = meter.value
+        self._meter_no = meter.meter_no
+        self._pending_reset_dates.clear()
         self._last_reading_date = _as_iso(meter.reading_date)
         self._last_reading_day = meter.reading_date
 
-    def _accept_reading(self, value, reading_date) -> bool:
+    def _accept_reading(self, meter: BrunataMeter) -> bool:
         """Decide whether a reading should replace the cached value.
 
-        An increase is always accepted. A decrease is only accepted for meter
-        types that Brunata actually resets — heat cost allocators, which are
-        zeroed on 1 January. Water and energy meters are never reset, so any
-        decrease on those is an API glitch and is discarded; accepting it under
-        TOTAL_INCREASING would make Home Assistant record a false consumption
-        spike on the way back up.
+        An increase is always accepted. A decrease has three ways to be
+        believed, in order of how solid the evidence is:
 
-        The reset itself is recognised by _is_plausible_reset(), which is
-        deliberately more forgiving than an exact 31 December / 1 January
-        match: see that method.
+        1. The meter number changed. The physical device was replaced, so the
+           new one legitimately starts near zero — whatever its type, whatever
+           the date.
+        2. It is a heat cost allocator around new year. Those are zeroed on
+           1 January, every year, without exception.
+        3. The same lower value keeps coming back. A replacement Brunata
+           reports under the old meter number, or any other reset we can't
+           recognise directly, still leaves a lasting trace: every reading from
+           the new device stays below the old value. An API glitch does not —
+           the next reading is back where it belongs. See
+           _decrease_is_confirmed().
+
+        Anything else is discarded: accepting a glitch under TOTAL_INCREASING
+        would make Home Assistant record a false consumption spike on the way
+        back up.
         """
         previous = self._attr_native_value
+        value = meter.value
 
         if previous is None or value >= previous:
+            self._pending_reset_dates.clear()
             return True
 
-        if not self._may_reset:
+        if meter.meter_no != self._meter_no:
+            _LOGGER.info(
+                "Meter %s was replaced (meter number %s -> %s): accepting the "
+                "reset from %s to %s",
+                self._meter_id,
+                self._meter_no,
+                meter.meter_no,
+                previous,
+                value,
+            )
+            return True
+
+        if self._resets_annually and self._is_annual_reset(meter.reading_date):
+            _LOGGER.info(
+                "Meter %s annual reset detected: %s -> %s (reading date %s)",
+                self._meter_id,
+                previous,
+                value,
+                meter.reading_date,
+            )
+            return True
+
+        return self._decrease_is_confirmed(previous, value, meter.reading_date)
+
+    def _decrease_is_confirmed(self, previous, value, reading_date) -> bool:
+        """Return True once a decrease has been seen often enough to be real.
+
+        Meters are replaced when they wear out or the battery runs low, which
+        happens at any time of year and on any meter type. If Brunata reports
+        the replacement under the same meter number, the only thing separating
+        it from a glitch is that it persists: the new device counts up from
+        zero, so reading after reading stays below the old value.
+
+        Distinct reading dates are counted rather than updates, because the
+        coordinator polls far more often than the meters report — re-serving
+        the same reading is not new evidence. A reading without a usable date
+        can't contribute, so it is simply ignored.
+        """
+        if reading_date is None:
             _LOGGER.debug(
-                "Meter %s reported a decrease (%s -> %s) — ignoring it, "
-                "this meter type is never reset",
+                "Meter %s reported a decrease (%s -> %s) without a reading "
+                "date — ignoring it",
                 self._meter_id,
                 previous,
                 value,
             )
             return False
 
-        if not self._is_plausible_reset(reading_date):
-            _LOGGER.warning(
-                "Meter %s reported a decrease (%s -> %s) on %s, outside the "
-                "new year reset window — ignoring it as a glitch",
+        self._pending_reset_dates.add(reading_date)
+        seen = len(self._pending_reset_dates)
+
+        if seen < RESET_CONFIRMATION_READINGS:
+            _LOGGER.debug(
+                "Meter %s reported a decrease (%s -> %s) on %s — holding the "
+                "cached value, %s of %s reading dates seen so far",
                 self._meter_id,
                 previous,
                 value,
                 reading_date,
+                seen,
+                RESET_CONFIRMATION_READINGS,
             )
             return False
 
-        _LOGGER.info(
-            "Meter %s reset detected: %s -> %s (reading date %s)",
+        _LOGGER.warning(
+            "Meter %s has read below %s on %s separate reading dates — "
+            "treating this as a reset and adopting %s. If the meter was not "
+            "replaced or read out, check the meter in Brunata Online.",
             self._meter_id,
             previous,
+            seen,
             value,
-            reading_date,
         )
         return True
 
-    def _is_plausible_reset(self, reading_date) -> bool:
-        """Return True if a decrease on this date is a plausible annual reset.
+    def _is_annual_reset(self, reading_date) -> bool:
+        """Return True if a decrease on this date is the annual 1 January reset.
 
         Heat cost allocators are zeroed on 1 January, but the first reading
         Brunata publishes afterwards is not necessarily dated 1 January — these
@@ -335,7 +420,13 @@ class BrunataSensor(
         * the reading falls on 31 December or anywhere in January, which covers
           the case where the previous reading date is unknown (e.g. a state
           restored from before this attribute was recorded).
+
+        A reading with no usable date can't be placed in the year at all, so it
+        falls through to the confirmation rule instead.
         """
+        if reading_date is None:
+            return False
+
         last_day = self._last_reading_day
         if last_day is not None and reading_date.year > last_day.year:
             return True
