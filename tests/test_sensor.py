@@ -1,16 +1,16 @@
 """Test Brunata sensor."""
-from unittest.mock import patch, MagicMock, AsyncMock
-from homeassistant.core import HomeAssistant, State
+from dataclasses import replace
+from datetime import date
+from unittest.mock import AsyncMock, MagicMock, patch
+
 from homeassistant.components.sensor import DOMAIN as SENSOR_DOMAIN, SensorDeviceClass
 from homeassistant.const import UnitOfEnergy, UnitOfVolume
-from datetime import date
-
+from homeassistant.core import HomeAssistant, State
 from pytest_homeassistant_custom_component.common import MockConfigEntry, mock_restore_cache
-
-from dataclasses import replace
 
 from custom_components.brunata.const import DOMAIN
 from custom_components.brunata.sensor import BrunataSensor, FALLBACK_UNIT
+
 
 def _make_entity(coordinator, meter):
     """Build a BrunataSensor without going through CoordinatorEntity.__init__."""
