@@ -208,10 +208,20 @@ class BrunataSensor(
             k in meter_type for k in ANNUAL_RESET_METER_TYPES
         )
 
-        # Group under a device per meter
+        # Group under a device per meter. Brunata's own UI lets a customer
+        # label each meter with its physical location ("placement", e.g.
+        # "Bad/Køkken (Koldt)") — when that label is available, lead with it
+        # so the device is recognisable without opening it; otherwise fall
+        # back to the generic type+ID name used before placement existed.
+        self._placement = meter.placement
+        device_name = (
+            f"Brunata {meter.meter_type} - {meter.placement}"
+            if meter.placement
+            else f"Brunata {meter.meter_type} ({self._meter_id})"
+        )
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, f"brunata_{self._meter_id}")},
-            name=f"Brunata {meter.meter_type} ({self._meter_id})",
+            name=device_name,
             manufacturer="Brunata",
             model=meter.meter_type,
         )
@@ -444,8 +454,9 @@ class BrunataSensor(
     @property
     def extra_state_attributes(self):
         """Return the state attributes."""
+        attributes = {}
         if self._last_reading_date is not None:
-            return {
-                "reading_date": self._last_reading_date,
-            }
-        return {}
+            attributes["reading_date"] = self._last_reading_date
+        if self._placement is not None:
+            attributes["placement"] = self._placement
+        return attributes
