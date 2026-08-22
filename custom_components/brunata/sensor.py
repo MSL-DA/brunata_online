@@ -211,7 +211,7 @@ class BrunataSensor(
 
         # Group under a device per meter. Brunata's own UI lets a customer
         # label each meter with its physical location ("placement", e.g.
-        # "Bad/Køkken (Koldt)") — when that label is available, lead with it
+        # "Bathroom (Cold)") — when that label is available, lead with it
         # so the device is recognisable without opening it; otherwise fall
         # back to the generic type+ID name used before placement existed.
         # "Brunata" is left out of the name itself: it's already shown as the
