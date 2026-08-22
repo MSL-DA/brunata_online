@@ -108,9 +108,30 @@ async def test_sensor_allocator_unit_is_passed_through_verbatim(mock_meter):
         assert entity.device_class is None
 
 
+async def test_sensor_display_precision_by_unit(mock_meter):
+    """Heat cost allocators show whole numbers — the API's .00 decimals carry
+    no meaningful precision. Water keeps 3 decimals, energy keeps 2. This is
+    display-only: native_value is untouched either way."""
+    coordinator = MagicMock()
+    coordinator.data = {"12345": mock_meter}
+
+    for meter_type, raw_unit, expected_precision in (
+        ("Radiator", "units", 0),
+        ("Water", "m3", 3),
+        ("Water", "l", 3),
+        ("Energy", "kWh", 2),
+    ):
+        entity = _make_entity(
+            coordinator,
+            replace(mock_meter, meter_type=meter_type, unit=raw_unit),
+        )
+        assert entity.suggested_display_precision == expected_precision
+
+
 async def test_sensor_reset_detection(mock_meter):
     """Heat cost allocators are zeroed on 1 January, so a decrease at the turn
-    of the year is real. A decrease at any other time is an API glitch."""
+    of the year is accepted straight away. A single mid-year decrease is not —
+    it has to be confirmed by later readings first."""
     mock_meter = replace(mock_meter, meter_type="Radiator", unit="units")
 
     coordinator = MagicMock()
@@ -162,9 +183,10 @@ async def test_sensor_reset_accepted_when_first_reading_arrives_late(mock_meter)
     assert entity.native_value == 11.0
 
 
-async def test_sensor_decrease_never_accepted_for_non_resetting_meter(mock_meter):
-    """Water and energy meters are never reset, so a decrease is always a
-    glitch — including in January, where a radiator meter would accept it."""
+async def test_sensor_isolated_decrease_rejected_as_glitch(mock_meter):
+    """A one-off decrease is an API glitch: the next reading is back where it
+    belongs. Accepting it under TOTAL_INCREASING would record a false spike on
+    the way back up."""
     mock_meter = replace(mock_meter, meter_type="Water", unit="m3")
 
     coordinator = MagicMock()
@@ -182,6 +204,101 @@ async def test_sensor_decrease_never_accepted_for_non_resetting_meter(mock_meter
     coordinator.data = {"12345": replace(mock_meter, value=313.0, reading_date=date(2025, 1, 4))}
     entity._apply_latest_reading()
     assert entity.native_value == 313.0
+
+    # The glitch must not count towards a later confirmation.
+    assert entity._pending_reset_dates == set()
+
+
+async def test_sensor_accepts_reset_when_meter_number_changes(mock_meter):
+    """A replaced meter starts over from zero. The meter number identifies the
+    physical device, so a change is proof enough on its own — any meter type,
+    any time of year."""
+    mock_meter = replace(mock_meter, meter_type="Water", unit="m3", meter_no="M12345")
+
+    coordinator = MagicMock()
+    coordinator.data = {"12345": mock_meter}
+    entity = _make_entity(coordinator, mock_meter)
+
+    coordinator.data = {"12345": replace(mock_meter, value=312.5, reading_date=date(2025, 6, 1))}
+    entity._apply_latest_reading()
+    assert entity.native_value == 312.5
+
+    # Same meter_id, new physical meter, mid-year.
+    coordinator.data = {
+        "12345": replace(
+            mock_meter, meter_no="M99999", value=0.4, reading_date=date(2025, 6, 20)
+        )
+    }
+    entity._apply_latest_reading()
+    assert entity.native_value == 0.4
+    assert entity._meter_no == "M99999"
+
+
+async def test_sensor_accepts_reset_confirmed_across_reading_dates(mock_meter):
+    """When a meter is replaced but Brunata keeps the old meter number, the
+    only signal left is that the decrease persists — the new device counts up
+    from zero, so every reading stays below the old value."""
+    mock_meter = replace(mock_meter, meter_type="Water", unit="m3")
+
+    coordinator = MagicMock()
+    coordinator.data = {"12345": mock_meter}
+    entity = _make_entity(coordinator, mock_meter)
+
+    coordinator.data = {"12345": replace(mock_meter, value=312.5, reading_date=date(2025, 6, 1))}
+    entity._apply_latest_reading()
+    assert entity.native_value == 312.5
+
+    # Two readings below the cached value are not yet enough.
+    for day, value in ((20, 0.0), (21, 0.3)):
+        coordinator.data = {
+            "12345": replace(mock_meter, value=value, reading_date=date(2025, 6, day))
+        }
+        entity._apply_latest_reading()
+        assert entity.native_value == 312.5
+
+    # The third distinct reading date confirms it.
+    coordinator.data = {"12345": replace(mock_meter, value=0.7, reading_date=date(2025, 6, 22))}
+    entity._apply_latest_reading()
+    assert entity.native_value == 0.7
+    assert entity.extra_state_attributes["reading_date"] == "2025-06-22"
+    assert entity._pending_reset_dates == set()
+
+
+async def test_sensor_confirmation_counts_dates_not_updates(mock_meter):
+    """The coordinator polls far more often than meters report, so the same
+    reading is re-served many times. Counting updates instead of reading dates
+    would let a single glitch confirm itself within the hour."""
+    mock_meter = replace(mock_meter, meter_type="Water", unit="m3")
+
+    coordinator = MagicMock()
+    coordinator.data = {"12345": mock_meter}
+    entity = _make_entity(coordinator, mock_meter)
+
+    coordinator.data = {"12345": replace(mock_meter, value=312.5, reading_date=date(2025, 6, 1))}
+    entity._apply_latest_reading()
+
+    coordinator.data = {"12345": replace(mock_meter, value=0.0, reading_date=date(2025, 6, 20))}
+    for _ in range(5):
+        entity._apply_latest_reading()
+    assert entity.native_value == 312.5
+
+
+async def test_sensor_decrease_without_reading_date_is_ignored(mock_meter):
+    """A reading can arrive without a parseable readingDate. It can neither be
+    placed in the calendar year nor contribute to a confirmation, so it must be
+    dropped — not crash the coordinator callback."""
+    mock_meter = replace(mock_meter, meter_type="Radiator", unit="units")
+
+    coordinator = MagicMock()
+    coordinator.data = {"12345": mock_meter}
+    entity = _make_entity(coordinator, mock_meter)
+
+    coordinator.data = {"12345": replace(mock_meter, value=4820.0, reading_date=date(2024, 12, 20))}
+    entity._apply_latest_reading()
+
+    coordinator.data = {"12345": replace(mock_meter, value=0.0, reading_date=None)}
+    entity._apply_latest_reading()
+    assert entity.native_value == 4820.0
 
 
 async def test_sensor_restores_last_state_before_coordinator_has_data(
