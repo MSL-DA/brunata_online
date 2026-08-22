@@ -25,8 +25,8 @@ import re
 import secrets
 import time
 from dataclasses import dataclass, replace
-from functools import partial
 from datetime import date
+from functools import partial
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
@@ -131,12 +131,13 @@ class BrunataMeter:
 
 
 def _as_text(raw: Any) -> str:
-    """Coerce a field to text.
+    """Coerce a lookup code to text.
 
-    Brunata's v2 payload returns meterType and meterUnit as numeric codes,
-    which the old library resolved to names through a separate mapping call.
-    Until that mapping is reimplemented, the code is carried through as text so
-    the entity is still created rather than crashing the whole platform setup.
+    Brunata's v2 payload carries meter type and unit as numeric codes, which
+    _lookup() resolves against the tables from the locale resource. Those codes
+    have been observed as both integers and strings, so they are normalised
+    here before being parsed, and an absent code becomes "" rather than the
+    string "None".
     """
     if raw is None:
         return ""
@@ -190,6 +191,9 @@ class BrunataApiClient:
 
         self._meter_types: list[str] = []
         self._measurement_units: list[str] = []
+        # Whether the locale resource has been fetched, which is not the same
+        # as the tables being non-empty. See _async_ensure_lookup_tables().
+        self._lookup_tables_loaded = False
 
         self._access_token: str | None = None
         self._token_type: str = "Bearer"
@@ -337,8 +341,14 @@ class BrunataApiClient:
         so without them a water meter's unit is unknown — which Home Assistant
         treats as a unit change and responds to by suppressing the sensor's
         long term statistics.
+
+        The guard is a separate flag rather than "are the tables non-empty".
+        A response carrying a mappers object with an empty or missing
+        meterType would leave the list empty, so a non-empty check would never
+        be satisfied and this endpoint would be re-fetched on every single
+        update, forever, for no benefit.
         """
-        if self._meter_types:
+        if self._lookup_tables_loaded:
             return
 
         await self._async_login()
@@ -356,11 +366,24 @@ class BrunataApiClient:
 
         self._meter_types = list(mappers.get("meterType") or [])
         self._measurement_units = list(mappers.get("measurementUnit") or [])
-        _LOGGER.debug(
-            "Loaded Brunata lookup tables: %s meter types, %s units",
-            len(self._meter_types),
-            len(self._measurement_units),
-        )
+        self._lookup_tables_loaded = True
+
+        if not self._meter_types or not self._measurement_units:
+            # Not fatal: _lookup() falls back to the raw code, so entities are
+            # still created. But every meter will be named and united by a bare
+            # number, so say so once rather than only per meter.
+            _LOGGER.warning(
+                "Brunata locale resource carried %s meter types and %s units. "
+                "Meter types and units will fall back to their raw codes.",
+                len(self._meter_types),
+                len(self._measurement_units),
+            )
+        else:
+            _LOGGER.debug(
+                "Loaded Brunata lookup tables: %s meter types, %s units",
+                len(self._meter_types),
+                len(self._measurement_units),
+            )
 
     # --- HTTP ---------------------------------------------------------------
 
