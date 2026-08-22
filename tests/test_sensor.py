@@ -52,7 +52,7 @@ async def test_sensor_setup(hass: HomeAssistant, mock_brunata_client, mock_meter
     assert entity_id is not None
 
     state = hass.states.get(entity_id)
-    assert state.attributes["friendly_name"] == "Brunata Heat (12345) Consumption"
+    assert state.attributes["friendly_name"] == "Heat (12345) Consumption"
     # Always an ISO string, whether the value came from the API or from a
     # restored state after a restart.
     assert state.attributes["reading_date"] == "2024-01-01"
@@ -308,9 +308,11 @@ async def test_sensor_restores_last_state_before_coordinator_has_data(
     available even if the coordinator has not delivered a fresh reading yet —
     this is the exact gap async_added_to_hass()'s restore closes."""
     # has_entity_name + the device name determine the generated entity_id
-    # (it includes the meter type, e.g. "heat"), confirmed against the actual
-    # HA-registered entity_id in test runs.
-    entity_id = "sensor.brunata_heat_12345_consumption"
+    # (it includes the meter type, e.g. "heat"). Dropping the "Brunata"
+    # prefix from the device name changes the slug it's derived from — this
+    # value needs re-confirming against the actual HA-registered entity_id
+    # in a real test run, same as when it was first added.
+    entity_id = "sensor.heat_12345_consumption"
     mock_restore_cache(
         hass,
         [State(entity_id, "500.0", {"reading_date": "2024-12-31"})],
@@ -384,3 +386,47 @@ async def test_sensor_restore_edge_cases(mock_meter):
     assert entity.native_value == 42.5
     assert entity.extra_state_attributes["reading_date"] == "2024-06-01"
     assert entity.available is True
+
+
+# --- placement -----------------------------------------------------------
+#
+# placement is the customer-assigned location label from Brunata's own UI
+# (e.g. "Bad/Køkken (Koldt)"), fetched separately from the reading itself and
+# absent whenever that fetch failed or the meter has none set.
+
+async def test_sensor_device_name_uses_placement_when_present(mock_meter):
+    """When a placement is available, the device name leads with it, so the
+    device is recognisable without opening it."""
+    meter = replace(mock_meter, placement="Bad/Køkken (Koldt)")
+    coordinator = MagicMock()
+    coordinator.data = {"12345": meter}
+    entity = _make_entity(coordinator, meter)
+
+    assert entity._attr_device_info["name"] == "Heat - Bad/Køkken (Koldt)"
+
+
+async def test_sensor_device_name_falls_back_without_placement(mock_meter):
+    """No placement (fetch failed, or none set in Brunata) keeps the original
+    type+ID name rather than showing something blank."""
+    coordinator = MagicMock()
+    coordinator.data = {"12345": mock_meter}
+    entity = _make_entity(coordinator, mock_meter)
+
+    assert entity._attr_device_info["name"] == "Heat (12345)"
+
+
+async def test_sensor_extra_state_attributes_include_placement_when_set(mock_meter):
+    meter = replace(mock_meter, placement="Stue")
+    coordinator = MagicMock()
+    coordinator.data = {"12345": meter}
+    entity = _make_entity(coordinator, meter)
+
+    assert entity.extra_state_attributes["placement"] == "Stue"
+
+
+async def test_sensor_extra_state_attributes_omit_placement_when_absent(mock_meter):
+    coordinator = MagicMock()
+    coordinator.data = {"12345": mock_meter}
+    entity = _make_entity(coordinator, mock_meter)
+
+    assert "placement" not in entity.extra_state_attributes
