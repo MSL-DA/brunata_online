@@ -11,8 +11,8 @@ from homeassistant.components.sensor import (
 )
 from homeassistant.const import UnitOfEnergy, UnitOfVolume
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.device_registry import DeviceInfo
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
@@ -63,7 +63,7 @@ ENERGY_UNITS = (UnitOfEnergy.KILO_WATT_HOUR, UnitOfEnergy.MEGA_WATT_HOUR)
 FALLBACK_UNIT = "units"
 
 
-def _as_iso(value) -> str | None:
+def _as_iso(value: date | datetime | str | None) -> str | None:
     """Return a reading date as an ISO string.
 
     The API hands us date objects, while a state restored after a restart
@@ -76,7 +76,7 @@ def _as_iso(value) -> str | None:
     return value
 
 
-def _as_date(value) -> date | None:
+def _as_date(value: date | datetime | str | None) -> date | None:
     """Return a reading date as a date object, or None if it can't be parsed.
 
     Used only for the calendar-year comparison in _is_annual_reset(). A
@@ -99,7 +99,7 @@ def _as_date(value) -> date | None:
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: BrunataConfigEntry,
-    async_add_entities: AddEntitiesCallback,
+    async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
     """Set up Brunata sensors based on a config entry."""
     _LOGGER.debug("Setting up Brunata sensors for entry %s", entry.entry_id)
@@ -122,6 +122,7 @@ async def async_setup_entry(
 
     _add_new_meters()
     entry.async_on_unload(coordinator.async_add_listener(_add_new_meters))
+
 
 class BrunataSensor(
     CoordinatorEntity[BrunataDataUpdateCoordinator], RestoreEntity, SensorEntity
@@ -297,10 +298,18 @@ class BrunataSensor(
         unknown/unavailable and statistics stay intact.
         """
         meter = (self.coordinator.data or {}).get(self._meter_id)
-        if meter is None or meter.value is None:
+        if meter is None:
             return
 
-        if not self._accept_reading(meter):
+        # Placement is a label the customer set in Brunata's UI, not part of
+        # the reading, so it is refreshed whether or not the value below is
+        # accepted — a meter whose reading is being held for reset
+        # confirmation should still show its current label. The device name
+        # cannot follow: DeviceInfo is read once when the entity is added, so
+        # a relabelled meter keeps its old device name until the next reload.
+        self._placement = meter.placement
+
+        if meter.value is None or not self._accept_reading(meter):
             return
 
         self._attr_native_value = meter.value
@@ -362,7 +371,9 @@ class BrunataSensor(
 
         return self._decrease_is_confirmed(previous, value, meter.reading_date)
 
-    def _decrease_is_confirmed(self, previous, value, reading_date) -> bool:
+    def _decrease_is_confirmed(
+        self, previous: float, value: float, reading_date: date | None
+    ) -> bool:
         """Return True once a decrease has been seen often enough to be real.
 
         Meters are replaced when they wear out or the battery runs low, which
@@ -413,7 +424,7 @@ class BrunataSensor(
         )
         return True
 
-    def _is_annual_reset(self, reading_date) -> bool:
+    def _is_annual_reset(self, reading_date: date | None) -> bool:
         """Return True if a decrease on this date is the annual 1 January reset.
 
         Heat cost allocators are zeroed on 1 January, but the first reading
@@ -455,9 +466,9 @@ class BrunataSensor(
         return self._attr_native_value is not None
 
     @property
-    def extra_state_attributes(self):
+    def extra_state_attributes(self) -> dict[str, str]:
         """Return the state attributes."""
-        attributes = {}
+        attributes: dict[str, str] = {}
         if self._last_reading_date is not None:
             attributes["reading_date"] = self._last_reading_date
         if self._placement is not None:
