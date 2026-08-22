@@ -213,11 +213,14 @@ class BrunataSensor(
         # "Bad/Køkken (Koldt)") — when that label is available, lead with it
         # so the device is recognisable without opening it; otherwise fall
         # back to the generic type+ID name used before placement existed.
+        # "Brunata" is left out of the name itself: it's already shown as the
+        # device's manufacturer, and repeating it in every entity name is
+        # redundant clutter in the UI.
         self._placement = meter.placement
         device_name = (
-            f"Brunata {meter.meter_type} - {meter.placement}"
+            f"{meter.meter_type} - {meter.placement}"
             if meter.placement
-            else f"Brunata {meter.meter_type} ({self._meter_id})"
+            else f"{meter.meter_type} ({self._meter_id})"
         )
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, f"brunata_{self._meter_id}")},
