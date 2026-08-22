@@ -20,6 +20,7 @@ Built for [Brunata Online](https://online.brunata.com) accounts. If Brunata Onli
 
 - Automatic discovery of all meters on your Brunata Online account
 - Supports water (`m³`, `l`), energy (`kWh`, `MWh`), and heat cost allocator (`units`) meters
+- Devices are named after the placement you set in Brunata Online, so a meter shows up as `Water - Bathroom (Cold)` rather than an unrecognisable serial number
 - Groups sensors under devices for easy management
 - Standard Home Assistant device classes and state classes, with full Long Term Statistics support
 - Reliable polling via `DataUpdateCoordinator`, scheduled every hour at xx:59:30
