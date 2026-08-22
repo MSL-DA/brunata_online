@@ -391,18 +391,18 @@ async def test_sensor_restore_edge_cases(mock_meter):
 # --- placement -----------------------------------------------------------
 #
 # placement is the customer-assigned location label from Brunata's own UI
-# (e.g. "Bad/Køkken (Koldt)"), fetched separately from the reading itself and
+# (e.g. "Bathroom (Cold)"), fetched separately from the reading itself and
 # absent whenever that fetch failed or the meter has none set.
 
 async def test_sensor_device_name_uses_placement_when_present(mock_meter):
     """When a placement is available, the device name leads with it, so the
     device is recognisable without opening it."""
-    meter = replace(mock_meter, placement="Bad/Køkken (Koldt)")
+    meter = replace(mock_meter, placement="Bathroom (Cold)")
     coordinator = MagicMock()
     coordinator.data = {"12345": meter}
     entity = _make_entity(coordinator, meter)
 
-    assert entity._attr_device_info["name"] == "Heat - Bad/Køkken (Koldt)"
+    assert entity._attr_device_info["name"] == "Heat - Bathroom (Cold)"
 
 
 async def test_sensor_device_name_falls_back_without_placement(mock_meter):
@@ -416,12 +416,12 @@ async def test_sensor_device_name_falls_back_without_placement(mock_meter):
 
 
 async def test_sensor_extra_state_attributes_include_placement_when_set(mock_meter):
-    meter = replace(mock_meter, placement="Stue")
+    meter = replace(mock_meter, placement="Living room")
     coordinator = MagicMock()
     coordinator.data = {"12345": meter}
     entity = _make_entity(coordinator, meter)
 
-    assert entity.extra_state_attributes["placement"] == "Stue"
+    assert entity.extra_state_attributes["placement"] == "Living room"
 
 
 async def test_sensor_extra_state_attributes_omit_placement_when_absent(mock_meter):
@@ -439,16 +439,16 @@ async def test_sensor_placement_follows_later_updates(mock_meter):
     refreshed in _apply_latest_reading() and not only captured in __init__ —
     otherwise a renamed meter keeps its old label until the entry is reloaded.
     """
-    meter = replace(mock_meter, placement="Stue")
+    meter = replace(mock_meter, placement="Living room")
     coordinator = MagicMock()
     coordinator.data = {"12345": meter}
     entity = _make_entity(coordinator, meter)
-    assert entity.extra_state_attributes["placement"] == "Stue"
+    assert entity.extra_state_attributes["placement"] == "Living room"
 
-    coordinator.data = {"12345": replace(meter, value=200.0, placement="Køkken")}
+    coordinator.data = {"12345": replace(meter, value=200.0, placement="Kitchen")}
     entity._apply_latest_reading()
 
-    assert entity.extra_state_attributes["placement"] == "Køkken"
+    assert entity.extra_state_attributes["placement"] == "Kitchen"
 
 
 async def test_sensor_placement_updates_even_when_the_reading_is_rejected(mock_meter):
@@ -458,7 +458,7 @@ async def test_sensor_placement_updates_even_when_the_reading_is_rejected(mock_m
     accept/reject decision. A meter mid-way through reset confirmation still
     shows its current label while its value is deliberately frozen.
     """
-    meter = replace(mock_meter, value=100.0, placement="Stue")
+    meter = replace(mock_meter, value=100.0, placement="Living room")
     coordinator = MagicMock()
     coordinator.data = {"12345": meter}
     entity = _make_entity(coordinator, meter)
@@ -468,19 +468,19 @@ async def test_sensor_placement_updates_even_when_the_reading_is_rejected(mock_m
     # An unconfirmed mid-year decrease: the value is rejected, the label is not.
     coordinator.data = {
         "12345": replace(
-            meter, value=1.0, reading_date=date(2024, 6, 15), placement="Køkken"
+            meter, value=1.0, reading_date=date(2024, 6, 15), placement="Kitchen"
         )
     }
     entity._apply_latest_reading()
 
     assert entity.native_value == 100.0
-    assert entity.extra_state_attributes["placement"] == "Køkken"
+    assert entity.extra_state_attributes["placement"] == "Kitchen"
 
 
 async def test_sensor_placement_is_cleared_when_it_disappears(mock_meter):
     """A failed placements fetch degrades to None for every meter. The attribute
     should follow rather than serve a label the API no longer reports."""
-    meter = replace(mock_meter, placement="Stue")
+    meter = replace(mock_meter, placement="Living room")
     coordinator = MagicMock()
     coordinator.data = {"12345": meter}
     entity = _make_entity(coordinator, meter)
