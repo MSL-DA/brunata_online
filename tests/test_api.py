@@ -249,8 +249,8 @@ async def test_placements_are_keyed_by_meter_id():
     client = _PlacementClient(
         FakeResponse(
             json_data=[
-                {"meterId": 12345, "placement": "Bad/Køkken (Koldt)"},
-                {"meterId": "67890", "placement": "Stue"},
+                {"meterId": 12345, "placement": "Bathroom (Cold)"},
+                {"meterId": "67890", "placement": "Living room"},
             ]
         )
     )
@@ -258,8 +258,8 @@ async def test_placements_are_keyed_by_meter_id():
     # Numeric IDs are stringified, because _parse_meters() keys its dict on
     # str(meterId) and the two have to line up for the lookup to hit.
     assert await client.get() == {
-        "12345": "Bad/Køkken (Koldt)",
-        "67890": "Stue",
+        "12345": "Bathroom (Cold)",
+        "67890": "Living room",
     }
 
 
@@ -279,7 +279,7 @@ async def test_placements_call_the_right_endpoint_with_auth():
 @pytest.mark.parametrize(
     "item",
     [
-        {"placement": "Stue"},                       # no meterId
+        {"placement": "Living room"},                       # no meterId
         {"meterId": 12345},                          # no placement
         {"meterId": 12345, "placement": ""},         # empty placement
         {"meterId": 12345, "placement": 42},         # placement not a string
@@ -295,9 +295,9 @@ async def test_unusable_placement_entries_are_skipped(item):
 
 async def test_usable_entries_survive_alongside_unusable_ones():
     client = _PlacementClient(
-        FakeResponse(json_data=[{"meterId": 1}, {"meterId": 2, "placement": "Stue"}])
+        FakeResponse(json_data=[{"meterId": 1}, {"meterId": 2, "placement": "Living room"}])
     )
-    assert await client.get() == {"2": "Stue"}
+    assert await client.get() == {"2": "Living room"}
 
 
 @pytest.mark.parametrize("payload", [None, 42, {"unexpected": True}])
