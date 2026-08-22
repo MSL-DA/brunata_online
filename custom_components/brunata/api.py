@@ -9,9 +9,10 @@ of those is private, so any release of the library could have broken the
 integration at runtime with no warning.
 
 Everything the integration actually used is implemented here instead: the
-Keycloak login and the single ``/consumer/meters`` call. The HTTP client comes
-from Home Assistant, which builds the SSL context off the event loop and closes
-the client at shutdown.
+Keycloak login, the ``/consumer/meters`` call for readings, and the
+``/consumer/metersforconsumer`` call for each meter's user-assigned placement
+label. The HTTP client comes from Home Assistant, which builds the SSL context
+off the event loop and closes the client at shutdown.
 """
 
 from __future__ import annotations
@@ -23,7 +24,7 @@ import logging
 import re
 import secrets
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import partial
 from datetime import date
 from typing import Any
@@ -122,6 +123,11 @@ class BrunataMeter:
     unit: str
     value: float | None = None
     reading_date: date | None = None
+    # The customer-assigned label shown in Brunata's own UI (e.g. "Bad/Køkken
+    # (Koldt)"). Not present on /consumer/meters at all — it comes from a
+    # separate call in _async_get_placements(). None if that call failed or
+    # the meter has no placement set.
+    placement: str | None = None
 
 
 def _as_text(raw: Any) -> str:
@@ -264,11 +270,65 @@ class BrunataApiClient:
                     "fresh login. Check credentials and account access."
                 )
 
-        return _parse_meters(
+        meters = _parse_meters(
             _payload(response),
             meter_types=self._meter_types,
             measurement_units=self._measurement_units,
         )
+
+        placements = await self._async_get_placements()
+        if placements:
+            meters = {
+                meter_id: replace(meter, placement=placements.get(meter_id))
+                for meter_id, meter in meters.items()
+            }
+
+        return meters
+
+    async def _async_get_placements(self) -> dict[str, str]:
+        """Return each meter's user-assigned placement, keyed by meter ID.
+
+        This is a different endpoint from /consumer/meters:
+        /consumer/metersforconsumer is what the web app's own readings page
+        calls, and it is the only place the "placement" a customer set for a
+        meter in Brunata's UI (e.g. "Bad/Køkken (Koldt)") is returned.
+        /consumer/meters does not carry it at all, under any field name.
+
+        Best-effort by design: this runs after async_get_meters() already has
+        a usable token, so a failure here is treated as "no placements
+        available" rather than failing the whole update — a meter without a
+        placement still gets a name from meter_type + meter_id.
+        """
+        try:
+            response = await self._async_request(
+                "GET",
+                f"{API_URL}/consumer/metersforconsumer",
+                headers={
+                    "Authorization": f"{self._token_type} {self._access_token}",
+                    "Referer": METERS_URL,
+                },
+            )
+            payload = _payload(response)
+        except BrunataError as err:
+            _LOGGER.debug("Could not fetch Brunata meter placements: %s", err)
+            return {}
+
+        if not isinstance(payload, list):
+            _LOGGER.debug(
+                "Unexpected placements payload type: %s", type(payload).__name__
+            )
+            return {}
+
+        placements: dict[str, str] = {}
+        for item in payload:
+            if not isinstance(item, dict):
+                continue
+            meter_id = item.get("meterId")
+            placement = item.get("placement")
+            if meter_id is not None and isinstance(placement, str) and placement:
+                placements[str(meter_id)] = placement
+
+        return placements
 
     async def _async_ensure_lookup_tables(self) -> None:
         """Fetch the locale resource once per client.
