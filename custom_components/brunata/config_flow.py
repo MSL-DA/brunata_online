@@ -81,7 +81,9 @@ class BrunataConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     VERSION = 1
 
-    async def async_step_user(self, user_input=None) -> ConfigFlowResult:
+    async def async_step_user(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
         """Handle the initial step."""
         # Never log user_input itself: it contains the password, and debug logs
         # are routinely attached to bug reports.
@@ -120,7 +122,9 @@ class BrunataConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Handle re-authentication when credentials are no longer valid."""
         return await self.async_step_reauth_confirm()
 
-    async def async_step_reauth_confirm(self, user_input=None) -> ConfigFlowResult:
+    async def async_step_reauth_confirm(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
         """Confirm re-authentication dialog."""
         reauth_entry = self._get_reauth_entry()
         errors = {}
@@ -172,6 +176,7 @@ class BrunataConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Get the options flow for this handler."""
         return BrunataOptionsFlowHandler()
 
+
 class BrunataOptionsFlowHandler(OptionsFlowWithReload):
     """Handle Brunata options.
 
@@ -207,8 +212,10 @@ class BrunataOptionsFlowHandler(OptionsFlowWithReload):
             ),
         )
 
+
 class CannotConnect(HomeAssistantError):
     """Error to indicate we cannot connect to the Brunata API."""
+
 
 class InvalidAuth(HomeAssistantError):
     """Error to indicate there is invalid auth."""

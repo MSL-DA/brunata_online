@@ -1,16 +1,18 @@
 """Test Brunata sensor."""
-from unittest.mock import patch, MagicMock, AsyncMock
-from homeassistant.core import HomeAssistant, State
+from dataclasses import replace
+from datetime import UTC, date, datetime
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
 from homeassistant.components.sensor import DOMAIN as SENSOR_DOMAIN, SensorDeviceClass
 from homeassistant.const import UnitOfEnergy, UnitOfVolume
-from datetime import date
-
+from homeassistant.core import HomeAssistant, State
 from pytest_homeassistant_custom_component.common import MockConfigEntry, mock_restore_cache
-
-from dataclasses import replace
 
 from custom_components.brunata.const import DOMAIN
 from custom_components.brunata.sensor import BrunataSensor, FALLBACK_UNIT
+
 
 def _make_entity(coordinator, meter):
     """Build a BrunataSensor without going through CoordinatorEntity.__init__."""
@@ -52,7 +54,7 @@ async def test_sensor_setup(hass: HomeAssistant, mock_brunata_client, mock_meter
     assert entity_id is not None
 
     state = hass.states.get(entity_id)
-    assert state.attributes["friendly_name"] == "Brunata Heat (12345) Consumption"
+    assert state.attributes["friendly_name"] == "Heat (12345) Consumption"
     # Always an ISO string, whether the value came from the API or from a
     # restored state after a restart.
     assert state.attributes["reading_date"] == "2024-01-01"
@@ -108,9 +110,109 @@ async def test_sensor_allocator_unit_is_passed_through_verbatim(mock_meter):
         assert entity.device_class is None
 
 
+async def test_sensor_display_precision_comes_from_the_api(mock_meter):
+    """Brunata states the precision it displays itself — 3 for water, 0 for
+    heat cost allocators — so the sensor shows what the portal shows instead
+    of a number guessed from the unit."""
+    coordinator = MagicMock()
+    coordinator.data = {"12345": mock_meter}
+
+    for meter_type, raw_unit, decimals in (
+        ("Radiator", "units", 0),
+        ("Water", "m3", 3),
+        ("Energy", "kWh", 2),
+    ):
+        entity = _make_entity(
+            coordinator,
+            replace(
+                mock_meter, meter_type=meter_type, unit=raw_unit, decimals=decimals
+            ),
+        )
+        assert entity.suggested_display_precision == decimals
+
+
+async def test_sensor_display_precision_falls_back_to_the_unit(mock_meter):
+    """decimals is optional. Without it the unit decides, so a meter Brunata
+    describes incompletely still gets a sensible number of digits rather than
+    none at all.
+
+    This is display-only either way: native_value and Long Term Statistics keep
+    the full float."""
+    coordinator = MagicMock()
+    coordinator.data = {"12345": mock_meter}
+
+    for meter_type, raw_unit, expected_precision in (
+        ("Radiator", "units", 0),
+        ("Water", "m3", 3),
+        ("Water", "l", 3),
+        ("Energy", "kWh", 2),
+    ):
+        entity = _make_entity(
+            coordinator,
+            replace(
+                mock_meter, meter_type=meter_type, unit=raw_unit, decimals=None
+            ),
+        )
+        assert entity.suggested_display_precision == expected_precision
+
+
+@pytest.mark.parametrize(
+    ("raw_unit", "expected_unit", "expected_class"),
+    [
+        # Every consumption unit in Brunata's live measurementUnit table that
+        # Home Assistant has a constant for. Spelled exactly as Brunata does.
+        ("m³", UnitOfVolume.CUBIC_METERS, SensorDeviceClass.WATER),
+        ("liter", UnitOfVolume.LITERS, SensorDeviceClass.WATER),
+        ("Wh", UnitOfEnergy.WATT_HOUR, SensorDeviceClass.ENERGY),
+        ("kWh", UnitOfEnergy.KILO_WATT_HOUR, SensorDeviceClass.ENERGY),
+        ("MWh", UnitOfEnergy.MEGA_WATT_HOUR, SensorDeviceClass.ENERGY),
+        ("J", UnitOfEnergy.JOULE, SensorDeviceClass.ENERGY),
+        ("kJ", UnitOfEnergy.KILO_JOULE, SensorDeviceClass.ENERGY),
+        ("MJ", UnitOfEnergy.MEGA_JOULE, SensorDeviceClass.ENERGY),
+        ("GJ", UnitOfEnergy.GIGA_JOULE, SensorDeviceClass.ENERGY),
+        ("Kcal", UnitOfEnergy.KILO_CALORIE, SensorDeviceClass.ENERGY),
+        ("Mcal", UnitOfEnergy.MEGA_CALORIE, SensorDeviceClass.ENERGY),
+        ("GCal", UnitOfEnergy.GIGA_CALORIE, SensorDeviceClass.ENERGY),
+    ],
+)
+async def test_sensor_maps_the_units_brunata_actually_reports(
+    mock_meter, raw_unit, expected_unit, expected_class
+):
+    """Sending Brunata's own spelling straight to Home Assistant would give an
+    invalid unit for the device class, and the sensor's Long Term Statistics
+    would be discarded — which is exactly what happened to the water meters."""
+    coordinator = MagicMock()
+    coordinator.data = {"12345": mock_meter}
+
+    entity = _make_entity(coordinator, replace(mock_meter, unit=raw_unit))
+    assert entity.native_unit_of_measurement == expected_unit
+    assert entity.device_class == expected_class
+
+
+@pytest.mark.parametrize("raw_unit", ["Btu", "°C", "Doprimo units", "m³ per hour"])
+async def test_sensor_unmappable_units_claim_no_device_class(mock_meter, raw_unit):
+    """Brunata's table spans temperature, pressure, flow rate and a dozen
+    vendor-specific allocator units. Passing them through without a device
+    class is correct; claiming one Home Assistant would reject is not."""
+    entity = _make_entity(MagicMock(), replace(mock_meter, unit=raw_unit))
+
+    assert entity.native_unit_of_measurement == raw_unit
+    assert entity.device_class is None
+
+
+async def test_sensor_undefined_unit_is_treated_as_absent(mock_meter):
+    """Index 0 of the table is the literal string "undefined". Passing it
+    through would put that word in the UI as the unit."""
+    entity = _make_entity(MagicMock(), replace(mock_meter, unit="undefined"))
+
+    assert entity.native_unit_of_measurement == FALLBACK_UNIT
+    assert entity.device_class is None
+
+
 async def test_sensor_reset_detection(mock_meter):
     """Heat cost allocators are zeroed on 1 January, so a decrease at the turn
-    of the year is real. A decrease at any other time is an API glitch."""
+    of the year is accepted straight away. A single mid-year decrease is not —
+    it has to be confirmed by later readings first."""
     mock_meter = replace(mock_meter, meter_type="Radiator", unit="units")
 
     coordinator = MagicMock()
@@ -162,9 +264,10 @@ async def test_sensor_reset_accepted_when_first_reading_arrives_late(mock_meter)
     assert entity.native_value == 11.0
 
 
-async def test_sensor_decrease_never_accepted_for_non_resetting_meter(mock_meter):
-    """Water and energy meters are never reset, so a decrease is always a
-    glitch — including in January, where a radiator meter would accept it."""
+async def test_sensor_isolated_decrease_rejected_as_glitch(mock_meter):
+    """A one-off decrease is an API glitch: the next reading is back where it
+    belongs. Accepting it under TOTAL_INCREASING would record a false spike on
+    the way back up."""
     mock_meter = replace(mock_meter, meter_type="Water", unit="m3")
 
     coordinator = MagicMock()
@@ -183,6 +286,104 @@ async def test_sensor_decrease_never_accepted_for_non_resetting_meter(mock_meter
     entity._apply_latest_reading()
     assert entity.native_value == 313.0
 
+    # The glitch left no trace that could later be mistaken for a reset.
+    assert entity.native_value == 313.0
+
+
+async def test_sensor_accepts_reset_when_meter_number_changes(mock_meter):
+    """A replaced meter starts over from zero. The meter number identifies the
+    physical device, so a change is proof enough on its own — any meter type,
+    any time of year."""
+    mock_meter = replace(mock_meter, meter_type="Water", unit="m3", meter_no="M12345")
+
+    coordinator = MagicMock()
+    coordinator.data = {"12345": mock_meter}
+    entity = _make_entity(coordinator, mock_meter)
+
+    coordinator.data = {"12345": replace(mock_meter, value=312.5, reading_date=date(2025, 6, 1))}
+    entity._apply_latest_reading()
+    assert entity.native_value == 312.5
+
+    # Same meter_id, new physical meter, mid-year.
+    coordinator.data = {
+        "12345": replace(
+            mock_meter, meter_no="M99999", value=0.4, reading_date=date(2025, 6, 20)
+        )
+    }
+    entity._apply_latest_reading()
+    assert entity.native_value == 0.4
+    assert entity._meter_no == "M99999"
+
+
+async def test_sensor_accepts_reset_when_mounting_date_changes(mock_meter):
+    """Brunata states when a meter was installed. A new mounting date is a
+    replacement reported as fact, so the decrease needs no corroboration —
+    even if the meter number were somehow reused."""
+    mock_meter = replace(mock_meter, meter_type="Water", unit="m3")
+
+    coordinator = MagicMock()
+    coordinator.data = {"12345": mock_meter}
+    entity = _make_entity(coordinator, mock_meter)
+
+    coordinator.data = {
+        "12345": replace(mock_meter, value=312.5, reading_date=date(2025, 6, 1))
+    }
+    entity._apply_latest_reading()
+    assert entity.native_value == 312.5
+
+    replaced = replace(
+        mock_meter,
+        value=0.4,
+        reading_date=date(2025, 6, 20),
+        mounting_date=datetime(2025, 6, 19, 9, 0, tzinfo=UTC),
+    )
+    coordinator.data = {"12345": replaced}
+    entity._apply_latest_reading()
+
+    assert entity.native_value == 0.4
+    assert entity._mounting_date == replaced.mounting_date
+
+
+async def test_sensor_unexplained_decrease_is_rejected(mock_meter):
+    """Neither a replacement nor an annual reset. Adopting it under
+    TOTAL_INCREASING would record a false consumption spike on the way back
+    up, so the cached value stands and a warning is logged instead."""
+    mock_meter = replace(mock_meter, meter_type="Water", unit="m3")
+
+    coordinator = MagicMock()
+    coordinator.data = {"12345": mock_meter}
+    entity = _make_entity(coordinator, mock_meter)
+
+    coordinator.data = {
+        "12345": replace(mock_meter, value=312.5, reading_date=date(2025, 6, 1))
+    }
+    entity._apply_latest_reading()
+
+    for day, value in ((20, 0.0), (21, 0.3), (22, 0.7)):
+        coordinator.data = {
+            "12345": replace(mock_meter, value=value, reading_date=date(2025, 6, day))
+        }
+        entity._apply_latest_reading()
+        assert entity.native_value == 312.5
+
+
+async def test_sensor_decrease_without_reading_date_is_ignored(mock_meter):
+    """A reading can arrive without a parseable readingDate. It cannot be
+    placed in the calendar year, so an annual reset cannot be recognised and
+    the value must be dropped — not crash the coordinator callback."""
+    mock_meter = replace(mock_meter, meter_type="Radiator", unit="units")
+
+    coordinator = MagicMock()
+    coordinator.data = {"12345": mock_meter}
+    entity = _make_entity(coordinator, mock_meter)
+
+    coordinator.data = {"12345": replace(mock_meter, value=4820.0, reading_date=date(2024, 12, 20))}
+    entity._apply_latest_reading()
+
+    coordinator.data = {"12345": replace(mock_meter, value=0.0, reading_date=None)}
+    entity._apply_latest_reading()
+    assert entity.native_value == 4820.0
+
 
 async def test_sensor_restores_last_state_before_coordinator_has_data(
     hass: HomeAssistant, mock_brunata_client, mock_meter
@@ -191,9 +392,11 @@ async def test_sensor_restores_last_state_before_coordinator_has_data(
     available even if the coordinator has not delivered a fresh reading yet —
     this is the exact gap async_added_to_hass()'s restore closes."""
     # has_entity_name + the device name determine the generated entity_id
-    # (it includes the meter type, e.g. "heat"), confirmed against the actual
-    # HA-registered entity_id in test runs.
-    entity_id = "sensor.brunata_heat_12345_consumption"
+    # (it includes the meter type, e.g. "heat"). Dropping the "Brunata"
+    # prefix from the device name changes the slug it's derived from — this
+    # value needs re-confirming against the actual HA-registered entity_id
+    # in a real test run, same as when it was first added.
+    entity_id = "sensor.heat_12345_consumption"
     mock_restore_cache(
         hass,
         [State(entity_id, "500.0", {"reading_date": "2024-12-31"})],
@@ -267,3 +470,106 @@ async def test_sensor_restore_edge_cases(mock_meter):
     assert entity.native_value == 42.5
     assert entity.extra_state_attributes["reading_date"] == "2024-06-01"
     assert entity.available is True
+
+
+# --- placement -----------------------------------------------------------
+#
+# placement is the customer-assigned location label from Brunata's own UI
+# (e.g. "Bathroom (Cold)"), fetched separately from the reading itself and
+# absent whenever the meter has none set.
+
+async def test_sensor_device_name_uses_placement_when_present(mock_meter):
+    """When a placement is available, the device name leads with it, so the
+    device is recognisable without opening it."""
+    meter = replace(mock_meter, placement="Bathroom (Cold)")
+    coordinator = MagicMock()
+    coordinator.data = {"12345": meter}
+    entity = _make_entity(coordinator, meter)
+
+    assert entity._attr_device_info["name"] == "Heat - Bathroom (Cold)"
+
+
+async def test_sensor_device_name_falls_back_without_placement(mock_meter):
+    """No placement set in Brunata keeps the original
+    type+ID name rather than showing something blank."""
+    coordinator = MagicMock()
+    coordinator.data = {"12345": mock_meter}
+    entity = _make_entity(coordinator, mock_meter)
+
+    assert entity._attr_device_info["name"] == "Heat (12345)"
+
+
+async def test_sensor_extra_state_attributes_include_placement_when_set(mock_meter):
+    meter = replace(mock_meter, placement="Living room")
+    coordinator = MagicMock()
+    coordinator.data = {"12345": meter}
+    entity = _make_entity(coordinator, meter)
+
+    assert entity.extra_state_attributes["placement"] == "Living room"
+
+
+async def test_sensor_extra_state_attributes_omit_placement_when_absent(mock_meter):
+    coordinator = MagicMock()
+    coordinator.data = {"12345": mock_meter}
+    entity = _make_entity(coordinator, mock_meter)
+
+    assert "placement" not in entity.extra_state_attributes
+
+
+async def test_sensor_placement_follows_later_updates(mock_meter):
+    """Relabelling a meter in Brunata's UI has to reach the attribute.
+
+    placement is read from the coordinator on every poll, so it must be
+    refreshed in _apply_latest_reading() and not only captured in __init__ —
+    otherwise a renamed meter keeps its old label until the entry is reloaded.
+    """
+    meter = replace(mock_meter, placement="Living room")
+    coordinator = MagicMock()
+    coordinator.data = {"12345": meter}
+    entity = _make_entity(coordinator, meter)
+    assert entity.extra_state_attributes["placement"] == "Living room"
+
+    coordinator.data = {"12345": replace(meter, value=200.0, placement="Kitchen")}
+    entity._apply_latest_reading()
+
+    assert entity.extra_state_attributes["placement"] == "Kitchen"
+
+
+async def test_sensor_placement_updates_even_when_the_reading_is_rejected(mock_meter):
+    """A held-back reading must not hold back the label.
+
+    placement is metadata, not part of the reading, so it is applied before the
+    accept/reject decision. A meter whose reading is being rejected still
+    shows its current label while its value is deliberately frozen.
+    """
+    meter = replace(mock_meter, value=100.0, placement="Living room")
+    coordinator = MagicMock()
+    coordinator.data = {"12345": meter}
+    entity = _make_entity(coordinator, meter)
+    entity._apply_latest_reading()
+    assert entity.native_value == 100.0
+
+    # An unconfirmed mid-year decrease: the value is rejected, the label is not.
+    coordinator.data = {
+        "12345": replace(
+            meter, value=1.0, reading_date=date(2024, 6, 15), placement="Kitchen"
+        )
+    }
+    entity._apply_latest_reading()
+
+    assert entity.native_value == 100.0
+    assert entity.extra_state_attributes["placement"] == "Kitchen"
+
+
+async def test_sensor_placement_is_cleared_when_it_disappears(mock_meter):
+    """A failed placements fetch degrades to None for every meter. The attribute
+    should follow rather than serve a label the API no longer reports."""
+    meter = replace(mock_meter, placement="Living room")
+    coordinator = MagicMock()
+    coordinator.data = {"12345": meter}
+    entity = _make_entity(coordinator, meter)
+
+    coordinator.data = {"12345": replace(meter, value=200.0, placement=None)}
+    entity._apply_latest_reading()
+
+    assert "placement" not in entity.extra_state_attributes
