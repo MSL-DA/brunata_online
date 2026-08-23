@@ -9,8 +9,8 @@ of those is private, so any release of the library could have broken the
 integration at runtime with no warning.
 
 Everything the integration actually used is implemented here instead: the
-Keycloak login, the ``/consumer/meters`` call for readings, and the
-``/consumer/metersforconsumer`` call for each meter's user-assigned placement
+Keycloak login and the single ``/consumer/metersforconsumer`` call that
+Brunata's own readings page uses
 label. The HTTP client comes from Home Assistant, which builds the SSL context
 off the event loop and closes the client at shutdown.
 """
@@ -24,8 +24,8 @@ import logging
 import re
 import secrets
 import time
-from dataclasses import dataclass, replace
-from datetime import date
+from dataclasses import dataclass
+from datetime import date, datetime
 from functools import partial
 from typing import Any
 from urllib.parse import parse_qs, urlparse
@@ -37,7 +37,7 @@ from homeassistant.core import HomeAssistant
 _LOGGER = logging.getLogger(__name__)
 
 # Brunata retired the v1 data API alongside the Keycloak migration: with a
-# valid token, /online-webservice/v1/rest/consumer/meters answers 401 while v2
+# valid token, the v1 equivalent of this endpoint answers 401 while v2
 # returns the meter data.
 BASE_URL = "https://online.brunata.com"
 API_URL = f"{BASE_URL}/online-webservice/v2/rest"
@@ -112,9 +112,9 @@ class BrunataApiError(BrunataError):
 class BrunataMeter:
     """A single meter and its most recent reading.
 
-    Flat by design: the previous library nested the reading in its own object,
-    which meant every consumer had to guard against a meter existing without
-    one. Here an absent reading is simply ``value is None``.
+    Flat by design: every field comes straight from one entry in the
+    /consumer/metersforconsumer payload, so an absent reading is simply
+    ``value is None`` rather than a missing nested object.
     """
 
     meter_id: str
@@ -123,11 +123,16 @@ class BrunataMeter:
     unit: str
     value: float | None = None
     reading_date: date | None = None
-    # The customer-assigned label shown in Brunata's own UI (e.g. "Bathroom
-    # (Cold)"). Not present on /consumer/meters at all — it comes from a
-    # separate call in _async_get_placements(). None if that call failed or the
-    # meter has no placement set.
+    # The customer-assigned label from Brunata's own UI, e.g. "Koldt vand" or
+    # "Soveværelse". None when the meter has no label set.
     placement: str | None = None
+    # When Brunata installed the physical device. A change here is a meter
+    # replacement stated as fact, rather than inferred from a falling value.
+    mounting_date: datetime | None = None
+    # Digits Brunata itself displays: 3 for water, 0 for heat cost allocators.
+    decimals: int | None = None
+    # Whether the meter is currently sending readings.
+    transmitting: bool | None = None
 
 
 def _as_text(raw: Any) -> str:
@@ -168,6 +173,21 @@ def _lookup(table: list[str], raw: Any, what: str) -> str:
             len(table),
         )
         return code
+
+
+def _parse_timestamp(raw: Any) -> datetime | None:
+    """Parse one of Brunata's ISO timestamps, e.g. mountingDate.
+
+    They carry an offset ("2018-10-23T14:09:22+02:00"), so the result is
+    timezone-aware. Anything unparseable becomes None rather than raising: a
+    meter with an odd date is still a meter.
+    """
+    if isinstance(raw, str):
+        try:
+            return datetime.fromisoformat(raw)
+        except ValueError:
+            _LOGGER.debug("Could not parse timestamp %r", raw)
+    return None
 
 
 def _parse_reading_date(raw: Any) -> date | None:
@@ -245,14 +265,16 @@ class BrunataApiClient:
         await self._async_login(force=True)
 
     async def async_get_meters(self) -> dict[str, BrunataMeter]:
-        """Return every active meter, keyed by meter ID.
+        """Return every mounted meter, keyed by meter ID.
 
-        Meters are fetched without a start date: with one, Brunata returns the
-        first measurement of the period rather than the most recent.
+        One call to /consumer/metersforconsumer, which is what Brunata's own
+        readings page uses. It carries the meter, its latest reading, its
+        customer-assigned placement, its mounting and dismounting dates and its
+        display precision in a single flat list.
         """
         await self._async_ensure_lookup_tables()
 
-        response = await self._async_get_meters_once(force_login=False)
+        response = await self._async_fetch_meters(force_login=False)
 
         # A cached token can look locally valid while the server no longer
         # accepts it — the Keycloak session may have been revoked, or our
@@ -266,7 +288,7 @@ class BrunataApiClient:
                 "a fresh login",
                 response.status_code,
             )
-            response = await self._async_get_meters_once(force_login=True)
+            response = await self._async_fetch_meters(force_login=True)
 
             if response.status_code in (401, 403):
                 raise BrunataAuthError(
@@ -274,65 +296,11 @@ class BrunataApiClient:
                     "fresh login. Check credentials and account access."
                 )
 
-        meters = _parse_meters(
+        return _parse_meters(
             _payload(response),
             meter_types=self._meter_types,
             measurement_units=self._measurement_units,
         )
-
-        placements = await self._async_get_placements()
-        if placements:
-            meters = {
-                meter_id: replace(meter, placement=placements.get(meter_id))
-                for meter_id, meter in meters.items()
-            }
-
-        return meters
-
-    async def _async_get_placements(self) -> dict[str, str]:
-        """Return each meter's user-assigned placement, keyed by meter ID.
-
-        This is a different endpoint from /consumer/meters:
-        /consumer/metersforconsumer is what the web app's own readings page
-        calls, and it is the only place the "placement" a customer set for a
-        meter in Brunata's UI (e.g. "Bathroom (Cold)") is returned.
-        /consumer/meters does not carry it at all, under any field name.
-
-        Best-effort by design: this runs after async_get_meters() already has
-        a usable token, so a failure here is treated as "no placements
-        available" rather than failing the whole update — a meter without a
-        placement still gets a name from meter_type + meter_id.
-        """
-        try:
-            response = await self._async_request(
-                "GET",
-                f"{API_URL}/consumer/metersforconsumer",
-                headers={
-                    "Authorization": f"{self._token_type} {self._access_token}",
-                    "Referer": METERS_URL,
-                },
-            )
-            payload = _payload(response)
-        except BrunataError as err:
-            _LOGGER.debug("Could not fetch Brunata meter placements: %s", err)
-            return {}
-
-        if not isinstance(payload, list):
-            _LOGGER.debug(
-                "Unexpected placements payload type: %s", type(payload).__name__
-            )
-            return {}
-
-        placements: dict[str, str] = {}
-        for item in payload:
-            if not isinstance(item, dict):
-                continue
-            meter_id = item.get("meterId")
-            placement = item.get("placement")
-            if meter_id is not None and isinstance(placement, str) and placement:
-                placements[str(meter_id)] = placement
-
-        return placements
 
     async def _async_ensure_lookup_tables(self) -> None:
         """Fetch the locale resource once per client.
@@ -360,7 +328,11 @@ class BrunataApiClient:
                 "Referer": METERS_URL,
             },
         )
-        mappers = (_payload(response) or {}).get("mappers")
+        payload = _payload(response)
+        # Guarded rather than assumed: a payload that is a list (or anything
+        # else) would otherwise raise AttributeError here instead of the
+        # BrunataApiError the coordinator knows how to translate.
+        mappers = payload.get("mappers") if isinstance(payload, dict) else None
         if not isinstance(mappers, dict):
             raise BrunataApiError("Brunata locale resource carried no mappers")
 
@@ -387,11 +359,11 @@ class BrunataApiClient:
 
     # --- HTTP ---------------------------------------------------------------
 
-    async def _async_get_meters_once(self, *, force_login: bool) -> httpx.Response:
+    async def _async_fetch_meters(self, *, force_login: bool) -> httpx.Response:
         await self._async_login(force=force_login)
         return await self._async_request(
             "GET",
-            f"{API_URL}/consumer/meters",
+            f"{API_URL}/consumer/metersforconsumer",
             headers={
                 "Authorization": f"{self._token_type} {self._access_token}",
                 "Referer": METERS_URL,
@@ -631,73 +603,75 @@ def _parse_meters(
     meter_types: list[str] | None = None,
     measurement_units: list[str] | None = None,
 ) -> dict[str, BrunataMeter]:
-    """Turn a /consumer/meters payload into meters keyed by ID."""
+    """Turn a /consumer/metersforconsumer payload into meters keyed by ID.
+
+    Each entry is flat — meter, latest reading and metadata side by side — so
+    there is no wrapper object to guard against.
+    """
     if not isinstance(payload, list):
         raise BrunataApiError(
             f"Expected a list of meters, got {type(payload).__name__}"
         )
 
-    # Structural diagnostics only — no addresses, names or readings are logged.
-    # This distinguishes "the API returned nothing" from "everything was
-    # filtered out", which have completely different causes.
-    _LOGGER.debug("Brunata returned %s raw item(s) from /consumer/meters", len(payload))
+    _LOGGER.debug("Brunata returned %s raw item(s)", len(payload))
 
     meters: dict[str, BrunataMeter] = {}
     for index, item in enumerate(payload):
         if not isinstance(item, dict):
-            _LOGGER.debug("Item %s skipped: not an object (%s)", index, type(item).__name__)
-            continue
-
-        raw_meter = item.get("meter")
-        if not isinstance(raw_meter, dict):
             _LOGGER.debug(
-                "Item %s skipped: no 'meter' object. Keys present: %s",
-                index,
-                sorted(item),
+                "Item %s skipped: not an object (%s)", index, type(item).__name__
             )
             continue
 
-        _LOGGER.debug(
-            "Item %s: meterId=%r, meterType=%r, superAllocationUnit=%r, "
-            "unit=%r, has reading=%s",
-            index,
-            raw_meter.get("meterId"),
-            raw_meter.get("meterType"),
-            raw_meter.get("superAllocationUnit"),
-            raw_meter.get("unit"),
-            isinstance(item.get("reading"), dict),
-        )
-
-        # Meters without a superAllocationUnit are typically inactive or
-        # internal devices.
-        if raw_meter.get("superAllocationUnit") is None:
-            _LOGGER.debug("Item %s skipped: superAllocationUnit is null", index)
-            continue
-
-        raw_id = raw_meter.get("meterId")
+        raw_id = item.get("meterId")
         if raw_id is None:
             _LOGGER.debug("Item %s skipped: meterId is null", index)
             continue
 
-        reading = item.get("reading")
-        value = reading.get("value") if isinstance(reading, dict) else None
+        # A dismounted meter is one Brunata has physically removed. Its final
+        # reading never changes again, so carrying it would leave a device in
+        # Home Assistant frozen forever. Dropping it here makes the entity go
+        # unavailable instead, which is what a removed meter should look like.
+        dismounted = _parse_timestamp(item.get("dismountedDate"))
+        if dismounted is not None:
+            _LOGGER.debug(
+                "Item %s (meter %s) skipped: dismounted on %s",
+                index,
+                raw_id,
+                dismounted.date(),
+            )
+            continue
+
+        value = item.get("latestReadingValue")
+        decimals = item.get("decimals")
+        placement = item.get("placement")
+        transmitting = item.get("transmitting")
+
+        _LOGGER.debug(
+            "Item %s: meterId=%r meterType=%r unit=%r decimals=%r "
+            "transmitting=%r has reading=%s",
+            index,
+            raw_id,
+            item.get("meterType"),
+            item.get("unit"),
+            decimals,
+            transmitting,
+            value is not None,
+        )
 
         meters[str(raw_id)] = BrunataMeter(
             meter_id=str(raw_id),
-            meter_no=raw_meter.get("meterNo"),
-            meter_type=_lookup(
-                meter_types or [], raw_meter.get("meterType"), "meter type"
-            ),
-            # The unit index lives in "unit", not "meterUnit".
+            meter_no=item.get("meterNo"),
+            meter_type=_lookup(meter_types or [], item.get("meterType"), "meter type"),
             unit=_lookup(
-                measurement_units or [], raw_meter.get("unit"), "measurement unit"
+                measurement_units or [], item.get("unit"), "measurement unit"
             ),
             value=float(value) if value is not None else None,
-            reading_date=(
-                _parse_reading_date(reading.get("readingDate"))
-                if isinstance(reading, dict)
-                else None
-            ),
+            reading_date=_parse_reading_date(item.get("latestReadingDate")),
+            placement=placement if isinstance(placement, str) and placement else None,
+            mounting_date=_parse_timestamp(item.get("mountingDate")),
+            decimals=int(decimals) if isinstance(decimals, int) else None,
+            transmitting=transmitting if isinstance(transmitting, bool) else None,
         )
 
     _LOGGER.debug("Parsed %s meters from Brunata", len(meters))
