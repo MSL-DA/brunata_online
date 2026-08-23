@@ -92,6 +92,11 @@ ENERGY_UNITS = (
 # below, which deliberately preserves Brunata's own capitalisation.
 FALLBACK_UNIT = "units"
 
+# Index 0 of Brunata's measurementUnit table is the literal string
+# "undefined". A meter pointing at it has no unit stated, so it is treated the
+# same as a missing one rather than being labelled "undefined" in the UI.
+UNDEFINED_UNIT = "undefined"
+
 
 def _as_iso(value: date | datetime | str | None) -> str | None:
     """Return a reading date as an ISO string.
