@@ -162,17 +162,31 @@ def _lookup(table: list[str], raw: Any, what: str) -> str:
     code = _as_text(raw)
     if not code:
         return ""
+
     try:
-        return table[int(code)]
+        name = table[int(code)]
     except (ValueError, IndexError):
+        name = None
+
+    # The live tables contain null entries — 7 of 28 meter types and 34 of 96
+    # units are None, reserved slots Brunata has not filled in. An index
+    # landing on one must be treated exactly like an index past the end:
+    # returning the None would put it straight into BrunataMeter.meter_type,
+    # and the sensor platform would then die on meter_type.lower(), taking
+    # every entity with it rather than just the odd one.
+    if not isinstance(name, str) or not name.strip():
         _LOGGER.warning(
-            "Brunata %s code %r is not in the lookup table (%s entries). "
-            "Falling back to the raw code.",
+            "Brunata %s code %r does not resolve in the lookup table "
+            "(%s entries). Falling back to the raw code.",
             what,
             code,
             len(table),
         )
         return code
+
+    # Some entries carry a trailing space ("Electricity ", "Carbon dioxide "),
+    # which would otherwise end up in the device name.
+    return name.strip()
 
 
 def _parse_timestamp(raw: Any) -> datetime | None:
@@ -351,10 +365,18 @@ class BrunataApiClient:
                 len(self._measurement_units),
             )
         else:
+            # Logged in full, not just counted. These are Brunata's own
+            # translation tables — static, identical for every account and free
+            # of personal data — and they are the only authoritative answer to
+            # which meter types and units the service can express at all. The
+            # meters on any one account use a handful of the entries.
             _LOGGER.debug(
-                "Loaded Brunata lookup tables: %s meter types, %s units",
+                "Loaded Brunata lookup tables (%s meter types, %s units). "
+                "meterType=%s measurementUnit=%s",
                 len(self._meter_types),
                 len(self._measurement_units),
+                self._meter_types,
+                self._measurement_units,
             )
 
     # --- HTTP ---------------------------------------------------------------
