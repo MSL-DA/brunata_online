@@ -1,6 +1,6 @@
 """Test Brunata sensor."""
 from dataclasses import replace
-from datetime import date
+from datetime import UTC, date, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from homeassistant.components.sensor import DOMAIN as SENSOR_DOMAIN, SensorDeviceClass
@@ -205,8 +205,8 @@ async def test_sensor_isolated_decrease_rejected_as_glitch(mock_meter):
     entity._apply_latest_reading()
     assert entity.native_value == 313.0
 
-    # The glitch must not count towards a later confirmation.
-    assert entity._pending_reset_dates == set()
+    # The glitch left no trace that could later be mistaken for a reset.
+    assert entity.native_value == 313.0
 
 
 async def test_sensor_accepts_reset_when_meter_number_changes(mock_meter):
@@ -234,59 +234,62 @@ async def test_sensor_accepts_reset_when_meter_number_changes(mock_meter):
     assert entity._meter_no == "M99999"
 
 
-async def test_sensor_accepts_reset_confirmed_across_reading_dates(mock_meter):
-    """When a meter is replaced but Brunata keeps the old meter number, the
-    only signal left is that the decrease persists — the new device counts up
-    from zero, so every reading stays below the old value."""
+async def test_sensor_accepts_reset_when_mounting_date_changes(mock_meter):
+    """Brunata states when a meter was installed. A new mounting date is a
+    replacement reported as fact, so the decrease needs no corroboration —
+    even if the meter number were somehow reused."""
     mock_meter = replace(mock_meter, meter_type="Water", unit="m3")
 
     coordinator = MagicMock()
     coordinator.data = {"12345": mock_meter}
     entity = _make_entity(coordinator, mock_meter)
 
-    coordinator.data = {"12345": replace(mock_meter, value=312.5, reading_date=date(2025, 6, 1))}
+    coordinator.data = {
+        "12345": replace(mock_meter, value=312.5, reading_date=date(2025, 6, 1))
+    }
     entity._apply_latest_reading()
     assert entity.native_value == 312.5
 
-    # Two readings below the cached value are not yet enough.
-    for day, value in ((20, 0.0), (21, 0.3)):
+    replaced = replace(
+        mock_meter,
+        value=0.4,
+        reading_date=date(2025, 6, 20),
+        mounting_date=datetime(2025, 6, 19, 9, 0, tzinfo=UTC),
+    )
+    coordinator.data = {"12345": replaced}
+    entity._apply_latest_reading()
+
+    assert entity.native_value == 0.4
+    assert entity._mounting_date == replaced.mounting_date
+
+
+async def test_sensor_unexplained_decrease_is_rejected(mock_meter):
+    """Neither a replacement nor an annual reset. Adopting it under
+    TOTAL_INCREASING would record a false consumption spike on the way back
+    up, so the cached value stands and a warning is logged instead."""
+    mock_meter = replace(mock_meter, meter_type="Water", unit="m3")
+
+    coordinator = MagicMock()
+    coordinator.data = {"12345": mock_meter}
+    entity = _make_entity(coordinator, mock_meter)
+
+    coordinator.data = {
+        "12345": replace(mock_meter, value=312.5, reading_date=date(2025, 6, 1))
+    }
+    entity._apply_latest_reading()
+
+    for day, value in ((20, 0.0), (21, 0.3), (22, 0.7)):
         coordinator.data = {
             "12345": replace(mock_meter, value=value, reading_date=date(2025, 6, day))
         }
         entity._apply_latest_reading()
         assert entity.native_value == 312.5
 
-    # The third distinct reading date confirms it.
-    coordinator.data = {"12345": replace(mock_meter, value=0.7, reading_date=date(2025, 6, 22))}
-    entity._apply_latest_reading()
-    assert entity.native_value == 0.7
-    assert entity.extra_state_attributes["reading_date"] == "2025-06-22"
-    assert entity._pending_reset_dates == set()
-
-
-async def test_sensor_confirmation_counts_dates_not_updates(mock_meter):
-    """The coordinator polls far more often than meters report, so the same
-    reading is re-served many times. Counting updates instead of reading dates
-    would let a single glitch confirm itself within the hour."""
-    mock_meter = replace(mock_meter, meter_type="Water", unit="m3")
-
-    coordinator = MagicMock()
-    coordinator.data = {"12345": mock_meter}
-    entity = _make_entity(coordinator, mock_meter)
-
-    coordinator.data = {"12345": replace(mock_meter, value=312.5, reading_date=date(2025, 6, 1))}
-    entity._apply_latest_reading()
-
-    coordinator.data = {"12345": replace(mock_meter, value=0.0, reading_date=date(2025, 6, 20))}
-    for _ in range(5):
-        entity._apply_latest_reading()
-    assert entity.native_value == 312.5
-
 
 async def test_sensor_decrease_without_reading_date_is_ignored(mock_meter):
-    """A reading can arrive without a parseable readingDate. It can neither be
-    placed in the calendar year nor contribute to a confirmation, so it must be
-    dropped — not crash the coordinator callback."""
+    """A reading can arrive without a parseable readingDate. It cannot be
+    placed in the calendar year, so an annual reset cannot be recognised and
+    the value must be dropped — not crash the coordinator callback."""
     mock_meter = replace(mock_meter, meter_type="Radiator", unit="units")
 
     coordinator = MagicMock()
@@ -392,7 +395,7 @@ async def test_sensor_restore_edge_cases(mock_meter):
 #
 # placement is the customer-assigned location label from Brunata's own UI
 # (e.g. "Bathroom (Cold)"), fetched separately from the reading itself and
-# absent whenever that fetch failed or the meter has none set.
+# absent whenever the meter has none set.
 
 async def test_sensor_device_name_uses_placement_when_present(mock_meter):
     """When a placement is available, the device name leads with it, so the
@@ -406,7 +409,7 @@ async def test_sensor_device_name_uses_placement_when_present(mock_meter):
 
 
 async def test_sensor_device_name_falls_back_without_placement(mock_meter):
-    """No placement (fetch failed, or none set in Brunata) keeps the original
+    """No placement set in Brunata keeps the original
     type+ID name rather than showing something blank."""
     coordinator = MagicMock()
     coordinator.data = {"12345": mock_meter}
@@ -455,7 +458,7 @@ async def test_sensor_placement_updates_even_when_the_reading_is_rejected(mock_m
     """A held-back reading must not hold back the label.
 
     placement is metadata, not part of the reading, so it is applied before the
-    accept/reject decision. A meter mid-way through reset confirmation still
+    accept/reject decision. A meter whose reading is being rejected still
     shows its current label while its value is deliberately frozen.
     """
     meter = replace(mock_meter, value=100.0, placement="Living room")
