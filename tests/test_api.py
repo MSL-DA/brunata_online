@@ -203,6 +203,38 @@ def test_codes_are_resolved_through_the_lookup_tables(
     assert meter.unit == expected_unit
 
 
+@pytest.mark.parametrize(("field", "code"), [("meterType", 20), ("unit", 21)])
+def test_null_table_entries_fall_back_to_the_raw_code(field, code):
+    """Brunata's live tables contain null entries — 7 of 28 meter types and 34
+    of 96 units are reserved slots. Returning the None would put it straight
+    into BrunataMeter.meter_type, and the sensor platform would die on
+    meter_type.lower(), taking every entity with it."""
+    types = ["Collector", "Radiator", "Water"] + [None] * 25
+    units = ["undefined", "units"] + [None] * 94
+
+    item = _meter_item("abc")
+    item[field] = code
+
+    meter = _parse_meters(
+        [item], meter_types=types, measurement_units=units
+    )["abc"]
+    assert isinstance(meter.meter_type, str)
+    assert isinstance(meter.unit, str)
+    assert (meter.meter_type if field == "meterType" else meter.unit) == str(code)
+
+
+def test_trailing_whitespace_in_table_entries_is_stripped():
+    """Two live entries carry one ("Electricity ", "Carbon dioxide "), and the
+    meter type becomes the device name."""
+    item = _meter_item("abc")
+    item["meterType"] = 1
+
+    meter = _parse_meters(
+        [item], meter_types=["", "Electricity "], measurement_units=MEASUREMENT_UNITS
+    )["abc"]
+    assert meter.meter_type == "Electricity"
+
+
 def test_unknown_codes_fall_back_to_the_raw_value():
     """An index past the end of the table must not take down the platform —
     passing a code through as-is once crashed every entity on
