@@ -3,6 +3,8 @@ from dataclasses import replace
 from datetime import UTC, date, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 from homeassistant.components.sensor import DOMAIN as SENSOR_DOMAIN, SensorDeviceClass
 from homeassistant.const import UnitOfEnergy, UnitOfVolume
 from homeassistant.core import HomeAssistant, State
@@ -152,6 +154,59 @@ async def test_sensor_display_precision_falls_back_to_the_unit(mock_meter):
             ),
         )
         assert entity.suggested_display_precision == expected_precision
+
+
+@pytest.mark.parametrize(
+    ("raw_unit", "expected_unit", "expected_class"),
+    [
+        # Every consumption unit in Brunata's live measurementUnit table that
+        # Home Assistant has a constant for. Spelled exactly as Brunata does.
+        ("m³", UnitOfVolume.CUBIC_METERS, SensorDeviceClass.WATER),
+        ("liter", UnitOfVolume.LITERS, SensorDeviceClass.WATER),
+        ("Wh", UnitOfEnergy.WATT_HOUR, SensorDeviceClass.ENERGY),
+        ("kWh", UnitOfEnergy.KILO_WATT_HOUR, SensorDeviceClass.ENERGY),
+        ("MWh", UnitOfEnergy.MEGA_WATT_HOUR, SensorDeviceClass.ENERGY),
+        ("J", UnitOfEnergy.JOULE, SensorDeviceClass.ENERGY),
+        ("kJ", UnitOfEnergy.KILO_JOULE, SensorDeviceClass.ENERGY),
+        ("MJ", UnitOfEnergy.MEGA_JOULE, SensorDeviceClass.ENERGY),
+        ("GJ", UnitOfEnergy.GIGA_JOULE, SensorDeviceClass.ENERGY),
+        ("Kcal", UnitOfEnergy.KILO_CALORIE, SensorDeviceClass.ENERGY),
+        ("Mcal", UnitOfEnergy.MEGA_CALORIE, SensorDeviceClass.ENERGY),
+        ("GCal", UnitOfEnergy.GIGA_CALORIE, SensorDeviceClass.ENERGY),
+    ],
+)
+async def test_sensor_maps_the_units_brunata_actually_reports(
+    mock_meter, raw_unit, expected_unit, expected_class
+):
+    """Sending Brunata's own spelling straight to Home Assistant would give an
+    invalid unit for the device class, and the sensor's Long Term Statistics
+    would be discarded — which is exactly what happened to the water meters."""
+    coordinator = MagicMock()
+    coordinator.data = {"12345": mock_meter}
+
+    entity = _make_entity(coordinator, replace(mock_meter, unit=raw_unit))
+    assert entity.native_unit_of_measurement == expected_unit
+    assert entity.device_class == expected_class
+
+
+@pytest.mark.parametrize("raw_unit", ["Btu", "°C", "Doprimo units", "m³ per hour"])
+async def test_sensor_unmappable_units_claim_no_device_class(mock_meter, raw_unit):
+    """Brunata's table spans temperature, pressure, flow rate and a dozen
+    vendor-specific allocator units. Passing them through without a device
+    class is correct; claiming one Home Assistant would reject is not."""
+    entity = _make_entity(MagicMock(), replace(mock_meter, unit=raw_unit))
+
+    assert entity.native_unit_of_measurement == raw_unit
+    assert entity.device_class is None
+
+
+async def test_sensor_undefined_unit_is_treated_as_absent(mock_meter):
+    """Index 0 of the table is the literal string "undefined". Passing it
+    through would put that word in the UI as the unit."""
+    entity = _make_entity(MagicMock(), replace(mock_meter, unit="undefined"))
+
+    assert entity.native_unit_of_measurement == FALLBACK_UNIT
+    assert entity.device_class is None
 
 
 async def test_sensor_reset_detection(mock_meter):
