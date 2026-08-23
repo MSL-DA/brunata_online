@@ -36,7 +36,7 @@ ANNUAL_RESET_METER_TYPES = ("radiator",)
 # before it is accepted as a real reset rather than an API glitch. A glitch
 # corrects itself on the next reading; a replaced meter keeps counting up from
 # zero, so every reading after it stays below the old value.
-RESET_CONFIRMATION_READINGS = 3
+RESET_CONFIRMATION_DATES = 3
 
 # Brunata reports units as free-form strings whose casing is not guaranteed
 # ("kWh", "KWH", "l", "L", "m3", "m³"). Map them onto Home Assistant's
@@ -400,7 +400,7 @@ class BrunataSensor(
         self._pending_reset_dates.add(reading_date)
         seen = len(self._pending_reset_dates)
 
-        if seen < RESET_CONFIRMATION_READINGS:
+        if seen < RESET_CONFIRMATION_DATES:
             _LOGGER.debug(
                 "Meter %s reported a decrease (%s -> %s) on %s — holding the "
                 "cached value, %s of %s reading dates seen so far",
@@ -409,7 +409,7 @@ class BrunataSensor(
                 value,
                 reading_date,
                 seen,
-                RESET_CONFIRMATION_READINGS,
+                RESET_CONFIRMATION_DATES,
             )
             return False
 
