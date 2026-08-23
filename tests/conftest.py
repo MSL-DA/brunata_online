@@ -6,7 +6,7 @@ patch the integration's own BrunataApiClient, whose surface is small and under
 our control.
 """
 
-from datetime import date
+from datetime import UTC, date, datetime
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -53,4 +53,7 @@ def mock_meter():
         unit="kWh",
         value=100.5,
         reading_date=date(2024, 1, 1),
+        mounting_date=datetime(2018, 10, 23, 14, 10, tzinfo=UTC),
+        decimals=2,
+        transmitting=True,
     )
