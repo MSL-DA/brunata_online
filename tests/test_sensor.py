@@ -108,10 +108,34 @@ async def test_sensor_allocator_unit_is_passed_through_verbatim(mock_meter):
         assert entity.device_class is None
 
 
-async def test_sensor_display_precision_by_unit(mock_meter):
-    """Heat cost allocators show whole numbers — the API's .00 decimals carry
-    no meaningful precision. Water keeps 3 decimals, energy keeps 2. This is
-    display-only: native_value is untouched either way."""
+async def test_sensor_display_precision_comes_from_the_api(mock_meter):
+    """Brunata states the precision it displays itself — 3 for water, 0 for
+    heat cost allocators — so the sensor shows what the portal shows instead
+    of a number guessed from the unit."""
+    coordinator = MagicMock()
+    coordinator.data = {"12345": mock_meter}
+
+    for meter_type, raw_unit, decimals in (
+        ("Radiator", "units", 0),
+        ("Water", "m3", 3),
+        ("Energy", "kWh", 2),
+    ):
+        entity = _make_entity(
+            coordinator,
+            replace(
+                mock_meter, meter_type=meter_type, unit=raw_unit, decimals=decimals
+            ),
+        )
+        assert entity.suggested_display_precision == decimals
+
+
+async def test_sensor_display_precision_falls_back_to_the_unit(mock_meter):
+    """decimals is optional. Without it the unit decides, so a meter Brunata
+    describes incompletely still gets a sensible number of digits rather than
+    none at all.
+
+    This is display-only either way: native_value and Long Term Statistics keep
+    the full float."""
     coordinator = MagicMock()
     coordinator.data = {"12345": mock_meter}
 
@@ -123,7 +147,9 @@ async def test_sensor_display_precision_by_unit(mock_meter):
     ):
         entity = _make_entity(
             coordinator,
-            replace(mock_meter, meter_type=meter_type, unit=raw_unit),
+            replace(
+                mock_meter, meter_type=meter_type, unit=raw_unit, decimals=None
+            ),
         )
         assert entity.suggested_display_precision == expected_precision
 
