@@ -39,16 +39,50 @@ ANNUAL_RESET_METER_TYPES = ("radiator",)
 # canonical unit constants: a device class combined with a non-canonical unit
 # string is rejected by HA's unit validation, which logs an error and discards
 # the entity's long term statistics. Keys are lowercased and stripped.
+# Keys are the entries in Brunata's measurementUnit table, lowercased. That
+# table has 96 slots and spans far more than metering — temperature, humidity,
+# pressure, conductivity — plus a dozen vendor-specific allocator units
+# ("Doprimo units", "Zenner units"). Only the ones with a Home Assistant
+# equivalent are mapped; everything else passes through verbatim and simply
+# gets no device class, which is correct rather than a limitation.
 UNIT_MAP: dict[str, str] = {
+    # Volume
     "m3": UnitOfVolume.CUBIC_METERS,
     "m³": UnitOfVolume.CUBIC_METERS,
+    "liter": UnitOfVolume.LITERS,
+    # Brunata spells litres out; the abbreviation is kept in case that changes.
     "l": UnitOfVolume.LITERS,
+    # Energy. GJ and MWh are the usual units for Danish district heating.
+    "wh": UnitOfEnergy.WATT_HOUR,
     "kwh": UnitOfEnergy.KILO_WATT_HOUR,
     "mwh": UnitOfEnergy.MEGA_WATT_HOUR,
+    "j": UnitOfEnergy.JOULE,
+    "kj": UnitOfEnergy.KILO_JOULE,
+    "mj": UnitOfEnergy.MEGA_JOULE,
+    "gj": UnitOfEnergy.GIGA_JOULE,
+    "kcal": UnitOfEnergy.KILO_CALORIE,
+    "mcal": UnitOfEnergy.MEGA_CALORIE,
+    "gcal": UnitOfEnergy.GIGA_CALORIE,
+    # Deliberately absent: "Btu" has no Home Assistant equivalent, and the
+    # remaining entries in Brunata's table are temperature, pressure, flow
+    # rate and vendor-specific allocator units, none of which belong on a
+    # TOTAL_INCREASING consumption sensor. They pass through verbatim and get
+    # no device class, which is the correct outcome rather than a limitation.
 }
 
 VOLUME_UNITS = (UnitOfVolume.CUBIC_METERS, UnitOfVolume.LITERS)
-ENERGY_UNITS = (UnitOfEnergy.KILO_WATT_HOUR, UnitOfEnergy.MEGA_WATT_HOUR)
+ENERGY_UNITS = (
+    UnitOfEnergy.WATT_HOUR,
+    UnitOfEnergy.KILO_WATT_HOUR,
+    UnitOfEnergy.MEGA_WATT_HOUR,
+    UnitOfEnergy.JOULE,
+    UnitOfEnergy.KILO_JOULE,
+    UnitOfEnergy.MEGA_JOULE,
+    UnitOfEnergy.GIGA_JOULE,
+    UnitOfEnergy.KILO_CALORIE,
+    UnitOfEnergy.MEGA_CALORIE,
+    UnitOfEnergy.GIGA_CALORIE,
+)
 
 # Fallback for the rare case where Brunata omits meterUnit entirely. Heat cost
 # allocators — the only meters that could plausibly arrive without a unit —
@@ -154,6 +188,8 @@ class BrunataSensor(
 
         # Resolve the reported unit to a canonical Home Assistant unit.
         raw_unit = meter.unit.strip()
+        if raw_unit.lower() == UNDEFINED_UNIT:
+            raw_unit = ""
         meter_type = meter.meter_type.lower()
         unit = UNIT_MAP.get(raw_unit.lower())
 
