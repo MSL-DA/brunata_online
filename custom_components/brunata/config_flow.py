@@ -86,7 +86,9 @@ class BrunataConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     ) -> ConfigFlowResult:
         """Handle the initial step."""
         # Never log user_input itself: it contains the password, and debug logs
-        # are routinely attached to bug reports.
+        # are routinely attached to bug reports. The email address is left out
+        # of the success lines below for the same reason — it identifies the
+        # account to anyone reading the report, and entry_id does the job.
         _LOGGER.debug("async_step_user called (form submitted: %s)", user_input is not None)
         errors = {}
         if user_input is not None:
@@ -97,7 +99,7 @@ class BrunataConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             self._abort_if_unique_id_configured()
             try:
                 info = await validate_input(self.hass, user_input)
-                _LOGGER.debug("Config entry created for %s", user_input[CONF_EMAIL])
+                _LOGGER.debug("Config entry created")
                 return self.async_create_entry(title=info["title"], data=user_input)
             except CannotConnect:
                 errors["base"] = "cannot_connect"
@@ -137,7 +139,9 @@ class BrunataConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 # different account.
                 await self.async_set_unique_id(_normalise_email(user_input[CONF_EMAIL]))
                 self._abort_if_unique_id_mismatch(reason="wrong_account")
-                _LOGGER.debug("Re-authentication successful for %s", user_input[CONF_EMAIL])
+                _LOGGER.debug(
+                    "Re-authentication successful for entry %s", reauth_entry.entry_id
+                )
                 return self.async_update_reload_and_abort(
                     reauth_entry,
                     data_updates=user_input,
