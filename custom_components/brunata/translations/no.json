@@ -1,0 +1,37 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "data": {
+          "email": "E-post",
+          "password": "Passord"
+        },
+        "description": "Skriv inn påloggingsopplysningene dine for Brunata."
+      },
+      "reauth_confirm": {
+        "data": {
+          "email": "E-post",
+          "password": "Passord"
+        },
+        "description": "Påloggingsopplysningene dine for Brunata er ikke lenger gyldige. Skriv dem inn på nytt for å fortsette."
+      }
+    },
+    "error": {
+      "cannot_connect": "Kan ikke koble til Brunata API-et. Sjekk nettverkstilkoblingen.",
+      "invalid_auth": "Ugyldige påloggingsopplysninger",
+      "unknown": "Uventet feil"
+    },
+    "abort": {
+      "already_configured": "Enheten er allerede konfigurert",
+      "reauth_successful": "Påloggingsopplysningene er oppdatert",
+      "wrong_account": "Denne e-postadressen tilhører en annen konto. Logg inn med den opprinnelige kontoen."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "consumption": {
+        "name": "Forbruk"
+      }
+    }
+  }
+}

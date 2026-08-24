@@ -1,0 +1,37 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "data": {
+          "email": "Adresse e-mail",
+          "password": "Mot de passe"
+        },
+        "description": "Saisissez vos identifiants Brunata."
+      },
+      "reauth_confirm": {
+        "data": {
+          "email": "Adresse e-mail",
+          "password": "Mot de passe"
+        },
+        "description": "Vos identifiants Brunata ne sont plus valides. Saisissez-les à nouveau pour continuer."
+      }
+    },
+    "error": {
+      "cannot_connect": "Impossible de se connecter à l’API Brunata. Vérifiez votre connexion réseau.",
+      "invalid_auth": "Identifiants invalides",
+      "unknown": "Une erreur inattendue s’est produite"
+    },
+    "abort": {
+      "already_configured": "L’appareil est déjà configuré",
+      "reauth_successful": "Les identifiants ont été mis à jour",
+      "wrong_account": "Cette adresse e-mail est associée à un autre compte. Connectez-vous avec le compte d’origine."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "consumption": {
+        "name": "Consommation"
+      }
+    }
+  }
+}
