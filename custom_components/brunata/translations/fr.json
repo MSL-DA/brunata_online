@@ -27,15 +27,6 @@
       "wrong_account": "Cette adresse e-mail est associée à un autre compte. Connectez-vous avec le compte d’origine."
     }
   },
-  "options": {
-    "step": {
-      "init": {
-        "data": {
-          "debug_logging": "Activer les journaux de débogage"
-        }
-      }
-    }
-  },
   "entity": {
     "sensor": {
       "consumption": {

@@ -1,5 +1,4 @@
 """Test Brunata config flow."""
-import logging
 from unittest.mock import patch
 from homeassistant import config_entries, data_entry_flow
 from homeassistant.core import HomeAssistant
@@ -7,7 +6,7 @@ from homeassistant.helpers import selector
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.brunata.config_flow import CannotConnect, InvalidAuth
-from custom_components.brunata.const import DOMAIN, CONF_DEBUG_LOGGING
+from custom_components.brunata.const import DOMAIN
 
 async def test_flow_user_init(hass: HomeAssistant):
     """Test the initialization of the form in the config flow."""
@@ -207,82 +206,6 @@ async def test_flow_reauth_wrong_account(hass: HomeAssistant, mock_brunata_clien
     assert result2["reason"] == "wrong_account"
     assert entry.data["email"] == "test@example.com"
     assert entry.data["password"] == "old_password"
-
-async def test_options_flow_reloads_entry_and_applies_debug_logging(
-    hass: HomeAssistant, mock_brunata_client
-):
-    """Saving the options form should reload the config entry automatically
-    (BrunataOptionsFlowHandler subclasses OptionsFlowWithReload — see
-    https://developers.home-assistant.io/docs/core/integration/options_flow/
-    #options-flow-with-automatic-reload)
-    instead of relying on a hand-rolled entry.add_update_listener(), and the
-    resulting reload should pick up the new debug-logging option."""
-    entry = MockConfigEntry(
-        domain=DOMAIN,
-        data={
-            "email": "test@example.com",
-            "password": "password123",
-        },
-    )
-    entry.add_to_hass(hass)
-
-    with patch(
-        "custom_components.brunata.BrunataDataUpdateCoordinator._async_update_data",
-        return_value={},
-    ):
-        assert await hass.config_entries.async_setup(entry.entry_id)
-        await hass.async_block_till_done()
-
-        result = await hass.config_entries.options.async_init(entry.entry_id)
-        assert result["type"] == data_entry_flow.FlowResultType.FORM
-        assert result["step_id"] == "init"
-
-        result2 = await hass.config_entries.options.async_configure(
-            result["flow_id"],
-            {CONF_DEBUG_LOGGING: True},
-        )
-        await hass.async_block_till_done()
-
-    assert result2["type"] == data_entry_flow.FlowResultType.CREATE_ENTRY
-    # OptionsFlowWithReload triggers the reload itself; a fully successful
-    # reload leaves the entry loaded again and, per async_setup_entry,
-    # having picked up the new option.
-    assert entry.state is config_entries.ConfigEntryState.LOADED
-    assert logging.getLogger("custom_components.brunata").level == logging.DEBUG
-
-
-async def test_options_flow_turns_debug_logging_back_off(
-    hass: HomeAssistant, mock_brunata_client
-):
-    """Disabling the option must reset the log level. Setting only the DEBUG
-    case would leave the logger stuck at DEBUG until the next restart."""
-    entry = MockConfigEntry(
-        domain=DOMAIN,
-        data={
-            "email": "test@example.com",
-            "password": "password123",
-        },
-        options={CONF_DEBUG_LOGGING: True},
-    )
-    entry.add_to_hass(hass)
-
-    with patch(
-        "custom_components.brunata.BrunataDataUpdateCoordinator._async_update_data",
-        return_value={},
-    ):
-        assert await hass.config_entries.async_setup(entry.entry_id)
-        await hass.async_block_till_done()
-        assert logging.getLogger("custom_components.brunata").level == logging.DEBUG
-
-        result = await hass.config_entries.options.async_init(entry.entry_id)
-        await hass.config_entries.options.async_configure(
-            result["flow_id"],
-            {CONF_DEBUG_LOGGING: False},
-        )
-        await hass.async_block_till_done()
-
-    assert logging.getLogger("custom_components.brunata").level == logging.NOTSET
-
 
 async def test_credential_fields_use_selectors(hass: HomeAssistant, mock_brunata_client):
     """The password field must render masked, in both the initial and the

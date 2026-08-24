@@ -27,15 +27,6 @@
       "wrong_account": "Den här e-postadressen tillhör ett annat konto. Logga in med det ursprungliga kontot."
     }
   },
-  "options": {
-    "step": {
-      "init": {
-        "data": {
-          "debug_logging": "Aktivera felsökningslogg"
-        }
-      }
-    }
-  },
   "entity": {
     "sensor": {
       "consumption": {

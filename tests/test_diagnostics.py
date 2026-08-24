@@ -20,7 +20,6 @@ async def _setup(hass: HomeAssistant, mock_brunata_client, mock_meter):
     entry = MockConfigEntry(
         domain=DOMAIN,
         data={"email": "test@example.com", "password": "password123"},
-        options={"debug_logging": True},
     )
     entry.add_to_hass(hass)
 

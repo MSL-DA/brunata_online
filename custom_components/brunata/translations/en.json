@@ -27,15 +27,6 @@
       "wrong_account": "This email belongs to a different account. Log in with the original account."
     }
   },
-  "options": {
-    "step": {
-      "init": {
-        "data": {
-          "debug_logging": "Enable debug logging"
-        }
-      }
-    }
-  },
   "entity": {
     "sensor": {
       "consumption": {

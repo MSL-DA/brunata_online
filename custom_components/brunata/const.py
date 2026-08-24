@@ -4,4 +4,3 @@
 # they are used; they are not redefined here.
 
 DOMAIN = "brunata"
-CONF_DEBUG_LOGGING = "debug_logging"

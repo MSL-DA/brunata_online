@@ -27,15 +27,6 @@
       "wrong_account": "E-mailen tilhører en anden konto. Log ind med den oprindelige konto."
     }
   },
-  "options": {
-    "step": {
-      "init": {
-        "data": {
-          "debug_logging": "Aktiver debug-logning"
-        }
-      }
-    }
-  },
   "entity": {
     "sensor": {
       "consumption": {

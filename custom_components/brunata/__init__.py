@@ -19,7 +19,7 @@ from .api import (
     BrunataConnectionError,
     BrunataMeter,
 )
-from .const import CONF_DEBUG_LOGGING, DOMAIN
+from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -29,17 +29,16 @@ type BrunataConfigEntry = ConfigEntry[BrunataDataUpdateCoordinator]
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: BrunataConfigEntry) -> bool:
-    """Set up Brunata from a config entry."""
-    # Set the level explicitly in both directions. Setting only the DEBUG case
-    # would leave the loggers stuck at DEBUG until the next restart once the
-    # option is turned back off. NOTSET makes them inherit from their parent
-    # again, which is the default state.
-    debug_logging = bool(entry.options.get(CONF_DEBUG_LOGGING))
-    log_level = logging.DEBUG if debug_logging else logging.NOTSET
-    _LOGGER.setLevel(log_level)
-    if debug_logging:
-        _LOGGER.debug("Debug logging enabled via settings")
+    """Set up Brunata from a config entry.
 
+    Nothing here touches the log level, and nothing should. An options flow
+    used to set it from a stored flag, duplicating Home Assistant's own
+    "Enable debug logging" button under the three-dot menu. The button does
+    the same job and adds a downloadable log for the session, so the option
+    was removed rather than kept alongside it. Point users at the button, or
+    at a logger: block in configuration.yaml when the setting has to survive
+    a restart.
+    """
     client = await BrunataApiClient.async_create(
         hass, entry.data[CONF_EMAIL], entry.data[CONF_PASSWORD]
     )
@@ -74,9 +73,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: BrunataConfigEntry) -> b
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
-    # No manual update listener: BrunataOptionsFlowHandler subclasses
-    # OptionsFlowWithReload, so HA reloads the entry itself when options are
-    # saved, which re-runs this function and re-reads the option above.
     return True
 
 
