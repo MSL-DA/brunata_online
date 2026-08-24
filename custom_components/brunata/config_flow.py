@@ -8,9 +8,9 @@ from typing import Any
 import voluptuous as vol
 
 from homeassistant import config_entries
-from homeassistant.config_entries import ConfigFlowResult, OptionsFlowWithReload
+from homeassistant.config_entries import ConfigFlowResult
 from homeassistant.const import CONF_EMAIL, CONF_PASSWORD
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import AbortFlow
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import selector
@@ -21,7 +21,7 @@ from .api import (
     BrunataAuthError,
     BrunataConnectionError,
 )
-from .const import CONF_DEBUG_LOGGING, DOMAIN
+from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -166,50 +166,6 @@ class BrunataConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 }
             ),
             errors=errors,
-        )
-
-    @staticmethod
-    @callback
-    def async_get_options_flow(
-        config_entry: config_entries.ConfigEntry,
-    ) -> BrunataOptionsFlowHandler:
-        """Get the options flow for this handler."""
-        return BrunataOptionsFlowHandler()
-
-
-class BrunataOptionsFlowHandler(OptionsFlowWithReload):
-    """Handle Brunata options.
-
-    Subclassing OptionsFlowWithReload (instead of plain OptionsFlow) makes
-    Home Assistant automatically reload the config entry after the options
-    form is saved — the recommended replacement for a manual
-    entry.add_update_listener() whose only job is to trigger a reload. See
-    async_setup_entry() in __init__.py for the corresponding note.
-
-    This class was added in Home Assistant 2025.8 and is the newest core API
-    the integration uses, so it is what sets the minimum in hacs.json. On an
-    older Home Assistant this import fails and the integration will not load.
-    If this ever stops being the newest API in use, recheck that minimum
-    rather than leaving it to drift.
-    """
-
-    async def async_step_init(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
-        """Manage the Brunata options."""
-        if user_input is not None:
-            return self.async_create_entry(title="", data=user_input)
-
-        return self.async_show_form(
-            step_id="init",
-            data_schema=vol.Schema(
-                {
-                    vol.Optional(
-                        CONF_DEBUG_LOGGING,
-                        default=self.config_entry.options.get(CONF_DEBUG_LOGGING, False),
-                    ): bool,
-                }
-            ),
         )
 
 
