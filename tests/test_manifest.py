@@ -3,9 +3,15 @@
 hacs.json advertises a minimum Home Assistant version to every HACS user, and
 that number decides who HACS lets install the integration at all. It is an API
 claim, not a tested one: it names the oldest release that has every core API
-the code imports. The current floor is OptionsFlowWithReload, added in 2025.8 —
-see the docstring on BrunataOptionsFlowHandler in config_flow.py, which is where
-the reason lives so it cannot drift away from the code that sets it.
+the code imports.
+
+The declared number is 2025.8, which was OptionsFlowWithReload. That class went
+with the options flow, so nothing in the tree requires 2025.8 any more and the
+number is currently unexplained. It is deliberately left where it is: lowering
+it means working out which of the remaining core APIs is now the newest, and
+that has to be read off the release that introduced each one, not inferred from
+dates. Declaring a floor that is too high only costs installability; declaring
+one that is too low breaks setup for anyone who takes it at its word.
 
 Testing against that floor was tried and dropped. Installing a year-old Home
 Assistant from PyPI today pulls newer releases of its loosely pinned indirect
