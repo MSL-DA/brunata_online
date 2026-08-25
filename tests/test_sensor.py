@@ -321,7 +321,12 @@ async def test_january_glitch_within_the_same_year_is_rejected(mock_meter):
 async def test_january_window_still_applies_without_a_previous_date(mock_meter):
     """The fallback has to keep working. A state restored from before the
     reading date was recorded has no previous date to compare against, and
-    that is exactly the case the window exists for."""
+    that is exactly the case the window exists for.
+
+    17 January is outside the year rule — there is no previous year to be
+    later than — so accepting it can only be the window. Remove the window and
+    this reading is rejected and the sensor stays on 4820.
+    """
     meter = replace(mock_meter, meter_type="Radiator", unit="units")
 
     coordinator = MagicMock()
@@ -330,10 +335,32 @@ async def test_january_window_still_applies_without_a_previous_date(mock_meter):
     }
     entity = _make_entity(coordinator, meter)
 
+    # No reading_date attribute, so nothing seeds the baseline.
     await _restore(entity, MagicMock(state="4820.0", attributes={}), None)
 
-    assert entity._last_reading_day is None
     assert entity.native_value == 11.0
+    # And the accepted reading becomes the baseline, so the window is not
+    # consulted again next time.
+    assert entity._last_reading_day == date(2026, 1, 17)
+
+
+async def test_january_window_is_not_consulted_once_a_date_is_known(mock_meter):
+    """The other half: with a baseline in hand, only the year rule applies.
+
+    Asserted on _is_annual_reset() directly, because _apply_latest_reading()
+    overwrites the baseline as soon as it accepts something — which is what
+    made the first version of the test above assert on the wrong moment.
+    """
+    meter = replace(mock_meter, meter_type="Radiator", unit="units")
+    entity = _make_entity(MagicMock(), meter)
+
+    entity._last_reading_day = None
+    assert entity._is_annual_reset(date(2026, 1, 17)) is True
+    assert entity._is_annual_reset(date(2026, 6, 14)) is False
+
+    entity._last_reading_day = date(2026, 1, 12)
+    assert entity._is_annual_reset(date(2026, 1, 17)) is False
+    assert entity._is_annual_reset(date(2027, 1, 17)) is True
 
 
 async def test_sensor_isolated_decrease_rejected_as_glitch(mock_meter):
