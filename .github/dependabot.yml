@@ -1,13 +1,6 @@
 version: 2
 
 updates:
-  # Only github-actions. The pip ecosystem is deliberately left out:
-  # requirements_test.txt pins pytest-homeassistant-custom-component, and that
-  # pin is not an ordinary dependency — it decides which Home Assistant version
-  # CI tests against. pytest-latest.yml already reports when a newer Home
-  # Assistant breaks something, so the pin is bumped by hand, with a reason,
-  # rather than weekly by a bot. Note also that ruff is pinned inside lint.yml
-  # as a pip install argument, which Dependabot cannot see either way.
   - package-ecosystem: "github-actions"
     directory: "/"
     target-branch: "beta"
@@ -22,5 +15,27 @@ updates:
       actions:
         patterns:
           - "*"
+    commit-message:
+      prefix: "ci"
+
+  # pip covers requirements_lint.txt, which is where the Ruff pin now lives. It
+  # used to be a `pip install ruff==...` argument inside lint.yml, which
+  # Dependabot cannot see at all, so the pin simply aged.
+  #
+  # pytest-homeassistant-custom-component is excluded below. It is not an
+  # ordinary dependency: it decides which Home Assistant version CI tests
+  # against, and pytest-latest.yml already reports when a newer Home Assistant
+  # breaks something. That pin is bumped by hand, with a reason, rather than
+  # weekly by a bot.
+  - package-ecosystem: "pip"
+    directory: "/"
+    target-branch: "beta"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "05:00"
+      timezone: "Europe/Copenhagen"
+    ignore:
+      - dependency-name: "pytest-homeassistant-custom-component"
     commit-message:
       prefix: "ci"
