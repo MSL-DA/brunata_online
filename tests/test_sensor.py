@@ -131,7 +131,7 @@ async def test_sensor_allocator_unit_is_passed_through_verbatim(mock_meter):
         assert entity.native_unit_of_measurement == raw_unit
         assert entity.device_class is None
 
-    # Only a genuinely absent meterUnit falls back to the default.
+    # Only a genuinely absent unit falls back to the default.
     for missing in ("", "   ", None):
         entity = _make_entity(coordinator, replace(mock_meter, unit=missing or ""))
         assert entity.native_unit_of_measurement == FALLBACK_UNIT
@@ -238,9 +238,9 @@ async def test_sensor_undefined_unit_is_treated_as_absent(mock_meter):
 
 
 async def test_sensor_reset_detection(mock_meter):
-    """Heat cost allocators are zeroed on 1 January, so a decrease at the turn
-    of the year is accepted straight away. A single mid-year decrease is not —
-    it has to be confirmed by later readings first."""
+    """Heat cost allocators are zeroed on 1 January, so a decrease across the
+    turn of the year is accepted. A mid-year decrease is not: with no
+    replacement to point at, it is a glitch, and the cached value stands."""
     mock_meter = replace(mock_meter, meter_type="Radiator", unit="units")
 
     coordinator = MagicMock()
@@ -289,6 +289,50 @@ async def test_sensor_reset_accepted_when_first_reading_arrives_late(mock_meter)
     entity._apply_latest_reading()
     coordinator.data = {"12345": replace(mock_meter, value=11.0, reading_date=date(2025, 2, 3))}
     entity._apply_latest_reading()
+    assert entity.native_value == 11.0
+
+
+async def test_january_glitch_within_the_same_year_is_rejected(mock_meter):
+    """The month window used to be checked even when the previous reading date
+    was known, which made it wider than intended: a fall on 20 January, with
+    the last accepted reading dated 12 January of the *same* year, was adopted
+    as an annual reset even though no year boundary had been crossed. The
+    calendar year is the signal; the window is only a stand-in for not having
+    one."""
+    meter = replace(mock_meter, meter_type="Radiator", unit="units")
+
+    coordinator = MagicMock()
+    coordinator.data = {"12345": meter}
+    entity = _make_entity(coordinator, meter)
+
+    coordinator.data = {
+        "12345": replace(meter, value=140.0, reading_date=date(2026, 1, 12))
+    }
+    entity._apply_latest_reading()
+    assert entity.native_value == 140.0
+
+    coordinator.data = {
+        "12345": replace(meter, value=0.0, reading_date=date(2026, 1, 20))
+    }
+    entity._apply_latest_reading()
+    assert entity.native_value == 140.0
+
+
+async def test_january_window_still_applies_without_a_previous_date(mock_meter):
+    """The fallback has to keep working. A state restored from before the
+    reading date was recorded has no previous date to compare against, and
+    that is exactly the case the window exists for."""
+    meter = replace(mock_meter, meter_type="Radiator", unit="units")
+
+    coordinator = MagicMock()
+    coordinator.data = {
+        "12345": replace(meter, value=11.0, reading_date=date(2026, 1, 17))
+    }
+    entity = _make_entity(coordinator, meter)
+
+    await _restore(entity, MagicMock(state="4820.0", attributes={}), None)
+
+    assert entity._last_reading_day is None
     assert entity.native_value == 11.0
 
 
@@ -419,11 +463,10 @@ async def test_sensor_restores_last_state_before_coordinator_has_data(
     """A restarted/reloaded sensor must restore its last reading and stay
     available even if the coordinator has not delivered a fresh reading yet —
     this is the exact gap async_added_to_hass()'s restore closes."""
-    # has_entity_name + the device name determine the generated entity_id
-    # (it includes the meter type, e.g. "heat"). Dropping the "Brunata"
-    # prefix from the device name changes the slug it's derived from — this
-    # value needs re-confirming against the actual HA-registered entity_id
-    # in a real test run, same as when it was first added.
+    # has_entity_name + the device name determine the generated entity_id: the
+    # device is "Heat (12345)" and the entity name is "Consumption". Confirmed
+    # against a real run — if the device naming in __init__ changes, this
+    # string changes with it.
     entity_id = "sensor.heat_12345_consumption"
     mock_restore_cache(
         hass,
@@ -855,8 +898,8 @@ async def test_device_name_follows_a_relabelled_meter(
 
 
 async def test_sensor_placement_is_cleared_when_it_disappears(mock_meter):
-    """A failed placements fetch degrades to None for every meter. The attribute
-    should follow rather than serve a label the API no longer reports."""
+    """A label removed in Brunata's UI comes back as null in the payload. The
+    attribute should follow rather than serve one the API no longer reports."""
     meter = replace(mock_meter, placement="Living room")
     coordinator = MagicMock()
     coordinator.data = {"12345": meter}
