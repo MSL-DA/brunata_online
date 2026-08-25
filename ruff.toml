@@ -1,35 +1,15 @@
-# Ruff configuration for the Brunata integration.
+# Lint toolchain. Separate from requirements_test.txt on purpose: that file
+# pins pytest-homeassistant-custom-component, which is not an ordinary
+# dependency — it decides which Home Assistant version CI tests against, and it
+# is bumped by hand with a reason. Ruff is an ordinary dependency and should be
+# bumped like one.
 #
-# Deliberately a narrow, high-signal rule set rather than Home Assistant core's
-# full configuration: every rule enabled here passes on the current code, so CI
-# is green from the first commit and any future failure is a real regression
-# rather than pre-existing debt.
-
-# Home Assistant 2025.8 — the minimum declared in hacs.json — runs on Python
-# 3.13, so the code must stay valid there even though CI runs 3.14. Raise this
-# only when that minimum moves.
-target-version = "py313"
-line-length = 100
-
-[lint]
-select = [
-    "F",        # pyflakes — unused imports and variables, undefined names
-    "E",        # pycodestyle errors, including E501 line length
-    "W",        # pycodestyle warnings, including trailing whitespace
-    "PLC0415",  # import not at top of file
-]
-
-# Rules worth adopting later, each needing a one-off `ruff check --fix` pass
-# that touches many files. Enable them deliberately, in their own commit, so
-# the diff is reviewable:
-#   "I"    — import sorting (would reorder imports across the repo)
-#   "UP"   — pyupgrade (rewrites to newer syntax)
-#   "B"    — flake8-bugbear
-#   "RUF"  — Ruff-specific rules
-ignore = []
-
-[format]
-# Formatting is not enforced in CI yet. Running `ruff format` would reflow most
-# of the codebase in a single unreviewable commit; do it deliberately when you
-# are ready, then add `ruff format --check` to the lint workflow.
-quote-style = "double"
+# It lived as a `pip install ruff==...` argument inside lint.yml, where nothing
+# could see it: not Dependabot, and not anyone looking for the repo's pinned
+# versions. Keeping it here means the pin is visible in the same place as every
+# other one, and a bump is a one-line diff with a changelog to point at.
+#
+# ruff.toml selects rules explicitly, so a Ruff release that changes the
+# default rule set does not change what runs here. A bump can still surface new
+# findings within the selected rules; take them one release at a time.
+ruff==0.14.2
