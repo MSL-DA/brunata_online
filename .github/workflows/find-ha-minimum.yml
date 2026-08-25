@@ -10,6 +10,21 @@ name: Find minimum Home Assistant version
 # One entry (2025.2.0) is flagged as a best-effort guess rather than a
 # confirmed match; the rest are exact.
 #
+# READING THE RESULTS
+# -------------------
+# Only two kinds of failure answer the question:
+#   * ImportError / AttributeError on a homeassistant.* name — that release
+#     genuinely lacks a core API the code uses. This is the real floor.
+#   * A test assertion failing — behaviour differs on that release.
+#
+# Anything failing during `pip install` is about PyPI, not about this code:
+# no wheel for the interpreter, a build-from-source that needs a toolchain,
+# a resolver conflict between an old release's loosely pinned indirect
+# dependencies and whatever is newest on PyPI today. Those say nothing about
+# whether the integration would run on a user's Home Assistant, where every
+# dependency is locked in the container image. Ignore them, or note that
+# month as "not determinable from PyPI today".
+#
 # WHEN YOU'RE DONE
 # ----------------
 # Commit this file to .github/workflows/, push it, then trigger it manually
@@ -66,7 +81,13 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v7
         with:
-          python-version: "3.14"
+          # 3.13, NOT the 3.14 the other workflows use. Home Assistant 2025.8
+          # runs on 3.13 (which is why ruff.toml targets py313), and the
+          # dependencies these older releases pin only publish wheels up to
+          # 3.13. On 3.14 pip falls back to building pydantic-core from
+          # source, which fails because PyO3 0.24.1 doesn't support 3.14 —
+          # a failure about PyPI and wheel availability, not about this code.
+          python-version: "3.13"
 
       - name: Install test dependencies
         run: |
