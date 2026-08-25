@@ -74,15 +74,11 @@ async def async_get_config_entry_diagnostics(
             ),
             "meter_count": len(meters),
         },
-        "api": {
-            # Every meter type and unit is an index into these. If they failed
-            # to load, every meter is named and united by a bare number, and
-            # that is the first thing to check.
-            "lookup_tables_loaded": client._lookup_tables_loaded,
-            "meter_types": client._meter_types,
-            "measurement_units": client._measurement_units,
-            "has_access_token": client._access_token is not None,
-            "has_refresh_token": client._refresh_token is not None,
-        },
+        # Every meter type and unit is an index into the lookup tables. If they
+        # failed to load, every meter is named and united by a bare number, and
+        # that is the first thing to check. What goes in here is decided by
+        # BrunataApiClient.diagnostics(), next to the fields themselves —
+        # notably that tokens are reported as present or absent, never quoted.
+        "api": client.diagnostics(),
         "meters": [_meter_diagnostics(meter) for meter in meters.values()],
     }
