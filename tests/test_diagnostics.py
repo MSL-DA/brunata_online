@@ -26,11 +26,16 @@ async def _setup(hass: HomeAssistant, mock_brunata_client, mock_meter):
     mock_brunata_client.async_get_meters = AsyncMock(
         return_value={"12345": mock_meter}
     )
-    mock_brunata_client._lookup_tables_loaded = True
-    mock_brunata_client._meter_types = ["Collector", "Radiator", "Water"]
-    mock_brunata_client._measurement_units = ["undefined", "units", "m3"]
-    mock_brunata_client._access_token = "secret-access-token"
-    mock_brunata_client._refresh_token = "secret-refresh-token"
+    # diagnostics.py asks the client for this rather than reading five private
+    # attributes off it; what the report may contain is decided in api.py, and
+    # tested there by test_client_diagnostics_reports_tokens_without_quoting_them.
+    mock_brunata_client.diagnostics.return_value = {
+        "lookup_tables_loaded": True,
+        "meter_types": ["Collector", "Radiator", "Water"],
+        "measurement_units": ["undefined", "units", "m3"],
+        "has_access_token": True,
+        "has_refresh_token": True,
+    }
 
     assert await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done()
@@ -51,19 +56,20 @@ async def test_diagnostics_redacts_the_credentials(
     assert "password123" not in str(result)
 
 
-async def test_diagnostics_never_contains_a_token(
+async def test_diagnostics_reports_the_client_state_verbatim(
     hass: HomeAssistant, mock_brunata_client, mock_meter
 ):
-    """Presence is reported, the token itself is not — an access token is a
-    working credential for as long as it lives."""
+    """The api section is whatever BrunataApiClient.diagnostics() returned.
+
+    That the tokens themselves never appear in it is the client's guarantee and
+    is tested there; what matters here is that this module passes the report
+    through and does not go looking for anything else on its own."""
     entry = await _setup(hass, mock_brunata_client, mock_meter)
 
     result = await async_get_config_entry_diagnostics(hass, entry)
 
-    assert result["api"]["has_access_token"] is True
-    assert result["api"]["has_refresh_token"] is True
-    assert "secret-access-token" not in str(result)
-    assert "secret-refresh-token" not in str(result)
+    assert result["api"] == mock_brunata_client.diagnostics.return_value
+    mock_brunata_client.diagnostics.assert_called_once_with()
 
 
 async def test_diagnostics_redacts_the_meter_number(
