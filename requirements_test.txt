@@ -1,15 +1,14 @@
-# Lint toolchain. Separate from requirements_test.txt on purpose: that file
-# pins pytest-homeassistant-custom-component, which is not an ordinary
-# dependency — it decides which Home Assistant version CI tests against, and it
-# is bumped by hand with a reason. Ruff is an ordinary dependency and should be
-# bumped like one.
+# pytest-homeassistant-custom-component pins the exact Home Assistant, pytest
+# and pytest-asyncio versions it was generated against, so this is deliberately
+# the single pin. Adding separate pins for those only creates resolver
+# conflicts the next time it bumps them.
 #
-# It lived as a `pip install ruff==...` argument inside lint.yml, where nothing
-# could see it: not Dependabot, and not anyone looking for the repo's pinned
-# versions. Keeping it here means the pin is visible in the same place as every
-# other one, and a bump is a one-line diff with a changelog to point at.
+# It is not an ordinary dependency: it decides which Home Assistant version CI
+# tests against, so it is bumped by hand with a reason, and dependabot.yml
+# excludes it by name. The lint toolchain is pinned separately in
+# requirements_lint.txt precisely because it *is* ordinary — do not merge the
+# two files.
 #
-# ruff.toml selects rules explicitly, so a Ruff release that changes the
-# default rule set does not change what runs here. A bump can still surface new
-# findings within the selected rules; take them one release at a time.
-ruff==0.14.2
+# 0.13.356 is Home Assistant 2026.8.2. The "Show resolved versions" step in
+# pytest.yml prints it on every run, so the log is the authority, not this line.
+pytest-homeassistant-custom-component==0.13.356
