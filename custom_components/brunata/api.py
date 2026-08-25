@@ -11,9 +11,12 @@ integration at runtime with no warning.
 Everything the integration actually used is implemented here instead: the
 Keycloak login and the single ``/consumer/metersforconsumer`` call that
 Brunata's own readings page uses, which carries each meter's reading together
-with its customer-assigned placement label. The HTTP client comes from Home
-Assistant, which builds the SSL context off the event loop and closes the
-client at shutdown.
+with its customer-assigned placement label.
+
+The HTTP client is built and owned here, deliberately *not* taken from
+``homeassistant.helpers.httpx_client`` — see ``async_create()`` for why, and
+for why it is constructed in the executor. Anything that reads like an
+argument for dropping ``async_close()`` is out of date.
 """
 
 from __future__ import annotations
@@ -43,8 +46,10 @@ _LOGGER = logging.getLogger(__name__)
 BASE_URL = "https://online.brunata.com"
 API_URL = f"{BASE_URL}/online-webservice/v2/rest"
 
-# Sent as the Referer on API calls. Taken from brunata-api 0.1.6, which is what
-# the endpoints were verified against.
+# Sent as the Referer on API calls. It is Brunata's own readings page, which
+# is where the requests this client imitates come from — confirmed by reading
+# the live traffic in the browser's developer tools, not inherited from
+# brunata-api.
 METERS_URL = f"{BASE_URL}/react-online/meters-values"
 
 # Brunata's API is fronted by bot protection, so the requests are made to look
