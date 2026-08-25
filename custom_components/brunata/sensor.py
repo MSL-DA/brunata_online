@@ -86,9 +86,9 @@ ENERGY_UNITS = (
     UnitOfEnergy.GIGA_CALORIE,
 )
 
-# Fallback for the rare case where Brunata omits meterUnit entirely. Heat cost
-# allocators — the only meters that could plausibly arrive without a unit —
-# report "units", so that is the sensible guess and keeps such a sensor
+# Fallback for the rare case where Brunata omits the unit field entirely. Heat
+# cost allocators — the only meters that could plausibly arrive without a unit
+# — report "units", so that is the sensible guess and keeps such a sensor
 # consistent with its siblings. Note this is only a fallback for a *missing*
 # field: a meter that reports "units" normally takes the pass-through branch
 # below, which deliberately preserves Brunata's own capitalisation.
@@ -644,24 +644,27 @@ class BrunataSensor(
         sensor froze at the pre-reset value until the new period happened to
         exceed it.
 
-        A decrease is therefore treated as the annual reset when either:
+        The reliable signal is therefore the calendar year: a reading dated in
+        a later year than the last accepted one is on the far side of a
+        1 January, whenever it happens to arrive.
 
-        * the reading date has crossed into a later calendar year than the last
-          accepted reading — this is the reliable signal and needs no window at
-          all; or
-        * the reading falls on 31 December or anywhere in January, which covers
-          the case where the previous reading date is unknown (e.g. a state
-          restored from before this attribute was recorded).
+        The December/January window is only a fallback for when the previous
+        reading date is unknown — a state restored from before that attribute
+        was recorded, or a reading that arrived without a parseable date. It
+        used to be checked either way, which made it wider than it was meant to
+        be: a glitch on 20 January, with the last accepted reading dated
+        12 January of the *same* year, was adopted as an annual reset even
+        though no year boundary had been crossed.
 
-        A reading with no usable date can't be placed in the year at all, so it
-        falls through to the confirmation rule instead.
+        A decrease with no usable date at all cannot be placed in the calendar,
+        so it is not a reset either.
         """
         if reading_date is None:
             return False
 
         last_day = self._last_reading_day
-        if last_day is not None and reading_date.year > last_day.year:
-            return True
+        if last_day is not None:
+            return reading_date.year > last_day.year
 
         return reading_date.month == 1 or (reading_date.month, reading_date.day) == (
             12,
