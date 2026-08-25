@@ -27,7 +27,7 @@ import secrets
 import time
 from dataclasses import dataclass
 from datetime import date, datetime
-from functools import partial
+from functools import lru_cache, partial
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
@@ -152,6 +152,28 @@ def _as_text(raw: Any) -> str:
     return str(raw)
 
 
+@lru_cache(maxsize=64)
+def _warn_unresolved_code(what: str, code: str, table_size: int) -> None:
+    """Warn about an unresolved lookup code, once per process.
+
+    _lookup() runs for every meter on every poll, so a code that does not
+    resolve would otherwise produce one warning per meter per hour for as long
+    as the meter exists — 24 identical lines a day, drowning out everything
+    else in the log. The lookup tables are static and account-independent, so
+    the second warning carries nothing the first did not.
+
+    The cache is what makes it fire once: lru_cache only executes the body on
+    a combination of arguments it has not seen before.
+    """
+    _LOGGER.warning(
+        "Brunata %s code %r does not resolve in the lookup table "
+        "(%s entries). Falling back to the raw code.",
+        what,
+        code,
+        table_size,
+    )
+
+
 def _lookup(table: list[str], raw: Any, what: str) -> str:
     """Resolve a numeric code against one of the locale lookup tables.
 
@@ -176,13 +198,7 @@ def _lookup(table: list[str], raw: Any, what: str) -> str:
     # and the sensor platform would then die on meter_type.lower(), taking
     # every entity with it rather than just the odd one.
     if not isinstance(name, str) or not name.strip():
-        _LOGGER.warning(
-            "Brunata %s code %r does not resolve in the lookup table "
-            "(%s entries). Falling back to the raw code.",
-            what,
-            code,
-            len(table),
-        )
+        _warn_unresolved_code(what, code, len(table))
         return code
 
     # Some entries carry a trailing space ("Electricity ", "Carbon dioxide "),
@@ -203,6 +219,25 @@ def _parse_timestamp(raw: Any) -> datetime | None:
         except ValueError:
             _LOGGER.debug("Could not parse timestamp %r", raw)
     return None
+
+
+def _parse_value(raw: Any) -> float | None:
+    """Parse a meter reading, tolerating anything that is not a number.
+
+    Every other field in _parse_meters() degrades to None rather than raising,
+    so one odd row costs one meter. A bare float() here would break that rule:
+    a ValueError escapes _parse_meters(), passes api.py's own error types
+    without being translated, and reaches DataUpdateCoordinator as an
+    unexpected exception — costing every meter that update, not just the one
+    with the bad value.
+    """
+    if raw is None:
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        _LOGGER.debug("Could not parse reading value %r", raw)
+        return None
 
 
 def _parse_reading_date(raw: Any) -> date | None:
@@ -260,6 +295,29 @@ class BrunataApiClient:
         )
         return cls(email, password, http_client)
 
+    def diagnostics(self) -> dict[str, Any]:
+        """Return the client's internal state for the diagnostics download.
+
+        A method here rather than five attribute reads from diagnostics.py:
+        the decision about what is safe to publish belongs with the fields, not
+        with the module that happens to render them. Vendoring this client
+        removed a dozen reads of a third party's private attributes; there is
+        no reason to reintroduce the pattern against ourselves.
+
+        Neither token is included, only whether one exists. An access token is
+        a working credential for as long as it lives, and diagnostics files get
+        attached to public issues.
+        """
+        return {
+            "lookup_tables_loaded": self._lookup_tables_loaded,
+            # Copied, not handed out: the caller serialises these into a file
+            # and must not be able to mutate what the parser looks things up in.
+            "meter_types": list(self._meter_types),
+            "measurement_units": list(self._measurement_units),
+            "has_access_token": self._access_token is not None,
+            "has_refresh_token": self._refresh_token is not None,
+        }
+
     async def async_close(self) -> None:
         """Close the underlying HTTP client.
 
@@ -289,27 +347,9 @@ class BrunataApiClient:
         """
         await self._async_ensure_lookup_tables()
 
-        response = await self._async_fetch_meters(force_login=False)
-
-        # A cached token can look locally valid while the server no longer
-        # accepts it — the Keycloak session may have been revoked, or our
-        # clock may disagree with theirs. Rather than immediately declare the
-        # credentials wrong and prompt the user, discard the token and try
-        # exactly one brand-new login. Only a 401 on *that* attempt means the
-        # credentials themselves are no longer accepted.
-        if response.status_code in (401, 403):
-            _LOGGER.warning(
-                "Brunata returned %s with a cached token — retrying once with "
-                "a fresh login",
-                response.status_code,
-            )
-            response = await self._async_fetch_meters(force_login=True)
-
-            if response.status_code in (401, 403):
-                raise BrunataAuthError(
-                    f"Brunata returned {response.status_code} even after a "
-                    "fresh login. Check credentials and account access."
-                )
+        response = await self._async_authenticated_get(
+            f"{API_URL}/consumer/metersforconsumer"
+        )
 
         return _parse_meters(
             _payload(response),
@@ -334,14 +374,8 @@ class BrunataApiClient:
         if self._lookup_tables_loaded:
             return
 
-        await self._async_login()
-        response = await self._async_request(
-            "GET",
-            f"{API_URL}/locales/{LOCALE}/common",
-            headers={
-                "Authorization": f"{self._token_type} {self._access_token}",
-                "Referer": METERS_URL,
-            },
+        response = await self._async_authenticated_get(
+            f"{API_URL}/locales/{LOCALE}/common"
         )
         payload = _payload(response)
         # Guarded rather than assumed: a payload that is a list (or anything
@@ -382,11 +416,46 @@ class BrunataApiClient:
 
     # --- HTTP ---------------------------------------------------------------
 
-    async def _async_fetch_meters(self, *, force_login: bool) -> httpx.Response:
+    async def _async_authenticated_get(self, url: str) -> httpx.Response:
+        """GET an API endpoint, retrying once with a brand-new login on 401/403.
+
+        A cached token can look locally valid while the server no longer
+        accepts it — the Keycloak session may have been revoked, or our clock
+        may disagree with theirs. Rather than immediately declare the
+        credentials wrong and prompt the user, discard the token and try
+        exactly one brand-new login. Only a 401 on *that* attempt means the
+        credentials themselves are no longer accepted.
+
+        Shared by both endpoints on purpose. The retry used to sit inside the
+        meters call alone, so a stale token on the locale resource surfaced as
+        "invalid JSON" from _payload() — and since the lookup tables are only
+        fetched once per client, that failure repeated on every poll until
+        something else happened to fix it.
+        """
+        response = await self._async_get(url, force_login=False)
+        if response.status_code not in (401, 403):
+            return response
+
+        _LOGGER.warning(
+            "Brunata returned %s with a cached token — retrying once with a "
+            "fresh login",
+            response.status_code,
+        )
+        response = await self._async_get(url, force_login=True)
+
+        if response.status_code in (401, 403):
+            raise BrunataAuthError(
+                f"Brunata returned {response.status_code} even after a fresh "
+                "login. Check credentials and account access."
+            )
+        return response
+
+    async def _async_get(self, url: str, *, force_login: bool) -> httpx.Response:
+        """Log in if needed, then GET the URL with the API's expected headers."""
         await self._async_login(force=force_login)
         return await self._async_request(
             "GET",
-            f"{API_URL}/consumer/metersforconsumer",
+            url,
             headers={
                 "Authorization": f"{self._token_type} {self._access_token}",
                 "Referer": METERS_URL,
@@ -551,9 +620,16 @@ class BrunataApiClient:
             _LOGGER.debug("Brunata SSO session still active — no login form needed")
             return auth_code
 
+        # Not a BrunataAuthError. Nothing here says the credentials are wrong;
+        # it says Keycloak rendered something this code no longer recognises.
+        # Raising an auth error would open a reauth flow and ask the user to
+        # re-enter a password that is perfectly valid — and the next attempt
+        # would fail in exactly the same place. An API error becomes
+        # UpdateFailed instead, so Home Assistant retries and the log says
+        # what actually broke.
         match = _KC_FORM_ACTION_RE.search(page.text)
         if not match:
-            raise BrunataAuthError(
+            raise BrunataApiError(
                 "Brunata login form not found — the login flow has changed"
             )
 
@@ -574,13 +650,17 @@ class BrunataApiClient:
                 "Brunata rejected the login — check the email and password"
             )
 
+        # Both of these mean the credentials were accepted — Keycloak issued a
+        # redirect — and that what came back afterwards is not the shape this
+        # code expects. Same reasoning as the missing form above: an API error,
+        # not a prompt for credentials that already worked.
         location = auth.headers.get("Location", "")
         if not location.startswith(KC_REDIRECT_URI):
-            raise BrunataAuthError(f"Unexpected redirect after login: {location}")
+            raise BrunataApiError(f"Unexpected redirect after login: {location}")
 
         auth_code = _code_from_url(location)
         if not auth_code:
-            raise BrunataAuthError("Brunata returned no authorization code")
+            raise BrunataApiError("Brunata returned no authorization code")
         return auth_code
 
 
@@ -665,7 +745,7 @@ def _parse_meters(
             )
             continue
 
-        value = item.get("latestReadingValue")
+        value = _parse_value(item.get("latestReadingValue"))
         decimals = item.get("decimals")
         placement = item.get("placement")
         transmitting = item.get("transmitting")
@@ -689,7 +769,7 @@ def _parse_meters(
             unit=_lookup(
                 measurement_units or [], item.get("unit"), "measurement unit"
             ),
-            value=float(value) if value is not None else None,
+            value=value,
             reading_date=_parse_reading_date(item.get("latestReadingDate")),
             placement=placement if isinstance(placement, str) and placement else None,
             mounting_date=_parse_timestamp(item.get("mountingDate")),
