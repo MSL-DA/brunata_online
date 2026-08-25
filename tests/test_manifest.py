@@ -38,6 +38,18 @@ requirements_test.txt, with a scheduled job against the newest release.
 
 What is left to check here is that the advertised minimum stays a floor and
 never creeps above what is actually exercised.
+
+Note what that does *not* cover. The test below compares the declared minimum
+against the version the suite runs on, so it fails when the number is too
+high. Nothing fails when it is too low: a commit that starts importing a core
+API introduced after 2025.3 would leave hacs.json promising a release the code
+can no longer run on, and CI would stay green because it tests a far newer
+Home Assistant. Catching that automatically would mean running the suite
+against the floor, which is the arrangement described above and abandoned for
+good reason. So it is a review question: when a new import from homeassistant
+appears, look up which release introduced it — read it, do not infer it from
+dates — and raise both hacs.json and this docstring if it is newer than the
+number above.
 """
 
 import json
