@@ -228,13 +228,17 @@ def test_codes_are_resolved_through_the_lookup_tables(
     assert meter.unit == expected_unit
 
 
-@pytest.mark.parametrize(("field", "code"), [("meterType", 20), ("unit", 21)])
+@pytest.mark.parametrize(("field", "code"), [("meterType", 1), ("unit", 21)])
 def test_null_table_entries_fall_back_to_the_raw_code(field, code):
     """Brunata's live tables contain null entries — 7 of 28 meter types and 34
     of 96 units are reserved slots. Returning the None would put it straight
     into BrunataMeter.meter_type, and the sensor platform would die on
-    meter_type.lower(), taking every entity with it."""
-    types = ["Collector", "Radiator", "Water"] + [None] * 25
+    meter_type.lower(), taking every entity with it.
+
+    A supported meterType is used rather than an arbitrary index, because
+    anything outside SUPPORTED_METER_TYPES is dropped before the table is
+    consulted at all; this test is about the table, not about the allowlist."""
+    types = ["Collector", None, "Water"] + [None] * 25
     units = ["undefined", "units"] + [None] * 94
 
     item = _meter_item("abc")
@@ -246,6 +250,84 @@ def test_null_table_entries_fall_back_to_the_raw_code(field, code):
     assert isinstance(meter.meter_type, str)
     assert isinstance(meter.unit, str)
     assert (meter.meter_type if field == "meterType" else meter.unit) == str(code)
+
+
+@pytest.mark.parametrize("code", [1, 2])
+def test_supported_meter_types_are_parsed(code):
+    """The two codes read off live account data: 1 = heat cost allocator
+    (radiator), 2 = water. Nothing else is on the list, because nothing else
+    has been read off a real account — see SUPPORTED_METER_TYPES."""
+    item = _meter_item("abc")
+    item["meterType"] = code
+
+    assert "abc" in _parse([item])
+
+
+@pytest.mark.parametrize("code", [0, 3, 4, 5, 9, 17, 27, -1, 99])
+def test_unsupported_meter_types_never_become_entities(code):
+    """The safety boundary. Brunata's portal can carry leak and smoke
+    detectors, and this integration polls once an hour over a cloud API — up
+    to 59 minutes and 30 seconds can pass between an event and Home Assistant
+    hearing about it.
+
+    An entity invites an automation, and that automation would be dangerously
+    slow. Nothing downstream can undo it once the entity exists, so the meter
+    has to be dropped here. If this test ever needs relaxing, that is the
+    moment to think very hard about why.
+
+    3 is in this list on purpose. It is widely assumed to be an energy meter,
+    but that has never been read off a real account, and an assumption does
+    not belong on a safety boundary. It moves to the supported list when
+    somebody posts the log line that proves it."""
+    item = _meter_item("abc")
+    item["meterType"] = code
+
+    assert _parse([item]) == {}
+
+
+@pytest.mark.parametrize(
+    "raw", [None, "", "abc", "1.5", {}, [], True, False, float("nan")]
+)
+def test_unusable_meter_type_fails_closed(raw):
+    """A meterType that cannot be checked against the allowlist is treated as
+    unsupported, not as supported. Failing open here would put exactly the
+    meters we cannot identify into Home Assistant."""
+    item = _meter_item("abc")
+    item["meterType"] = raw
+
+    assert _parse([item]) == {}
+
+
+@pytest.mark.parametrize("raw", [{}, [], {"a": 1}, [1, 2]])
+def test_unhashable_meter_type_does_not_take_down_the_parse(raw):
+    """The skip is logged through an lru_cache, which hashes its arguments.
+    Passing the raw meterType in raised TypeError out of _parse_meters() for
+    a dict or a list — costing every meter that update, which is the exact
+    failure the filter exists to prevent. The caller formats it first."""
+    good = _meter_item("good")
+    bad = _meter_item("bad")
+    bad["meterType"] = raw
+
+    assert sorted(_parse([bad, good])) == ["good"]
+
+
+def test_meter_type_as_a_numeric_string_is_accepted():
+    """`unit` arrives as a string in this payload where it was an integer in
+    the old one, so meterType could do the same."""
+    item = _meter_item("abc")
+    item["meterType"] = "2"
+
+    assert "abc" in _parse([item])
+
+
+def test_a_supported_meter_survives_alongside_an_unsupported_one():
+    """The filter drops one item, not the whole response."""
+    water = _meter_item("water")
+    water["meterType"] = 2
+    detector = _meter_item("detector")
+    detector["meterType"] = 26
+
+    assert sorted(_parse([water, detector])) == ["water"]
 
 
 def test_trailing_whitespace_in_table_entries_is_stripped():
@@ -263,13 +345,19 @@ def test_trailing_whitespace_in_table_entries_is_stripped():
 def test_unknown_codes_fall_back_to_the_raw_value():
     """An index past the end of the table must not take down the platform —
     passing a code through as-is once crashed every entity on
-    meter.meter_type.lower(), not just the unrecognised one."""
+    meter.meter_type.lower(), not just the unrecognised one.
+
+    A short meter type table is used so that meterType 2 — supported, so it
+    reaches the lookup — lands past the end of it."""
     item = _meter_item("abc")
-    item["meterType"] = 99
+    item["meterType"] = 2
     item["unit"] = 99
 
-    meter = _parse([item])["abc"]
-    assert meter.meter_type == "99"
+    meter = _parse_meters(
+        [item], meter_types=["Collector", "Radiator"],
+        measurement_units=MEASUREMENT_UNITS,
+    )["abc"]
+    assert meter.meter_type == "2"
     assert meter.unit == "99"
 
 
