@@ -22,6 +22,7 @@ from homeassistant.const import CONF_EMAIL, CONF_PASSWORD
 from homeassistant.core import HomeAssistant
 
 from . import BrunataConfigEntry
+from .api import BrunataApiError
 
 # The email is the account identifier and the password is the account. Neither
 # is ever needed to understand a fault.
@@ -70,6 +71,15 @@ async def async_get_config_entry_diagnostics(
             "last_exception": (
                 repr(coordinator.last_exception)
                 if coordinator.last_exception is not None
+                else None
+            ),
+            # The status separately from the message, so a report can be read
+            # without parsing prose: 429 means back off, 500 means Brunata is
+            # having a bad day, 404 means an endpoint moved. None when the
+            # failure had no HTTP status of its own.
+            "last_exception_status": (
+                coordinator.last_exception.status
+                if isinstance(coordinator.last_exception, BrunataApiError)
                 else None
             ),
             "meter_count": len(meters),
