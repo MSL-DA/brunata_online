@@ -1,0 +1,38 @@
+name: Release
+
+# HACS serves whatever manifest.json says, not what the tag says. A tag pushed
+# with a stale version number produces a release users can install but that
+# Home Assistant then reports as the previous version — and HACS will not offer
+# the next update, because as far as it can tell they already have it.
+#
+# Nothing else in CI checks this: pytest.yml and hassfest.yml run on the branch,
+# where the tag does not exist yet. So it is checked here, at the one moment
+# both numbers are known.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  version:
+    name: Tag matches manifest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Compare the tag with manifest.json
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          manifest=$(python -c "import json; print(json.load(open('custom_components/brunata/manifest.json'))['version'])")
+
+          echo "Tag:      $GITHUB_REF_NAME (version $tag)"
+          echo "Manifest: $manifest"
+
+          if [ "$tag" != "$manifest" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match manifest.json ($manifest). Bump manifest.json, or delete and re-push the tag."
+            exit 1
+          fi
