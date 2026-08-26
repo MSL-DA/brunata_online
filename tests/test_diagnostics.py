@@ -77,7 +77,14 @@ async def test_diagnostics_reports_the_http_status_of_the_last_failure(
     hass: HomeAssistant, mock_brunata_client, mock_meter
 ):
     """Separately from the message, so a report can be read without parsing
-    prose: 429 means back off, 500 means Brunata is having a bad day."""
+    prose: 429 means back off, 500 means Brunata is having a bad day.
+
+    Note what this exercises. The coordinator never holds api.py's exception —
+    _async_update_data() raises UpdateFailed(...) from err, so last_exception
+    is the translated one and ours is its __cause__. Reading .status off
+    last_exception directly returns None every time, which is what the first
+    version of this did and what this test caught.
+    """
     entry = await _setup(hass, mock_brunata_client, mock_meter)
     coordinator = entry.runtime_data
 
@@ -86,17 +93,38 @@ async def test_diagnostics_reports_the_http_status_of_the_last_failure(
     )
     await coordinator.async_refresh()
 
+    # The premise of the assertion below: what is stored is not our type.
+    assert not isinstance(coordinator.last_exception, BrunataApiError)
+
     result = await async_get_config_entry_diagnostics(hass, entry)
 
     assert result["coordinator"]["last_update_success"] is False
     assert result["coordinator"]["last_exception_status"] == 429
 
 
+async def test_diagnostics_status_is_none_for_a_failure_without_one(
+    hass: HomeAssistant, mock_brunata_client, mock_meter
+):
+    """Not every BrunataApiError has an HTTP status — a login flow that
+    changed shape has none. The key must be present and None, not missing."""
+    entry = await _setup(hass, mock_brunata_client, mock_meter)
+    coordinator = entry.runtime_data
+
+    mock_brunata_client.async_get_meters.side_effect = BrunataApiError(
+        "Brunata login form not found — the login flow has changed"
+    )
+    await coordinator.async_refresh()
+
+    result = await async_get_config_entry_diagnostics(hass, entry)
+
+    assert result["coordinator"]["last_update_success"] is False
+    assert result["coordinator"]["last_exception_status"] is None
+
+
 async def test_diagnostics_status_is_none_when_there_is_no_status(
     hass: HomeAssistant, mock_brunata_client, mock_meter
 ):
-    """Not every failure has an HTTP status — a login flow that changed shape
-    has none. The key must still be present rather than missing."""
+    """And None when nothing has failed at all."""
     entry = await _setup(hass, mock_brunata_client, mock_meter)
 
     result = await async_get_config_entry_diagnostics(hass, entry)
