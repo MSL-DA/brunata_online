@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock
 from homeassistant.core import HomeAssistant
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
+from custom_components.brunata.api import BrunataApiError
 from custom_components.brunata.const import DOMAIN
 from custom_components.brunata.diagnostics import (
     async_get_config_entry_diagnostics,
@@ -70,6 +71,37 @@ async def test_diagnostics_reports_the_client_state_verbatim(
 
     assert result["api"] == mock_brunata_client.diagnostics.return_value
     mock_brunata_client.diagnostics.assert_called_once_with()
+
+
+async def test_diagnostics_reports_the_http_status_of_the_last_failure(
+    hass: HomeAssistant, mock_brunata_client, mock_meter
+):
+    """Separately from the message, so a report can be read without parsing
+    prose: 429 means back off, 500 means Brunata is having a bad day."""
+    entry = await _setup(hass, mock_brunata_client, mock_meter)
+    coordinator = entry.runtime_data
+
+    mock_brunata_client.async_get_meters.side_effect = BrunataApiError(
+        "Brunata rate limit reached (429)", 429
+    )
+    await coordinator.async_refresh()
+
+    result = await async_get_config_entry_diagnostics(hass, entry)
+
+    assert result["coordinator"]["last_update_success"] is False
+    assert result["coordinator"]["last_exception_status"] == 429
+
+
+async def test_diagnostics_status_is_none_when_there_is_no_status(
+    hass: HomeAssistant, mock_brunata_client, mock_meter
+):
+    """Not every failure has an HTTP status — a login flow that changed shape
+    has none. The key must still be present rather than missing."""
+    entry = await _setup(hass, mock_brunata_client, mock_meter)
+
+    result = await async_get_config_entry_diagnostics(hass, entry)
+
+    assert result["coordinator"]["last_exception_status"] is None
 
 
 async def test_diagnostics_redacts_the_meter_number(
