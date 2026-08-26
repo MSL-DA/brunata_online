@@ -107,7 +107,15 @@ class BrunataConnectionError(BrunataError):
 
 
 class BrunataApiError(BrunataError):
-    """The server answered, but not with something usable."""
+    """The server answered, but not with something usable.
+
+    Carries the HTTP status when there was one, so a caller can tell 429 from
+    503 from 404 without parsing the message. diagnostics.py reports it: "the
+    last update failed with 429" is a different problem from "the last update
+    failed with 500", and a bug report that distinguishes them saves a round
+    trip. It is None for the failures that have no status of their own — a
+    login flow that changed shape, a locale resource without mappers.
+    """
 
     def __init__(self, message: str, status: int | None = None) -> None:
         super().__init__(message)
@@ -679,7 +687,7 @@ def _payload(response: httpx.Response) -> Any:
     status = response.status_code
 
     if status == 429:
-        raise BrunataApiError("Brunata rate limit reached", status)
+        raise BrunataApiError(f"Brunata rate limit reached ({status})", status)
     if status >= 500:
         raise BrunataApiError(f"Brunata server error ({status})", status)
     if status == 404:
