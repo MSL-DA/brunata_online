@@ -43,11 +43,11 @@ ANNUAL_RESET_METER_TYPES = ("radiator",)
 # validation, which logs an error and discards the entity's long term
 # statistics.
 #
-# That table has 96 slots and spans far more than metering — temperature,
-# humidity, pressure, conductivity — plus a dozen vendor-specific allocator
-# units ("Doprimo units", "Zenner units"). Only the ones with a Home Assistant
-# equivalent are mapped; everything else passes through verbatim and gets no
-# device class, which is the correct outcome rather than a limitation.
+# That table has 96 slots and spans far more than metering. Only entries with
+# a Home Assistant equivalent are mapped; everything else passes through
+# verbatim and gets no device class, which is the correct outcome rather than
+# a limitation — see _is_cumulative_unit() for how such a reading is still
+# handled safely.
 UNIT_MAP: dict[str, str] = {
     # Volume
     "m3": UnitOfVolume.CUBIC_METERS,
@@ -67,9 +67,9 @@ UNIT_MAP: dict[str, str] = {
     "mcal": UnitOfEnergy.MEGA_CALORIE,
     "gcal": UnitOfEnergy.GIGA_CALORIE,
     # Deliberately absent: "Btu" has no Home Assistant equivalent, and the
-    # remaining entries in Brunata's table are temperature, pressure, flow
-    # rate and vendor-specific allocator units. What state class those get is
-    # decided by _is_cumulative_unit() below, not here.
+    # remaining entries in Brunata's table are outside what this integration
+    # is built for. What state class an unmapped reading gets is decided by
+    # _is_cumulative_unit() below, not here.
 }
 
 VOLUME_UNITS = (UnitOfVolume.CUBIC_METERS, UnitOfVolume.LITERS)
@@ -111,19 +111,17 @@ def _is_cumulative_unit(canonical: str | None, raw_unit: str) -> bool:
 
     This is the one decision the state class and the decrease guard both hang
     off, so it is written once. Volume and energy are consumption: they count
-    up until the meter is zeroed. Allocator units do the same. Everything else
-    in Brunata's table — temperature, humidity, CO2, pressure, flow rate,
-    leakage and smoke detection — is an instantaneous reading that goes down
-    as readily as up, and treating one as cumulative is wrong twice over:
-    Home Assistant records a sum that means nothing, and _accept_reading()
-    rejects every fall, freezing the sensor at its highest value ever and
-    logging a warning about it every hour.
+    up until the meter is zeroed. Allocator units do the same. This
+    integration is built for those three — water, energy, and heat cost
+    allocators — nothing else is tested or supported.
 
-    An unrecognised unit is treated as *not* cumulative on purpose. Both
-    guesses can be wrong, but they are not equally wrong: calling a
-    thermometer cumulative freezes it permanently, while calling a consumption
-    meter instantaneous only means its statistics are min/max/mean instead of
-    a sum. The reading itself stays correct either way.
+    An unrecognised unit is treated as *not* cumulative. That is a defensive
+    default for whatever Brunata's API might one day report outside the
+    supported set, not a claim that such a reading is handled correctly:
+    calling it cumulative would be the worse failure, since a wrongly
+    cumulative reading gets summed into Long Term Statistics and frozen by
+    _accept_reading() the first time it falls, where the reverse mistake only
+    costs the wrong statistics type.
     """
     if canonical in VOLUME_UNITS or canonical in ENERGY_UNITS:
         return True
@@ -327,12 +325,7 @@ class BrunataSensor(
 
         # Determine device class and icon from the canonical unit.
         if unit in VOLUME_UNITS:
-            # SensorDeviceClass.GAS only accepts volume units like m³, never
-            # litres, so a litre-reporting gas meter stays on WATER.
-            if "gas" in meter_type and unit == UnitOfVolume.CUBIC_METERS:
-                self._attr_device_class = SensorDeviceClass.GAS
-            else:
-                self._attr_device_class = SensorDeviceClass.WATER
+            self._attr_device_class = SensorDeviceClass.WATER
             self._attr_icon = "mdi:water"
         elif unit in ENERGY_UNITS:
             self._attr_device_class = SensorDeviceClass.ENERGY
@@ -347,13 +340,10 @@ class BrunataSensor(
         # its statistics engine already knows how to handle a drop back to
         # zero.
         #
-        # Brunata also reports meters that measure rather than count —
-        # temperature, humidity, CO2, pressure, flow rate, leakage and smoke
-        # detection all appear in its unit table. Those fall as readily as they
-        # rise, so they get MEASUREMENT. Both classes are recorded in Long Term
-        # Statistics; MEASUREMENT stores min/max/mean where TOTAL_INCREASING
-        # stores a sum, which is the difference that actually matters here.
-        # _accept_reading() reads the same flag and lets those meters fall.
+        # Anything Brunata might report outside water, energy and heat cost
+        # allocators is not supported — see _is_cumulative_unit() for why it
+        # still gets a safe, non-cumulative default rather than being rejected
+        # outright.
         self._cumulative = _is_cumulative_unit(
             unit, self._attr_native_unit_of_measurement or ""
         )
@@ -578,10 +568,10 @@ class BrunataSensor(
             return True
 
         if not self._cumulative:
-            # A thermometer that drops two degrees is not reporting a reset,
-            # and holding its old value would freeze it at the highest reading
-            # it ever took. Only meters whose readings accumulate get a guard
-            # at all — see _is_cumulative_unit().
+            # A non-cumulative reading is not reporting a reset by falling —
+            # holding its old value would freeze it at the highest reading it
+            # ever took. Only meters whose readings accumulate get a guard at
+            # all — see _is_cumulative_unit().
             return True
 
         if (
