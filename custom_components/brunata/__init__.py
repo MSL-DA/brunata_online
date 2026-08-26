@@ -27,18 +27,17 @@ PLATFORMS: list[Platform] = [Platform.SENSOR]
 
 type BrunataConfigEntry = ConfigEntry[BrunataDataUpdateCoordinator]
 
+# Nothing in this module touches the log level, and nothing should. An options
+# flow used to set it from a stored flag, duplicating Home Assistant's own
+# "Enable debug logging" button under the three-dot menu. The button does the
+# same job and adds a downloadable log for the session, so the option was
+# removed rather than kept alongside it. Point users at the button, or at a
+# logger: block in configuration.yaml when the setting has to survive a
+# restart.
+
 
 async def async_setup_entry(hass: HomeAssistant, entry: BrunataConfigEntry) -> bool:
-    """Set up Brunata from a config entry.
-
-    Nothing here touches the log level, and nothing should. An options flow
-    used to set it from a stored flag, duplicating Home Assistant's own
-    "Enable debug logging" button under the three-dot menu. The button does
-    the same job and adds a downloadable log for the session, so the option
-    was removed rather than kept alongside it. Point users at the button, or
-    at a logger: block in configuration.yaml when the setting has to survive
-    a restart.
-    """
+    """Set up Brunata from a config entry."""
     client = await BrunataApiClient.async_create(
         hass, entry.data[CONF_EMAIL], entry.data[CONF_PASSWORD]
     )

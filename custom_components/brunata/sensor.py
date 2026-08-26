@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any
 
@@ -12,9 +13,10 @@ from homeassistant.components.sensor import (
 )
 from homeassistant.const import UnitOfEnergy, UnitOfVolume
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
-from homeassistant.helpers.restore_state import RestoreEntity
+from homeassistant.helpers.restore_state import ExtraStoredData, RestoreEntity
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from . import BrunataConfigEntry, BrunataDataUpdateCoordinator
@@ -34,17 +36,18 @@ _LOGGER = logging.getLogger(__name__)
 ANNUAL_RESET_METER_TYPES = ("radiator",)
 
 
-# Brunata reports units as free-form strings whose casing is not guaranteed
-# ("kWh", "KWH", "l", "L", "m3", "m³"). Map them onto Home Assistant's
-# canonical unit constants: a device class combined with a non-canonical unit
-# string is rejected by HA's unit validation, which logs an error and discards
-# the entity's long term statistics. Keys are lowercased and stripped.
-# Keys are the entries in Brunata's measurementUnit table, lowercased. That
-# table has 96 slots and spans far more than metering — temperature, humidity,
-# pressure, conductivity — plus a dozen vendor-specific allocator units
-# ("Doprimo units", "Zenner units"). Only the ones with a Home Assistant
-# equivalent are mapped; everything else passes through verbatim and simply
-# gets no device class, which is correct rather than a limitation.
+# Keys are the entries in Brunata's measurementUnit table, lowercased and
+# stripped, because the casing is not guaranteed ("kWh", "KWH", "l", "L",
+# "m3", "m³"). Values are Home Assistant's canonical unit constants: a device
+# class combined with a non-canonical unit string is rejected by HA's unit
+# validation, which logs an error and discards the entity's long term
+# statistics.
+#
+# That table has 96 slots and spans far more than metering — temperature,
+# humidity, pressure, conductivity — plus a dozen vendor-specific allocator
+# units ("Doprimo units", "Zenner units"). Only the ones with a Home Assistant
+# equivalent are mapped; everything else passes through verbatim and gets no
+# device class, which is the correct outcome rather than a limitation.
 UNIT_MAP: dict[str, str] = {
     # Volume
     "m3": UnitOfVolume.CUBIC_METERS,
@@ -65,9 +68,8 @@ UNIT_MAP: dict[str, str] = {
     "gcal": UnitOfEnergy.GIGA_CALORIE,
     # Deliberately absent: "Btu" has no Home Assistant equivalent, and the
     # remaining entries in Brunata's table are temperature, pressure, flow
-    # rate and vendor-specific allocator units, none of which belong on a
-    # TOTAL_INCREASING consumption sensor. They pass through verbatim and get
-    # no device class, which is the correct outcome rather than a limitation.
+    # rate and vendor-specific allocator units. What state class those get is
+    # decided by _is_cumulative_unit() below, not here.
 }
 
 VOLUME_UNITS = (UnitOfVolume.CUBIC_METERS, UnitOfVolume.LITERS)
@@ -84,9 +86,9 @@ ENERGY_UNITS = (
     UnitOfEnergy.GIGA_CALORIE,
 )
 
-# Fallback for the rare case where Brunata omits meterUnit entirely. Heat cost
-# allocators — the only meters that could plausibly arrive without a unit —
-# report "units", so that is the sensible guess and keeps such a sensor
+# Fallback for the rare case where Brunata omits the unit field entirely. Heat
+# cost allocators — the only meters that could plausibly arrive without a unit
+# — report "units", so that is the sensible guess and keeps such a sensor
 # consistent with its siblings. Note this is only a fallback for a *missing*
 # field: a meter that reports "units" normally takes the pass-through branch
 # below, which deliberately preserves Brunata's own capitalisation.
@@ -96,6 +98,54 @@ FALLBACK_UNIT = "units"
 # "undefined". A meter pointing at it has no unit stated, so it is treated the
 # same as a missing one rather than being labelled "undefined" in the UI.
 UNDEFINED_UNIT = "undefined"
+
+# Substrings that identify an allocator unit — a count that only ever climbs.
+# Brunata's table carries a dozen vendor-specific variants ("Doprimo units",
+# "Zenner units"), and FALLBACK_UNIT is one too, so matching the marker rather
+# than listing the spellings keeps a new vendor from being misclassified.
+ALLOCATOR_UNIT_MARKERS = ("unit", "pts")
+
+
+def _is_cumulative_unit(canonical: str | None, raw_unit: str) -> bool:
+    """Return True if readings in this unit only ever climb.
+
+    This is the one decision the state class and the decrease guard both hang
+    off, so it is written once. Volume and energy are consumption: they count
+    up until the meter is zeroed. Allocator units do the same. Everything else
+    in Brunata's table — temperature, humidity, CO2, pressure, flow rate,
+    leakage and smoke detection — is an instantaneous reading that goes down
+    as readily as up, and treating one as cumulative is wrong twice over:
+    Home Assistant records a sum that means nothing, and _accept_reading()
+    rejects every fall, freezing the sensor at its highest value ever and
+    logging a warning about it every hour.
+
+    An unrecognised unit is treated as *not* cumulative on purpose. Both
+    guesses can be wrong, but they are not equally wrong: calling a
+    thermometer cumulative freezes it permanently, while calling a consumption
+    meter instantaneous only means its statistics are min/max/mean instead of
+    a sum. The reading itself stays correct either way.
+    """
+    if canonical in VOLUME_UNITS or canonical in ENERGY_UNITS:
+        return True
+
+    lowered = raw_unit.lower()
+    return any(marker in lowered for marker in ALLOCATOR_UNIT_MARKERS)
+
+
+def _device_name(meter_type: str, placement: str | None, meter_id: str) -> str:
+    """Name a meter's device.
+
+    Brunata's own UI lets a customer label each meter with its physical
+    location ("placement", e.g. "Koldt vand") — when that label is available,
+    lead with it so the device is recognisable without opening it; otherwise
+    fall back to the generic type+ID name used before placement existed.
+
+    "Brunata" is left out: it is already shown as the device's manufacturer,
+    and repeating it in every entity name is redundant clutter in the UI.
+    """
+    if placement:
+        return f"{meter_type} - {placement}"
+    return f"{meter_type} ({meter_id})"
 
 
 def _as_iso(value: date | datetime | str | None) -> str | None:
@@ -131,6 +181,64 @@ def _as_date(value: date | datetime | str | None) -> date | None:
     return None
 
 
+def _as_datetime(value: Any) -> datetime | None:
+    """Parse a stored ISO timestamp back into a datetime.
+
+    Counterpart to the isoformat() in BrunataRestoredData. Brunata's mounting
+    dates carry an offset, which round-trips through fromisoformat(), so the
+    restored value compares equal to the one the API hands us. Anything
+    unparseable becomes None.
+    """
+    if not isinstance(value, str):
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+@dataclass
+class BrunataRestoredData(ExtraStoredData):
+    """The part of the decrease guard's baseline that the state cannot carry.
+
+    The cached value survives a restart as the entity's state, and the reading
+    date as a state attribute. The meter number and mounting date did not, and
+    that broke the replacement rule: __init__ reads both from whatever the
+    coordinator holds at the moment the entity is created, so after a
+    replacement that happened while Home Assistant was down, both fields
+    already hold the *new* meter's values. The restored value is the old high
+    one, the incoming value is near zero, and neither field looks changed — so
+    the reset is rejected, and rejected again every hour, until the new meter
+    passes the old one's final reading. For a water meter that is years.
+
+    Stored in Home Assistant's restore store rather than as state attributes,
+    so the meter number stays out of the state machine. diagnostics.py redacts
+    it for the same reason: it identifies a physical device at an address.
+    """
+
+    meter_no: str | None
+    mounting_date: str | None
+
+    def as_dict(self) -> dict[str, Any]:
+        """Serialise for the restore store."""
+        return {"meter_no": self.meter_no, "mounting_date": self.mounting_date}
+
+    @classmethod
+    def from_dict(cls, restored: dict[str, Any]) -> BrunataRestoredData | None:
+        """Rebuild from the restore store, or None if it is not ours.
+
+        Returns None rather than raising for anything unexpected: a store
+        written by an older version simply has no such keys, and an entity
+        that cannot restore its baseline is in exactly the state it was in
+        before this class existed.
+        """
+        if not isinstance(restored, dict):
+            return None
+        if "meter_no" not in restored or "mounting_date" not in restored:
+            return None
+        return cls(restored["meter_no"], restored["mounting_date"])
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: BrunataConfigEntry,
@@ -146,7 +254,10 @@ async def async_setup_entry(
     def _add_new_meters() -> None:
         """Add sensor entities for any newly discovered meters."""
         new_entities = []
-        for meter_id, meter in coordinator.data.items():
+        # `or {}` for the same reason as in _apply_latest_reading(): the two
+        # places that read coordinator.data should make the same assumption
+        # about it, or the difference reads as if one of them knows something.
+        for meter_id, meter in (coordinator.data or {}).items():
             if meter_id not in known_meter_ids:
                 _LOGGER.debug("Creating BrunataSensor for meter %s", meter_id)
                 known_meter_ids.add(meter_id)
@@ -175,10 +286,16 @@ class BrunataSensor(
         # when a device is swapped out, so a change here means the hardware was
         # replaced and the new device counts from zero.
         self._meter_no = meter.meter_no
-        # Reading dates that have reported a value below the cached one. Not
-        # restored across restarts — worst case the confirmation starts over.
+        # When Brunata installed the physical device. The other half of the
+        # replacement signal, and the half that survives a meter number being
+        # reused. Both are restored in async_added_to_hass(), because both are
+        # read here from the same payload as the reading they are supposed to
+        # be compared against.
         self._mounting_date: datetime | None = meter.mounting_date
         self._transmitting: bool | None = meter.transmitting
+        # Whether the current run of rejected decreases has already been
+        # logged. See _accept_reading().
+        self._decrease_warned = False
         # Cache the last known good reading so the sensor keeps its value (and
         # stays available) between the infrequent API updates instead of going
         # unavailable, which would break statistics rows. Updated only from
@@ -201,7 +318,7 @@ class BrunataSensor(
         if unit is not None:
             self._attr_native_unit_of_measurement = unit
         elif not raw_unit:
-            # meterUnit missing from the API response — see FALLBACK_UNIT.
+            # unit missing from the API response — see FALLBACK_UNIT.
             self._attr_native_unit_of_measurement = FALLBACK_UNIT
         else:
             # Unrecognised unit: pass it through unchanged, but deliberately
@@ -223,12 +340,28 @@ class BrunataSensor(
         else:
             self._attr_icon = "mdi:gauge"
 
-        # Readings climb until the meter is zeroed — every 1 January for a heat
-        # cost allocator, and whenever the physical device is replaced for any
-        # meter. TOTAL_INCREASING is built for exactly that: it lets HA compute
-        # hourly sums and aggregate consumption, and its statistics engine
-        # already knows how to handle a drop back to zero.
-        self._attr_state_class = SensorStateClass.TOTAL_INCREASING
+        # Consumption readings climb until the meter is zeroed — every
+        # 1 January for a heat cost allocator, and whenever the physical device
+        # is replaced for any meter. TOTAL_INCREASING is built for exactly
+        # that: it lets HA compute hourly sums and aggregate consumption, and
+        # its statistics engine already knows how to handle a drop back to
+        # zero.
+        #
+        # Brunata also reports meters that measure rather than count —
+        # temperature, humidity, CO2, pressure, flow rate, leakage and smoke
+        # detection all appear in its unit table. Those fall as readily as they
+        # rise, so they get MEASUREMENT. Both classes are recorded in Long Term
+        # Statistics; MEASUREMENT stores min/max/mean where TOTAL_INCREASING
+        # stores a sum, which is the difference that actually matters here.
+        # _accept_reading() reads the same flag and lets those meters fall.
+        self._cumulative = _is_cumulative_unit(
+            unit, self._attr_native_unit_of_measurement or ""
+        )
+        self._attr_state_class = (
+            SensorStateClass.TOTAL_INCREASING
+            if self._cumulative
+            else SensorStateClass.MEASUREMENT
+        )
         # Brunata states the precision it displays itself: 3 digits for
         # water, 0 for heat cost allocators. Using its number avoids guessing
         # per unit and follows automatically if a meter type is added. Display
@@ -248,23 +381,14 @@ class BrunataSensor(
             k in meter_type for k in ANNUAL_RESET_METER_TYPES
         )
 
-        # Group under a device per meter. Brunata's own UI lets a customer
-        # label each meter with its physical location ("placement", e.g.
-        # "Bathroom (Cold)") — when that label is available, lead with it
-        # so the device is recognisable without opening it; otherwise fall
-        # back to the generic type+ID name used before placement existed.
-        # "Brunata" is left out of the name itself: it's already shown as the
-        # device's manufacturer, and repeating it in every entity name is
-        # redundant clutter in the UI.
+        # Group under a device per meter. The name is built by _device_name()
+        # because _async_update_device_name() has to build the same one when
+        # the label changes.
         self._placement = meter.placement
-        device_name = (
-            f"{meter.meter_type} - {meter.placement}"
-            if meter.placement
-            else f"{meter.meter_type} ({self._meter_id})"
-        )
+        self._meter_type = meter.meter_type
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, f"brunata_{self._meter_id}")},
-            name=device_name,
+            name=_device_name(meter.meter_type, meter.placement, self._meter_id),
             manufacturer="Brunata",
             model=meter.meter_type,
         )
@@ -285,8 +409,23 @@ class BrunataSensor(
         momentarily empty for meter types that report less often (heat cost
         allocators vs. water). Restoring from HA's own last known state closes
         that gap, and gives the decrease guard the baseline it compares against.
+
+        The baseline is two halves. The value and the reading date come back
+        from the state; the meter number and mounting date come back from the
+        extra data, because they are not in the state at all — see
+        BrunataRestoredData for what happened when they did not come back.
         """
         await super().async_added_to_hass()
+
+        # Before the value, so that a store written by an older version — which
+        # has no extra data — leaves __init__'s values in place and behaves
+        # exactly as it did then, for that one restart.
+        last_extra = await self.async_get_last_extra_data()
+        if last_extra is not None:
+            restored_extra = BrunataRestoredData.from_dict(last_extra.as_dict())
+            if restored_extra is not None:
+                self._meter_no = restored_extra.meter_no
+                self._mounting_date = _as_datetime(restored_extra.mounting_date)
 
         last_state = await self.async_get_last_state()
         if last_state is not None and last_state.state not in (
@@ -312,11 +451,29 @@ class BrunataSensor(
         # value is in place as the baseline.
         self._apply_latest_reading()
 
+    @property
+    def extra_restore_state_data(self) -> BrunataRestoredData:
+        """Persist the decrease guard's baseline metadata across a restart.
+
+        Home Assistant reads this whenever it writes the entity's state to the
+        restore store, so it always describes the meter the cached value came
+        from — which is the whole point: it has to be the *old* meter's
+        identity that survives, not the one the next payload happens to carry.
+        """
+        return BrunataRestoredData(
+            meter_no=self._meter_no,
+            mounting_date=(
+                self._mounting_date.isoformat()
+                if self._mounting_date is not None
+                else None
+            ),
+        )
+
     @callback
     def _handle_coordinator_update(self) -> None:
         """Handle updated data from the coordinator.
 
-        C3: the accept/reject decision lives here rather than in the
+        The accept/reject decision lives here rather than in the
         native_value property. A property is read by Home Assistant on every
         state write and in an order that is not guaranteed relative to
         available() and extra_state_attributes, so mutating state from inside
@@ -341,21 +498,54 @@ class BrunataSensor(
             return
 
         # Metadata is refreshed whether or not the reading below is accepted:
-        # a rejected value says nothing about the meter's label. The device
-        # name cannot follow, though — DeviceInfo is read once when the entity
-        # is added, so a relabelled meter keeps its old device name until the
-        # next reload.
-        self._placement = meter.placement
+        # a rejected value says nothing about the meter's label.
+        if meter.placement != self._placement:
+            self._placement = meter.placement
+            self._async_update_device_name(meter)
         self._transmitting = meter.transmitting
 
         if meter.value is None or not self._accept_reading(meter):
             return
 
+        # A reading got through, so the next rejection is news again.
+        self._decrease_warned = False
         self._attr_native_value = meter.value
         self._meter_no = meter.meter_no
         self._mounting_date = meter.mounting_date
         self._last_reading_date = _as_iso(meter.reading_date)
         self._last_reading_day = meter.reading_date
+
+    @callback
+    def _async_update_device_name(self, meter: BrunataMeter) -> None:
+        """Follow a relabelled meter into the device registry.
+
+        DeviceInfo is only read when the entity is added, so without this a
+        meter renamed in Brunata's own UI keeps its old device name until the
+        config entry is reloaded — while the placement attribute updates on the
+        next poll. That split is what a user notices: the attribute says
+        "Kitchen" and the device is still called "Water - Living room".
+
+        Only `name` is written. A name the user typed in Home Assistant lands
+        in `name_by_user`, which the UI prefers and which this leaves alone.
+        """
+        if self.hass is None:
+            return
+
+        name = _device_name(meter.meter_type, meter.placement, self._meter_id)
+        device_registry = dr.async_get(self.hass)
+        device = device_registry.async_get_device(
+            identifiers={(DOMAIN, f"brunata_{self._meter_id}")}
+        )
+        if device is None or device.name == name:
+            return
+
+        _LOGGER.debug(
+            "Meter %s was relabelled: renaming device %r to %r",
+            self._meter_id,
+            device.name,
+            name,
+        )
+        device_registry.async_update_device(device.id, name=name)
 
     def _accept_reading(self, meter: BrunataMeter) -> bool:
         """Decide whether a reading should replace the cached value.
@@ -387,6 +577,13 @@ class BrunataSensor(
         if previous is None or value >= previous:
             return True
 
+        if not self._cumulative:
+            # A thermometer that drops two degrees is not reporting a reset,
+            # and holding its old value would freeze it at the highest reading
+            # it ever took. Only meters whose readings accumulate get a guard
+            # at all — see _is_cumulative_unit().
+            return True
+
         if (
             meter.mounting_date != self._mounting_date
             or meter.meter_no != self._meter_no
@@ -414,15 +611,25 @@ class BrunataSensor(
             )
             return True
 
-        _LOGGER.warning(
-            "Meter %s reported a decrease (%s -> %s on %s) that is neither a "
-            "replacement nor an annual reset — keeping the previous value. If "
-            "the meter really was reset, check it in Brunata Online.",
-            self._meter_id,
-            previous,
-            value,
-            meter.reading_date,
-        )
+        # Logged once per run of rejections, not once per poll. The cached
+        # value is never lowered, so a decrease that is rejected once is
+        # rejected again every hour for as long as it persists — potentially
+        # forever. Twenty-four identical lines a day bury everything else in
+        # the log without adding anything to the first one. The flag is
+        # cleared in _apply_latest_reading() as soon as a reading is accepted.
+        if not self._decrease_warned:
+            self._decrease_warned = True
+            _LOGGER.warning(
+                "Meter %s reported a decrease (%s -> %s on %s) that is neither "
+                "a replacement nor an annual reset — keeping the previous "
+                "value. If the meter really was reset, check it in Brunata "
+                "Online. Further rejections will not be logged until a reading "
+                "is accepted again.",
+                self._meter_id,
+                previous,
+                value,
+                meter.reading_date,
+            )
         return False
 
     def _is_annual_reset(self, reading_date: date | None) -> bool:
@@ -437,24 +644,27 @@ class BrunataSensor(
         sensor froze at the pre-reset value until the new period happened to
         exceed it.
 
-        A decrease is therefore treated as the annual reset when either:
+        The reliable signal is therefore the calendar year: a reading dated in
+        a later year than the last accepted one is on the far side of a
+        1 January, whenever it happens to arrive.
 
-        * the reading date has crossed into a later calendar year than the last
-          accepted reading — this is the reliable signal and needs no window at
-          all; or
-        * the reading falls on 31 December or anywhere in January, which covers
-          the case where the previous reading date is unknown (e.g. a state
-          restored from before this attribute was recorded).
+        The December/January window is only a fallback for when the previous
+        reading date is unknown — a state restored from before that attribute
+        was recorded, or a reading that arrived without a parseable date. It
+        used to be checked either way, which made it wider than it was meant to
+        be: a glitch on 20 January, with the last accepted reading dated
+        12 January of the *same* year, was adopted as an annual reset even
+        though no year boundary had been crossed.
 
-        A reading with no usable date can't be placed in the year at all, so it
-        falls through to the confirmation rule instead.
+        A decrease with no usable date at all cannot be placed in the calendar,
+        so it is not a reset either.
         """
         if reading_date is None:
             return False
 
         last_day = self._last_reading_day
-        if last_day is not None and reading_date.year > last_day.year:
-            return True
+        if last_day is not None:
+            return reading_date.year > last_day.year
 
         return reading_date.month == 1 or (reading_date.month, reading_date.day) == (
             12,

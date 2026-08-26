@@ -167,6 +167,31 @@ def test_malformed_entries_are_skipped_not_fatal():
     assert set(meters) == {"good"}
 
 
+@pytest.mark.parametrize("raw_value", ["12,5", "n/a", "", {}, []])
+def test_unparseable_reading_value_costs_one_meter_not_all_of_them(raw_value):
+    """A bare float() would raise straight out of _parse_meters(), past every
+    error type api.py defines, and reach DataUpdateCoordinator as an unexpected
+    exception — so one bad row would cost every meter that update. Every other
+    field in the payload already degrades to None; this one has to as well."""
+    item = _meter_item("abc")
+    item["latestReadingValue"] = raw_value
+
+    meters = _parse([item, _meter_item("good")])
+
+    assert set(meters) == {"abc", "good"}
+    assert meters["abc"].value is None
+    assert meters["good"].value == 42.0
+
+
+def test_reading_value_as_a_numeric_string_is_accepted():
+    """The unit field already arrives as a string in this payload where it was
+    an integer in the old one, so a value doing the same is not far-fetched."""
+    item = _meter_item("abc")
+    item["latestReadingValue"] = "151.037"
+
+    assert _parse([item])["abc"].value == 151.037
+
+
 def test_unparseable_reading_date_leaves_the_value_intact():
     item = _meter_item("abc")
     item["latestReadingDate"] = "not-a-date"
@@ -339,6 +364,63 @@ async def test_meters_are_fetched_from_metersforconsumer():
     assert url.endswith("/consumer/metersforconsumer")
     assert headers["Authorization"] == "Bearer T"
     assert headers["Referer"] == METERS_URL
+
+
+async def test_stale_token_on_the_locale_endpoint_retries_with_a_fresh_login():
+    """The 401 retry used to live inside the meters call alone. A stale token
+    on the locale resource therefore fell through to _payload(), surfaced as
+    "invalid JSON", and — because the lookup tables are fetched once per
+    client — repeated on every poll until something else happened to fix it."""
+    responses = [
+        FakeResponse(401, json_data=None),
+        FakeResponse(200, json_data={"mappers": {"meterType": ["a"], "measurementUnit": ["b"]}}),
+    ]
+    logins: list[bool] = []
+
+    class FakeHttp:
+        async def request(self, method, url, **kwargs):
+            return responses.pop(0)
+
+    client = BrunataApiClient("user@example.com", "s3cret", FakeHttp())
+
+    async def _fake_login(*, force=False):
+        logins.append(force)
+        client._access_token = "T"
+        client._expires_at = time.time() + 300
+
+    client._async_login = _fake_login
+
+    await client._async_ensure_lookup_tables()
+
+    assert logins == [False, True]
+    assert client._lookup_tables_loaded is True
+    assert client._meter_types == ["a"]
+
+
+async def test_client_diagnostics_reports_tokens_without_quoting_them():
+    """An access token is a working credential for as long as it lives, and a
+    diagnostics file gets attached to public issues. The decision about what is
+    safe to publish belongs on the client, next to the fields."""
+    client = BrunataApiClient("user@example.com", "s3cret", object())
+    client._access_token = "secret-access-token"
+    client._refresh_token = "secret-refresh-token"
+    client._meter_types = ["Collector", "Radiator"]
+    client._measurement_units = ["undefined", "units"]
+    client._lookup_tables_loaded = True
+
+    report = client.diagnostics()
+
+    assert report["has_access_token"] is True
+    assert report["has_refresh_token"] is True
+    assert "secret-access-token" not in str(report)
+    assert "secret-refresh-token" not in str(report)
+    assert report["lookup_tables_loaded"] is True
+    assert report["meter_types"] == ["Collector", "Radiator"]
+
+    # Copied, not handed out: the caller must not be able to mutate the table
+    # the parser resolves meter types against.
+    report["meter_types"].append("Injected")
+    assert client._meter_types == ["Collector", "Radiator"]
 
 
 @pytest.mark.parametrize("payload", [[], "text", None])

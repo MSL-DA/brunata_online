@@ -2,4 +2,13 @@
 # and pytest-asyncio versions it was generated against, so this is deliberately
 # the single pin. Adding separate pins for those only creates resolver
 # conflicts the next time it bumps them.
+#
+# It is not an ordinary dependency: it decides which Home Assistant version CI
+# tests against, so it is bumped by hand with a reason, and dependabot.yml
+# excludes it by name. The lint toolchain is pinned separately in
+# requirements_lint.txt precisely because it *is* ordinary — do not merge the
+# two files.
+#
+# 0.13.356 is Home Assistant 2026.8.2. The "Show resolved versions" step in
+# pytest.yml prints it on every run, so the log is the authority, not this line.
 pytest-homeassistant-custom-component==0.13.356

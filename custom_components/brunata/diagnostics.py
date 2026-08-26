@@ -22,6 +22,7 @@ from homeassistant.const import CONF_EMAIL, CONF_PASSWORD
 from homeassistant.core import HomeAssistant
 
 from . import BrunataConfigEntry
+from .api import BrunataApiError
 
 # The email is the account identifier and the password is the account. Neither
 # is ever needed to understand a fault.
@@ -48,6 +49,27 @@ def _meter_diagnostics(meter: Any) -> dict[str, Any]:
     )
 
 
+def _api_status(err: BaseException | None) -> int | None:
+    """Find the HTTP status behind a coordinator failure.
+
+    The coordinator never holds api.py's exception. _async_update_data()
+    translates it — `raise UpdateFailed(str(err)) from err` — so last_exception
+    is the translated one and ours is its __cause__. Reading the attribute off
+    last_exception directly returns None every time, which is exactly what the
+    first version of this did.
+
+    The chain is walked with a seen-set because __cause__ can, in principle,
+    form a cycle, and a diagnostics download is the wrong place to hang.
+    """
+    seen: set[int] = set()
+    while err is not None and id(err) not in seen:
+        if isinstance(err, BrunataApiError):
+            return err.status
+        seen.add(id(err))
+        err = err.__cause__
+    return None
+
+
 async def async_get_config_entry_diagnostics(
     hass: HomeAssistant, entry: BrunataConfigEntry
 ) -> dict[str, Any]:
@@ -72,17 +94,18 @@ async def async_get_config_entry_diagnostics(
                 if coordinator.last_exception is not None
                 else None
             ),
+            # The status separately from the message, so a report can be read
+            # without parsing prose: 429 means back off, 500 means Brunata is
+            # having a bad day, 404 means an endpoint moved. None when the
+            # failure had no HTTP status of its own.
+            "last_exception_status": _api_status(coordinator.last_exception),
             "meter_count": len(meters),
         },
-        "api": {
-            # Every meter type and unit is an index into these. If they failed
-            # to load, every meter is named and united by a bare number, and
-            # that is the first thing to check.
-            "lookup_tables_loaded": client._lookup_tables_loaded,
-            "meter_types": client._meter_types,
-            "measurement_units": client._measurement_units,
-            "has_access_token": client._access_token is not None,
-            "has_refresh_token": client._refresh_token is not None,
-        },
+        # Every meter type and unit is an index into the lookup tables. If they
+        # failed to load, every meter is named and united by a bare number, and
+        # that is the first thing to check. What goes in here is decided by
+        # BrunataApiClient.diagnostics(), next to the fields themselves —
+        # notably that tokens are reported as present or absent, never quoted.
+        "api": client.diagnostics(),
         "meters": [_meter_diagnostics(meter) for meter in meters.values()],
     }

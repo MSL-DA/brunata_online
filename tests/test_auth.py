@@ -21,6 +21,7 @@ from custom_components.brunata.api import (
     KC_REDIRECT_URI,
     KC_TOKEN_URL,
     BrunataApiClient,
+    BrunataApiError,
     BrunataAuthError,
 )
 
@@ -52,10 +53,6 @@ class FakeResponse:
 
     def json(self):
         return self._json_data
-
-    def raise_for_status(self):
-        if self.status_code >= 400:
-            raise AssertionError(f"unexpected HTTP {self.status_code} in test")
 
 
 class FakeCookies:
@@ -256,18 +253,26 @@ async def test_wrong_credentials_raise_auth_error():
         await client._async_login()
 
 
-async def test_missing_login_form_raises_auth_error():
-    """No form and no code means the flow itself changed shape."""
+async def test_missing_login_form_is_not_a_credentials_error():
+    """No form and no code means the flow itself changed shape.
+
+    It must not be a BrunataAuthError: that becomes ConfigEntryAuthFailed and
+    opens a reauth dialog, so the user is asked to re-enter a password that was
+    never wrong — and the next attempt fails in exactly the same place. A
+    BrunataApiError becomes UpdateFailed, which retries and says what broke.
+    """
     http = FakeHttpClient(
         authorize=FakeResponse(url=KC_AUTHORIZE_URL, text="<html></html>")
     )
     client = make_client(http)
 
-    with pytest.raises(BrunataAuthError):
+    with pytest.raises(BrunataApiError):
         await client._async_login()
 
 
-async def test_unexpected_redirect_target_raises_auth_error():
+async def test_unexpected_redirect_target_is_not_a_credentials_error():
+    """Keycloak issued a redirect, so the credentials were accepted. Where it
+    points is a question about the flow, not about the password."""
     http = FakeHttpClient(
         authorize=_authorize_with_form(),
         form_post=FakeResponse(
@@ -276,11 +281,11 @@ async def test_unexpected_redirect_target_raises_auth_error():
     )
     client = make_client(http)
 
-    with pytest.raises(BrunataAuthError):
+    with pytest.raises(BrunataApiError):
         await client._async_login()
 
 
-async def test_redirect_without_code_raises_auth_error():
+async def test_redirect_without_code_is_not_a_credentials_error():
     http = FakeHttpClient(
         authorize=_authorize_with_form(),
         form_post=FakeResponse(
@@ -290,7 +295,7 @@ async def test_redirect_without_code_raises_auth_error():
     )
     client = make_client(http)
 
-    with pytest.raises(BrunataAuthError):
+    with pytest.raises(BrunataApiError):
         await client._async_login()
 
 

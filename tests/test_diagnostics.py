@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock
 from homeassistant.core import HomeAssistant
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
+from custom_components.brunata.api import BrunataApiError
 from custom_components.brunata.const import DOMAIN
 from custom_components.brunata.diagnostics import (
     async_get_config_entry_diagnostics,
@@ -26,11 +27,16 @@ async def _setup(hass: HomeAssistant, mock_brunata_client, mock_meter):
     mock_brunata_client.async_get_meters = AsyncMock(
         return_value={"12345": mock_meter}
     )
-    mock_brunata_client._lookup_tables_loaded = True
-    mock_brunata_client._meter_types = ["Collector", "Radiator", "Water"]
-    mock_brunata_client._measurement_units = ["undefined", "units", "m3"]
-    mock_brunata_client._access_token = "secret-access-token"
-    mock_brunata_client._refresh_token = "secret-refresh-token"
+    # diagnostics.py asks the client for this rather than reading five private
+    # attributes off it; what the report may contain is decided in api.py, and
+    # tested there by test_client_diagnostics_reports_tokens_without_quoting_them.
+    mock_brunata_client.diagnostics.return_value = {
+        "lookup_tables_loaded": True,
+        "meter_types": ["Collector", "Radiator", "Water"],
+        "measurement_units": ["undefined", "units", "m3"],
+        "has_access_token": True,
+        "has_refresh_token": True,
+    }
 
     assert await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done()
@@ -51,19 +57,79 @@ async def test_diagnostics_redacts_the_credentials(
     assert "password123" not in str(result)
 
 
-async def test_diagnostics_never_contains_a_token(
+async def test_diagnostics_reports_the_client_state_verbatim(
     hass: HomeAssistant, mock_brunata_client, mock_meter
 ):
-    """Presence is reported, the token itself is not — an access token is a
-    working credential for as long as it lives."""
+    """The api section is whatever BrunataApiClient.diagnostics() returned.
+
+    That the tokens themselves never appear in it is the client's guarantee and
+    is tested there; what matters here is that this module passes the report
+    through and does not go looking for anything else on its own."""
     entry = await _setup(hass, mock_brunata_client, mock_meter)
 
     result = await async_get_config_entry_diagnostics(hass, entry)
 
-    assert result["api"]["has_access_token"] is True
-    assert result["api"]["has_refresh_token"] is True
-    assert "secret-access-token" not in str(result)
-    assert "secret-refresh-token" not in str(result)
+    assert result["api"] == mock_brunata_client.diagnostics.return_value
+    mock_brunata_client.diagnostics.assert_called_once_with()
+
+
+async def test_diagnostics_reports_the_http_status_of_the_last_failure(
+    hass: HomeAssistant, mock_brunata_client, mock_meter
+):
+    """Separately from the message, so a report can be read without parsing
+    prose: 429 means back off, 500 means Brunata is having a bad day.
+
+    Note what this exercises. The coordinator never holds api.py's exception —
+    _async_update_data() raises UpdateFailed(...) from err, so last_exception
+    is the translated one and ours is its __cause__. Reading .status off
+    last_exception directly returns None every time, which is what the first
+    version of this did and what this test caught.
+    """
+    entry = await _setup(hass, mock_brunata_client, mock_meter)
+    coordinator = entry.runtime_data
+
+    mock_brunata_client.async_get_meters.side_effect = BrunataApiError(
+        "Brunata rate limit reached (429)", 429
+    )
+    await coordinator.async_refresh()
+
+    # The premise of the assertion below: what is stored is not our type.
+    assert not isinstance(coordinator.last_exception, BrunataApiError)
+
+    result = await async_get_config_entry_diagnostics(hass, entry)
+
+    assert result["coordinator"]["last_update_success"] is False
+    assert result["coordinator"]["last_exception_status"] == 429
+
+
+async def test_diagnostics_status_is_none_for_a_failure_without_one(
+    hass: HomeAssistant, mock_brunata_client, mock_meter
+):
+    """Not every BrunataApiError has an HTTP status — a login flow that
+    changed shape has none. The key must be present and None, not missing."""
+    entry = await _setup(hass, mock_brunata_client, mock_meter)
+    coordinator = entry.runtime_data
+
+    mock_brunata_client.async_get_meters.side_effect = BrunataApiError(
+        "Brunata login form not found — the login flow has changed"
+    )
+    await coordinator.async_refresh()
+
+    result = await async_get_config_entry_diagnostics(hass, entry)
+
+    assert result["coordinator"]["last_update_success"] is False
+    assert result["coordinator"]["last_exception_status"] is None
+
+
+async def test_diagnostics_status_is_none_when_there_is_no_status(
+    hass: HomeAssistant, mock_brunata_client, mock_meter
+):
+    """And None when nothing has failed at all."""
+    entry = await _setup(hass, mock_brunata_client, mock_meter)
+
+    result = await async_get_config_entry_diagnostics(hass, entry)
+
+    assert result["coordinator"]["last_exception_status"] is None
 
 
 async def test_diagnostics_redacts_the_meter_number(

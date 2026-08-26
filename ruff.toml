@@ -5,9 +5,10 @@
 # is green from the first commit and any future failure is a real regression
 # rather than pre-existing debt.
 
-# Home Assistant 2025.8 — the minimum declared in hacs.json — runs on Python
+# Home Assistant 2025.3 — the minimum declared in hacs.json — runs on Python
 # 3.13, so the code must stay valid there even though CI runs 3.14. Raise this
-# only when that minimum moves.
+# only when that minimum moves. The reasoning behind the minimum itself lives
+# in the docstring of tests/test_manifest.py.
 target-version = "py313"
 line-length = 100
 

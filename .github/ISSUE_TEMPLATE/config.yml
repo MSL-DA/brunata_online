@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: How to produce a diagnostics report or a debug log
+    url: https://github.com/MSL-DA/brunata_online/wiki/Debugging
+    about: Worth reading before opening a bug report — it decides which one you need.
+  - name: A sensor stopped updating, or a graph shows 0
+    url: https://github.com/MSL-DA/brunata_online/wiki/Using-the-sensors
+    about: Both are usually expected behaviour. This page explains when.
