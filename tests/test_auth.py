@@ -54,10 +54,6 @@ class FakeResponse:
     def json(self):
         return self._json_data
 
-    def raise_for_status(self):
-        if self.status_code >= 400:
-            raise AssertionError(f"unexpected HTTP {self.status_code} in test")
-
 
 class FakeCookies:
     def __init__(self):
