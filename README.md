@@ -20,15 +20,18 @@ Built for [Brunata Online](https://online.brunata.com) accounts. If Brunata Onli
 
 - Automatic discovery of all meters on your Brunata Online account.
 - Supports water (`m³`, `liter`), energy (`Wh`, `kWh`, `MWh`, `J`, `kJ`, `MJ`, `GJ`, `Kcal`, `Mcal`, `GCal`), and heat cost allocator (`units`) meters.
-- Reads every other meter type Brunata reports — gas, electricity, temperature, humidity, CO₂, pressure, flow, leakage and smoke detectors - and shows them with the unit Brunata states.
+- Reads every other meter type Brunata reports — gas, electricity, temperature, humidity, CO₂, pressure, flow, leakage and smoke detectors — and shows them with the unit Brunata states.
 - Devices are named after the placement you set in Brunata Online, so a meter shows up as `Water - Bathroom (Cold)` rather than an unrecognisable serial number.
 - Groups sensors under devices for easy management.
-- Standard Home Assistant device classes and state classes, with full Long Term Statistics support.
+- Standard Home Assistant device classes and state classes, with full Long Term Statistics support: meters that count are recorded as a sum, meters that measure as min/max/mean.
 - Reliable polling via `DataUpdateCoordinator`, scheduled every hour at xx:59:30
+- A downloadable diagnostics report for troubleshooting, with credentials and meter numbers redacted.
 
 ---
 
 ## 📦 Installation
+
+Requires Home Assistant **2025.3.0** or newer.
 
 ### HACS (Recommended)
 
@@ -62,7 +65,11 @@ https://github.com/MSL-DA/brunata_online
 
 ## 📖 Documentation
 
-See the [wiki](https://github.com/MSL-DA/brunata_online/wiki) for details on using the sensors — including which meters work in the Energy dashboard and why consumption graphs show 0 right after setup.
+See the [wiki](https://github.com/MSL-DA/brunata_online/wiki):
+
+- [Using the sensors](https://github.com/MSL-DA/brunata_online/wiki/Using-the-sensors) — which meters work in the Energy dashboard, why consumption graphs show 0 right after setup, and why a reading is sometimes rejected
+- [Sensor availability](https://github.com/MSL-DA/brunata_online/wiki/Sensor-availability) — when a sensor is unavailable, and how to alert on stale readings
+- [Debugging](https://github.com/MSL-DA/brunata_online/wiki/Debugging) — what to attach when reporting a problem
 
 ---
 
