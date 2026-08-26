@@ -52,6 +52,75 @@ API_URL = f"{BASE_URL}/online-webservice/v2/rest"
 # brunata-api.
 METERS_URL = f"{BASE_URL}/react-online/meters-values"
 
+# The only meter types this integration will surface. Everything else in
+# Brunata's meterType table is dropped before it ever becomes an entity.
+#
+# This is a safety boundary, not a feature limit. Brunata's portal can carry
+# leak and smoke detectors, and this integration polls once an hour over a
+# cloud API — up to 59 minutes and 30 seconds can pass between an event and
+# Home Assistant hearing about it. A detector appearing as an entity invites
+# someone to automate on it, and that automation would be dangerously slow.
+# The only safe answer is not to create the entity at all.
+#
+# It also fails closed: a meterType that is missing, unparseable, or simply
+# not listed here is skipped. If Brunata adds a type, it stays out until
+# someone has looked at what it actually is.
+#
+#   1 = heat cost allocator (radiator). Read off live account data.
+#   2 = water. Read off live account data.
+#
+# Nothing else is listed, because nothing else has been read off a real
+# account. Energy meters in particular are almost certainly some other code —
+# but which one is unknown, and a guess does not belong on a safety boundary.
+# Note that the presence of GJ/Gcal in sensor.py's UNIT_MAP says nothing about
+# this: that is the measurementUnit table, a different table entirely, and
+# reasoning from one to the other is how this codebase has been burned before.
+#
+# _log_unsupported_meter() names the code of anything dropped, so the way to
+# extend this list is to read that line from a user's log — not to infer it.
+SUPPORTED_METER_TYPES = frozenset({1, 2})
+
+
+def _meter_type_code(raw: Any) -> int | None:
+    """Coerce Brunata's meterType to an int, or None if it isn't one.
+
+    Observed as an integer in the metersforconsumer payload, but `unit` in
+    that same payload is a string where it used to be an integer, so the same
+    could happen here. None means "cannot be checked against the allowlist",
+    which SUPPORTED_METER_TYPES treats as "do not surface".
+    """
+    if isinstance(raw, bool):
+        return None
+    if isinstance(raw, int):
+        return raw
+    if isinstance(raw, str):
+        try:
+            return int(raw.strip())
+        except ValueError:
+            return None
+    return None
+
+
+@lru_cache(maxsize=64)
+def _log_unsupported_meter(meter_id: str, code: str) -> None:
+    """Note a skipped meter once per process, not once per poll.
+
+    `code` is pre-formatted by the caller rather than passed raw: lru_cache
+    hashes its arguments, and a meterType that arrives as a dict or a list is
+    unhashable. Passing it straight in raised TypeError out of _parse_meters()
+    — costing every meter that update, which is the exact failure this filter
+    exists to avoid.
+    """
+    _LOGGER.info(
+        "Meter %s has meterType %s, which this integration does not support, "
+        "so no entity is created for it. Supported types are %s. If you "
+        "believe this meter measures water, heat or energy consumption, "
+        "please open an issue.",
+        meter_id,
+        code,
+        sorted(SUPPORTED_METER_TYPES),
+    )
+
 # Brunata's API is fronted by bot protection, so the requests are made to look
 # like the web app's. brunata-api randomised the Edge version through
 # fake_useragent; a fixed, plausible string avoids that dependency.
@@ -742,6 +811,15 @@ def _parse_meters(
         raw_id = item.get("meterId")
         if raw_id is None:
             _LOGGER.debug("Item %s skipped: meterId is null", index)
+            continue
+
+        # Before anything else is read from the item: is this a kind of meter
+        # we are willing to surface at all? See SUPPORTED_METER_TYPES — this
+        # keeps leak and smoke detectors out of Home Assistant entirely,
+        # because an hourly cloud poll must never look like an alarm.
+        type_code = _meter_type_code(item.get("meterType"))
+        if type_code not in SUPPORTED_METER_TYPES:
+            _log_unsupported_meter(str(raw_id), repr(item.get("meterType")))
             continue
 
         # A dismounted meter is one Brunata has physically removed. Its final
