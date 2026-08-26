@@ -18,12 +18,16 @@ Built for [Brunata Online](https://online.brunata.com) accounts. If Brunata Onli
 
 ## ✨ Features
 
-- Automatic discovery of all meters on your Brunata Online account.
-- Supports water (`m³`, `liter`), energy (`Wh`, `kWh`, `MWh`, `J`, `kJ`, `MJ`, `GJ`, `Kcal`, `Mcal`, `GCal`), and heat cost allocator (`units`) meters.
+- Automatic discovery of all supported meters on your Brunata Online account.
+- Supports water (`m³`, `liter`) and heat cost allocator (`units`) meters — the two meter types confirmed against real accounts.
 - Devices are named after the placement you set in Brunata Online, so a meter shows up as `Water - Bathroom (Cold)` rather than an unrecognisable serial number.
 - Groups sensors under devices for easy management.
 - Standard Home Assistant device classes and state classes, with full Long Term Statistics support.
 - Polls Brunata once an hour via `DataUpdateCoordinator`, at xx:59:30 — how often a *new* reading actually appears depends on the meter's own reporting interval, not on this schedule.
+
+Other meter types are skipped. If you have an energy meter and it's missing,
+[open an issue](https://github.com/MSL-DA/brunata_online/issues) — the debug
+log names its type, and that's all it takes to add support.
 
 ---
 
