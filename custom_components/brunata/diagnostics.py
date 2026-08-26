@@ -49,6 +49,27 @@ def _meter_diagnostics(meter: Any) -> dict[str, Any]:
     )
 
 
+def _api_status(err: BaseException | None) -> int | None:
+    """Find the HTTP status behind a coordinator failure.
+
+    The coordinator never holds api.py's exception. _async_update_data()
+    translates it — `raise UpdateFailed(str(err)) from err` — so last_exception
+    is the translated one and ours is its __cause__. Reading the attribute off
+    last_exception directly returns None every time, which is exactly what the
+    first version of this did.
+
+    The chain is walked with a seen-set because __cause__ can, in principle,
+    form a cycle, and a diagnostics download is the wrong place to hang.
+    """
+    seen: set[int] = set()
+    while err is not None and id(err) not in seen:
+        if isinstance(err, BrunataApiError):
+            return err.status
+        seen.add(id(err))
+        err = err.__cause__
+    return None
+
+
 async def async_get_config_entry_diagnostics(
     hass: HomeAssistant, entry: BrunataConfigEntry
 ) -> dict[str, Any]:
@@ -77,11 +98,7 @@ async def async_get_config_entry_diagnostics(
             # without parsing prose: 429 means back off, 500 means Brunata is
             # having a bad day, 404 means an endpoint moved. None when the
             # failure had no HTTP status of its own.
-            "last_exception_status": (
-                coordinator.last_exception.status
-                if isinstance(coordinator.last_exception, BrunataApiError)
-                else None
-            ),
+            "last_exception_status": _api_status(coordinator.last_exception),
             "meter_count": len(meters),
         },
         # Every meter type and unit is an index into the lookup tables. If they
