@@ -223,7 +223,7 @@ def test_codes_are_resolved_through_the_lookup_tables(
     item["meterType"] = type_code
     item["unit"] = unit_code
 
-    meter = _parse(item and [item])["abc"]
+    meter = _parse([item])["abc"]
     assert meter.meter_type == expected_type
     assert meter.unit == expected_unit
 
@@ -249,15 +249,15 @@ def test_null_table_entries_fall_back_to_the_raw_code(field, code):
 
 
 def test_trailing_whitespace_in_table_entries_is_stripped():
-    """Two live entries carry one ("Electricity ", "Carbon dioxide "), and the
-    meter type becomes the device name."""
+    """The live table has entries with a trailing space; left unstripped it
+    would end up in the device name verbatim."""
     item = _meter_item("abc")
     item["meterType"] = 1
 
     meter = _parse_meters(
-        [item], meter_types=["", "Electricity "], measurement_units=MEASUREMENT_UNITS
+        [item], meter_types=["", "Radiator "], measurement_units=MEASUREMENT_UNITS
     )["abc"]
-    assert meter.meter_type == "Electricity"
+    assert meter.meter_type == "Radiator"
 
 
 def test_unknown_codes_fall_back_to_the_raw_value():
