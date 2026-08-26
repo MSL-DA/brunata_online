@@ -214,8 +214,8 @@ def _lookup(table: list[str], raw: Any, what: str) -> str:
         _warn_unresolved_code(what, code, len(table))
         return code
 
-    # Some entries carry a trailing space ("Electricity ", "Carbon dioxide "),
-    # which would otherwise end up in the device name.
+    # Some entries in the live table carry a trailing space, which would
+    # otherwise end up in the device name.
     return name.strip()
 
 
