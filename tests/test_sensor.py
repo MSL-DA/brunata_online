@@ -219,9 +219,9 @@ async def test_sensor_maps_the_units_brunata_actually_reports(
 
 @pytest.mark.parametrize("raw_unit", ["Btu", "°C", "Doprimo units", "m³ per hour"])
 async def test_sensor_unmappable_units_claim_no_device_class(mock_meter, raw_unit):
-    """Brunata's table spans temperature, pressure, flow rate and a dozen
-    vendor-specific allocator units. Passing them through without a device
-    class is correct; claiming one Home Assistant would reject is not."""
+    """Anything outside the supported water/energy/allocator units passes
+    through without a device class. Claiming one Home Assistant would reject
+    is worse than claiming none."""
     entity = _make_entity(MagicMock(), replace(mock_meter, unit=raw_unit))
 
     assert entity.native_unit_of_measurement == raw_unit
@@ -699,9 +699,10 @@ async def test_unusable_extra_data_leaves_the_init_baseline_alone(mock_meter, st
 async def test_state_class_follows_whether_the_unit_accumulates(
     mock_meter, raw_unit, expected
 ):
-    """Brunata's unit table spans far more than consumption. A thermometer on
-    TOTAL_INCREASING gets a sum that means nothing and is frozen by the
-    decrease guard at the highest reading it ever took."""
+    """Only water, energy and heat cost allocators are supported. For
+    anything else, defaulting to TOTAL_INCREASING would be actively wrong: it
+    sums a reading that isn't consumption, and the decrease guard would freeze
+    it at the highest value it ever took the first time it fell."""
     entity = _make_entity(MagicMock(), replace(mock_meter, unit=raw_unit))
 
     assert entity.state_class == expected
@@ -717,11 +718,12 @@ async def test_every_meter_keeps_a_state_class(mock_meter, raw_unit):
     assert entity.state_class is not None
 
 
-async def test_a_measuring_meter_is_allowed_to_fall(mock_meter):
-    """No guard for a meter that does not accumulate: holding the old value
-    would freeze a thermometer at its highest reading ever, and log a warning
-    about it every hour for as long as the meter exists."""
-    meter = replace(mock_meter, meter_type="Temperature", unit="°C")
+async def test_an_unrecognised_measuring_unit_is_allowed_to_fall(mock_meter):
+    """The fallback behaviour for a unit outside water/energy/allocators, not
+    a claim that such a meter is supported. Holding the old value on a fall
+    would be wrong regardless of what the meter actually is, so the guard
+    stays off — see _is_cumulative_unit()."""
+    meter = replace(mock_meter, meter_type="Unrecognised", unit="°C")
 
     coordinator = MagicMock()
     coordinator.data = {"12345": meter}
