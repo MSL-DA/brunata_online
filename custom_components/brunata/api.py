@@ -209,8 +209,21 @@ class BrunataMeter:
 
     meter_id: str
     meter_no: str | None
+    # The name resolved through the locale lookup table, e.g. "Radiator". It is
+    # a translation Brunata owns and we ask for with LOCALE, so it belongs in
+    # device names and nowhere a decision is made — see meter_type_code.
     meter_type: str
     unit: str
+    # The raw meterType from the payload, already checked against
+    # SUPPORTED_METER_TYPES. Carried because it is the stable half of the pair:
+    # sensor.py decides whether a meter is zeroed every 1 January from this
+    # number, not from the name above, which would silently stop matching if
+    # Brunata relabelled the entry or the locale changed.
+    #
+    # Defaulted to None because that is what _meter_type_code() returns for a
+    # value it cannot check, and every rule that reads it must treat "unknown"
+    # the way the allowlist does: as not one of ours.
+    meter_type_code: int | None = None
     value: float | None = None
     reading_date: date | None = None
     # The customer-assigned label from Brunata's own UI, e.g. "Koldt vand" or
@@ -447,18 +460,29 @@ class BrunataApiClient:
         )
 
     async def _async_ensure_lookup_tables(self) -> None:
-        """Fetch the locale resource once per client.
+        """Fetch the locale resource once per client, or fail the update.
 
-        The meter payload identifies type and unit by index into these tables,
-        so without them a water meter's unit is unknown — which Home Assistant
-        treats as a unit change and responds to by suppressing the sensor's
-        long term statistics.
+        The meter payload identifies type and unit by index into these tables.
+        Without them every meter is named and united by a bare number — "8"
+        where the user had "m³" — and Home Assistant treats a changed unit on
+        an existing sensor as a new series, discarding the long term statistics
+        behind the old one. That cannot be undone afterwards.
 
-        The guard is a separate flag rather than "are the tables non-empty".
-        A response carrying a mappers object with an empty or missing
-        meterType would leave the list empty, so a non-empty check would never
-        be satisfied and this endpoint would be re-fetched on every single
-        update, forever, for no benefit.
+        So an unusable response is an error, not a warning. Failing the update
+        costs one poll: the coordinator turns this into UpdateFailed, the
+        sensors keep the values they already have, and the next hour tries
+        again. Creating entities we already know are wrong costs the history.
+        That asymmetry is the whole reason this is not a "carry on with raw
+        codes" path.
+
+        An empty table counts as unusable, not just a missing one. Both mean
+        no lookups are possible, and the shape of the failure is Brunata's
+        business, not something the outcome should depend on.
+
+        The caching guard is still a separate flag rather than "are the tables
+        non-empty", and the flag is deliberately only set on the success path.
+        Its job is to stop a *loaded* table from being re-fetched every update;
+        leaving it unset when nothing was loaded is a retry, not that loop.
         """
         if self._lookup_tables_loaded:
             return
@@ -474,34 +498,33 @@ class BrunataApiClient:
         if not isinstance(mappers, dict):
             raise BrunataApiError("Brunata locale resource carried no mappers")
 
-        self._meter_types = list(mappers.get("meterType") or [])
-        self._measurement_units = list(mappers.get("measurementUnit") or [])
+        meter_types = list(mappers.get("meterType") or [])
+        measurement_units = list(mappers.get("measurementUnit") or [])
+
+        if not meter_types or not measurement_units:
+            raise BrunataApiError(
+                f"Brunata locale resource carried {len(meter_types)} meter "
+                f"types and {len(measurement_units)} units, so meter types "
+                "and units cannot be resolved"
+            )
+
+        self._meter_types = meter_types
+        self._measurement_units = measurement_units
         self._lookup_tables_loaded = True
 
-        if not self._meter_types or not self._measurement_units:
-            # Not fatal: _lookup() falls back to the raw code, so entities are
-            # still created. But every meter will be named and united by a bare
-            # number, so say so once rather than only per meter.
-            _LOGGER.warning(
-                "Brunata locale resource carried %s meter types and %s units. "
-                "Meter types and units will fall back to their raw codes.",
-                len(self._meter_types),
-                len(self._measurement_units),
-            )
-        else:
-            # Logged in full, not just counted. These are Brunata's own
-            # translation tables — static, identical for every account and free
-            # of personal data — and they are the only authoritative answer to
-            # which meter types and units the service can express at all. The
-            # meters on any one account use a handful of the entries.
-            _LOGGER.debug(
-                "Loaded Brunata lookup tables (%s meter types, %s units). "
-                "meterType=%s measurementUnit=%s",
-                len(self._meter_types),
-                len(self._measurement_units),
-                self._meter_types,
-                self._measurement_units,
-            )
+        # Logged in full, not just counted. These are Brunata's own translation
+        # tables — static, identical for every account and free of personal
+        # data — and they are the only authoritative answer to which meter
+        # types and units the service can express at all. The meters on any one
+        # account use a handful of the entries.
+        _LOGGER.debug(
+            "Loaded Brunata lookup tables (%s meter types, %s units). "
+            "meterType=%s measurementUnit=%s",
+            len(self._meter_types),
+            len(self._measurement_units),
+            self._meter_types,
+            self._measurement_units,
+        )
 
     # --- HTTP ---------------------------------------------------------------
 
@@ -864,6 +887,9 @@ def _parse_meters(
             meter_id=str(raw_id),
             meter_no=item.get("meterNo"),
             meter_type=_lookup(meter_types or [], item.get("meterType"), "meter type"),
+            # The code the allowlist check above was made on, not a second
+            # reading of the field: the two must never be able to disagree.
+            meter_type_code=type_code,
             unit=_lookup(
                 measurement_units or [], item.get("unit"), "measurement unit"
             ),
