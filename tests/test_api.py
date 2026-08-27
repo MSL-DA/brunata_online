@@ -263,6 +263,43 @@ def test_supported_meter_types_are_parsed(code):
     assert "abc" in _parse([item])
 
 
+@pytest.mark.parametrize("code", [1, 2])
+def test_the_numeric_meter_type_is_carried_alongside_its_name(code):
+    """sensor.py decides the 1 January reset from this number.
+
+    The name next to it is a translation from Brunata's locale table, so a
+    rule matching on it would switch itself off the day the entry was
+    relabelled. Carried from the same value the allowlist check above was made
+    on, so the two cannot disagree.
+    """
+    item = _meter_item("abc")
+    item["meterType"] = code
+
+    assert _parse([item])["abc"].meter_type_code == code
+
+
+def test_the_numeric_meter_type_survives_an_unresolvable_name():
+    """The code is read off the payload, not out of the lookup table, so it is
+    still there when the name falls back to the raw code."""
+    item = _meter_item("abc")
+    item["meterType"] = 1
+
+    meter = _parse_meters([item], meter_types=[], measurement_units=[])["abc"]
+
+    assert meter.meter_type == "1"
+    assert meter.meter_type_code == 1
+
+
+def test_a_meter_type_given_as_a_string_is_carried_as_an_int():
+    """`unit` arrives as a string in this payload, so meterType could too. The
+    code must be comparable to the ints in SUPPORTED_METER_TYPES and
+    ANNUAL_RESET_METER_TYPES either way."""
+    item = _meter_item("abc")
+    item["meterType"] = "1"
+
+    assert _parse([item])["abc"].meter_type_code == 1
+
+
 @pytest.mark.parametrize("code", [0, 3, 4, 5, 9, 17, 27, -1, 99])
 def test_unsupported_meter_types_never_become_entities(code):
     """The safety boundary. Brunata's portal can carry leak and smoke
@@ -509,6 +546,51 @@ async def test_client_diagnostics_reports_tokens_without_quoting_them():
     # the parser resolves meter types against.
     report["meter_types"].append("Injected")
     assert client._meter_types == ["Collector", "Radiator"]
+
+
+@pytest.mark.parametrize(
+    "mappers",
+    [
+        {},
+        {"meterType": [], "measurementUnit": ["units"]},
+        {"meterType": ["Collector", "Radiator"], "measurementUnit": []},
+        {"meterType": [], "measurementUnit": []},
+        {"meterType": None, "measurementUnit": None},
+    ],
+)
+async def test_empty_lookup_tables_fail_the_update_instead_of_creating_wrong_units(
+    mappers,
+):
+    """An empty table is as unusable as a missing one, and continuing costs
+    more than failing.
+
+    With no table every meter is named and united by its raw code — "8" where
+    the user had "m³" — and Home Assistant treats a changed unit on an existing
+    sensor as a new series, discarding the long term statistics behind the old
+    one. That cannot be undone afterwards. Failing the update costs one poll:
+    the coordinator turns BrunataApiError into UpdateFailed and the sensors
+    keep the values they already have.
+
+    This used to be a warning followed by carrying on.
+    """
+
+    class FakeHttp:
+        async def request(self, method, url, **kwargs):
+            return FakeResponse(200, json_data={"mappers": mappers})
+
+    client = BrunataApiClient("user@example.com", "s3cret", FakeHttp())
+    client._access_token = "T"
+    client._expires_at = time.time() + 300
+
+    with pytest.raises(BrunataApiError, match="cannot be resolved"):
+        await client._async_ensure_lookup_tables()
+
+    # Not marked as loaded, so the next poll fetches the resource again rather
+    # than serving empty tables for the life of the client. The flag exists to
+    # stop a *loaded* table being re-fetched; there is nothing loaded here.
+    assert client._lookup_tables_loaded is False
+    assert client._meter_types == []
+    assert client._measurement_units == []
 
 
 @pytest.mark.parametrize("payload", [[], "text", None])
