@@ -4,10 +4,18 @@ from unittest.mock import AsyncMock
 
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import device_registry as dr
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.brunata import BrunataDataUpdateCoordinator
-from custom_components.brunata.api import BrunataAuthError, BrunataConnectionError
+from custom_components.brunata import (
+    BrunataDataUpdateCoordinator,
+    async_remove_config_entry_device,
+)
+from custom_components.brunata.api import (
+    BrunataApiError,
+    BrunataAuthError,
+    BrunataConnectionError,
+)
 from custom_components.brunata.const import DOMAIN
 
 
@@ -81,3 +89,72 @@ async def test_auth_failure_during_setup_starts_reauth(
     assert entry.state is ConfigEntryState.SETUP_ERROR
     flows = hass.config_entries.flow.async_progress()
     assert any(flow["context"].get("source") == "reauth" for flow in flows)
+
+
+# --- removing a device whose meter is gone --------------------------------
+
+
+async def _setup_with_meter(hass: HomeAssistant, mock_brunata_client, mock_meter):
+    """Set up the entry with one meter and return the entry and its device."""
+    entry = _entry(hass)
+    mock_brunata_client.async_get_meters = AsyncMock(
+        return_value={"12345": mock_meter}
+    )
+
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    device = dr.async_get(hass).async_get_device(
+        identifiers={(DOMAIN, "brunata_12345")}
+    )
+    assert device is not None
+    return entry, device
+
+
+async def test_a_device_whose_meter_is_gone_can_be_removed(
+    hass: HomeAssistant, mock_brunata_client, mock_meter
+):
+    """Home Assistant only offers the delete button when this function exists.
+
+    Without it, a meter Brunata has dismounted leaves a device that cannot be
+    removed by any means short of deleting the config entry and setting it up
+    again. Meters are replaced every eight to ten years, so it happens.
+    """
+    entry, device = await _setup_with_meter(hass, mock_brunata_client, mock_meter)
+
+    # Brunata dismounts the meter, so _parse_meters() drops it from the payload.
+    mock_brunata_client.async_get_meters = AsyncMock(return_value={})
+    await entry.runtime_data.async_refresh()
+    await hass.async_block_till_done()
+
+    assert await async_remove_config_entry_device(hass, entry, device) is True
+
+
+async def test_a_device_whose_meter_still_reports_cannot_be_removed(
+    hass: HomeAssistant, mock_brunata_client, mock_meter
+):
+    """Deleting a live meter's device would recreate it on the next poll and
+    lose whatever the user had set on it in the meantime."""
+    entry, device = await _setup_with_meter(hass, mock_brunata_client, mock_meter)
+
+    assert await async_remove_config_entry_device(hass, entry, device) is False
+
+
+async def test_nothing_is_removable_while_the_last_update_failed(
+    hass: HomeAssistant, mock_brunata_client, mock_meter
+):
+    """A failed update leaves the coordinator on its previous data, so the
+    check is normally still made against real meters. But if that data were
+    ever empty at the same moment, every device the integration owns would
+    look dismounted at once. Refusing while the last update failed costs one
+    poll's wait and removes the possibility."""
+    entry, device = await _setup_with_meter(hass, mock_brunata_client, mock_meter)
+
+    mock_brunata_client.async_get_meters = AsyncMock(
+        side_effect=BrunataApiError("Brunata rate limit reached", 429)
+    )
+    await entry.runtime_data.async_refresh()
+    await hass.async_block_till_done()
+
+    assert entry.runtime_data.last_update_success is False
+    assert await async_remove_config_entry_device(hass, entry, device) is False
