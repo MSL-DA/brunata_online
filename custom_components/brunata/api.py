@@ -289,7 +289,17 @@ def _lookup(table: list[str], raw: Any, what: str) -> str:
         return ""
 
     try:
-        name = table[int(code)]
+        index = int(code)
+        # Python indexes lists from both ends, and Brunata does not. Without
+        # this, a code of -1 would not raise IndexError; it would quietly
+        # return the *last* entry of the table — a wrong but perfectly valid
+        # unit, with the wrong device class, the wrong state class, and long
+        # term statistics that look right and are not. Every other unresolvable
+        # code falls back to the raw number with a warning, and a negative one
+        # has to do the same.
+        if index < 0:
+            raise IndexError(index)
+        name = table[index]
     except (ValueError, IndexError):
         name = None
 
