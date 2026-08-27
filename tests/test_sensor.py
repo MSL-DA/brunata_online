@@ -124,7 +124,7 @@ async def test_sensor_allocator_unit_is_passed_through_verbatim(mock_meter):
     forces users to migrate or discard their long term statistics."""
     coordinator = MagicMock()
     coordinator.data = {"12345": mock_meter}
-    mock_meter = replace(mock_meter, meter_type="Radiator")
+    mock_meter = replace(mock_meter, meter_type="Radiator", meter_type_code=1)
 
     for raw_unit in ("units", "Units"):
         entity = _make_entity(coordinator, replace(mock_meter, unit=raw_unit))
@@ -241,7 +241,7 @@ async def test_sensor_reset_detection(mock_meter):
     """Heat cost allocators are zeroed on 1 January, so a decrease across the
     turn of the year is accepted. A mid-year decrease is not: with no
     replacement to point at, it is a glitch, and the cached value stands."""
-    mock_meter = replace(mock_meter, meter_type="Radiator", unit="units")
+    mock_meter = replace(mock_meter, meter_type="Radiator", meter_type_code=1, unit="units")
 
     coordinator = MagicMock()
     coordinator.data = {"12345": mock_meter}
@@ -269,7 +269,7 @@ async def test_sensor_reset_accepted_when_first_reading_arrives_late(mock_meter)
     reset is not necessarily dated 1 January. Matching only 31 Dec / 1 Jan
     rejected those, and since the cached value is never lowered the sensor then
     stayed frozen at the pre-reset value for the rest of the year."""
-    mock_meter = replace(mock_meter, meter_type="Radiator", unit="units")
+    mock_meter = replace(mock_meter, meter_type="Radiator", meter_type_code=1, unit="units")
 
     coordinator = MagicMock()
     coordinator.data = {"12345": mock_meter}
@@ -299,7 +299,7 @@ async def test_january_glitch_within_the_same_year_is_rejected(mock_meter):
     as an annual reset even though no year boundary had been crossed. The
     calendar year is the signal; the window is only a stand-in for not having
     one."""
-    meter = replace(mock_meter, meter_type="Radiator", unit="units")
+    meter = replace(mock_meter, meter_type="Radiator", meter_type_code=1, unit="units")
 
     coordinator = MagicMock()
     coordinator.data = {"12345": meter}
@@ -327,7 +327,7 @@ async def test_january_window_still_applies_without_a_previous_date(mock_meter):
     later than — so accepting it can only be the window. Remove the window and
     this reading is rejected and the sensor stays on 4820.
     """
-    meter = replace(mock_meter, meter_type="Radiator", unit="units")
+    meter = replace(mock_meter, meter_type="Radiator", meter_type_code=1, unit="units")
 
     coordinator = MagicMock()
     coordinator.data = {
@@ -351,7 +351,7 @@ async def test_january_window_is_not_consulted_once_a_date_is_known(mock_meter):
     overwrites the baseline as soon as it accepts something — which is what
     made the first version of the test above assert on the wrong moment.
     """
-    meter = replace(mock_meter, meter_type="Radiator", unit="units")
+    meter = replace(mock_meter, meter_type="Radiator", meter_type_code=1, unit="units")
     entity = _make_entity(MagicMock(), meter)
 
     entity._last_reading_day = None
@@ -363,11 +363,97 @@ async def test_january_window_is_not_consulted_once_a_date_is_known(mock_meter):
     assert entity._is_annual_reset(date(2027, 1, 17)) is True
 
 
+@pytest.mark.parametrize(
+    "meter_type", ["Radiator", "Heat cost allocator", "Varmefordelingsmåler", "1"]
+)
+async def test_annual_reset_follows_the_code_not_the_resolved_name(
+    mock_meter, meter_type
+):
+    """meterType 1 is zeroed on 1 January whatever the lookup table calls it.
+
+    The rule used to match the substring "radiator" in the resolved name. That
+    name is a translation Brunata owns, fetched in the language api.py's LOCALE
+    asks for — so relabelling the entry, or ever changing the locale, would
+    have turned the rule off with nothing failing. And because the cached value
+    is never lowered, the rejected 1 January decrease would take every reading
+    for the rest of the year down with it: the sensor freezes at the pre-reset
+    value until the new period passes it, which for an allocator is a year of
+    wrong data.
+
+    "1" is in this list because it is what _lookup() falls back to when the
+    code does not resolve at all.
+    """
+    meter = replace(
+        mock_meter, meter_type=meter_type, meter_type_code=1, unit="units"
+    )
+
+    coordinator = MagicMock()
+    coordinator.data = {"12345": meter}
+    entity = _make_entity(coordinator, meter)
+    assert entity._resets_annually is True
+
+    coordinator.data = {
+        "12345": replace(meter, value=4820.0, reading_date=date(2025, 12, 20))
+    }
+    entity._apply_latest_reading()
+
+    coordinator.data = {
+        "12345": replace(meter, value=3.0, reading_date=date(2026, 1, 3))
+    }
+    entity._apply_latest_reading()
+
+    assert entity.native_value == 3.0
+
+
+async def test_a_water_meter_named_radiator_does_not_reset_annually(mock_meter):
+    """The other half of the same rule.
+
+    Matching on the name meant any meter whose label happened to contain
+    "radiator" inherited the new year exemption. The code decides, so a water
+    meter keeps its guard no matter what the table calls it.
+    """
+    meter = replace(
+        mock_meter, meter_type="Radiator", meter_type_code=2, unit="m3"
+    )
+
+    coordinator = MagicMock()
+    coordinator.data = {"12345": meter}
+    entity = _make_entity(coordinator, meter)
+    assert entity._resets_annually is False
+
+    coordinator.data = {
+        "12345": replace(meter, value=312.5, reading_date=date(2025, 12, 20))
+    }
+    entity._apply_latest_reading()
+
+    coordinator.data = {
+        "12345": replace(meter, value=0.4, reading_date=date(2026, 1, 3))
+    }
+    entity._apply_latest_reading()
+
+    assert entity.native_value == 312.5
+
+
+async def test_an_unidentified_meter_type_does_not_reset_annually(mock_meter):
+    """meter_type_code is None when the payload's meterType could not be read.
+
+    Nothing with an unreadable type reaches the sensor today — the allowlist
+    drops it in _parse_meters() — but the rule must fail closed anyway, the
+    same way SUPPORTED_METER_TYPES does with the same value.
+    """
+    meter = replace(
+        mock_meter, meter_type="Radiator", meter_type_code=None, unit="units"
+    )
+    entity = _make_entity(MagicMock(), meter)
+
+    assert entity._resets_annually is False
+
+
 async def test_sensor_isolated_decrease_rejected_as_glitch(mock_meter):
     """A one-off decrease is an API glitch: the next reading is back where it
     belongs. Accepting it under TOTAL_INCREASING would record a false spike on
     the way back up."""
-    mock_meter = replace(mock_meter, meter_type="Water", unit="m3")
+    mock_meter = replace(mock_meter, meter_type="Water", meter_type_code=2, unit="m3")
 
     coordinator = MagicMock()
     coordinator.data = {"12345": mock_meter}
@@ -393,7 +479,9 @@ async def test_sensor_accepts_reset_when_meter_number_changes(mock_meter):
     """A replaced meter starts over from zero. The meter number identifies the
     physical device, so a change is proof enough on its own — any meter type,
     any time of year."""
-    mock_meter = replace(mock_meter, meter_type="Water", unit="m3", meter_no="M12345")
+    mock_meter = replace(
+        mock_meter, meter_type="Water", meter_type_code=2, unit="m3", meter_no="M12345"
+    )
 
     coordinator = MagicMock()
     coordinator.data = {"12345": mock_meter}
@@ -418,7 +506,7 @@ async def test_sensor_accepts_reset_when_mounting_date_changes(mock_meter):
     """Brunata states when a meter was installed. A new mounting date is a
     replacement reported as fact, so the decrease needs no corroboration —
     even if the meter number were somehow reused."""
-    mock_meter = replace(mock_meter, meter_type="Water", unit="m3")
+    mock_meter = replace(mock_meter, meter_type="Water", meter_type_code=2, unit="m3")
 
     coordinator = MagicMock()
     coordinator.data = {"12345": mock_meter}
@@ -447,7 +535,7 @@ async def test_sensor_unexplained_decrease_is_rejected(mock_meter):
     """Neither a replacement nor an annual reset. Adopting it under
     TOTAL_INCREASING would record a false consumption spike on the way back
     up, so the cached value stands and a warning is logged instead."""
-    mock_meter = replace(mock_meter, meter_type="Water", unit="m3")
+    mock_meter = replace(mock_meter, meter_type="Water", meter_type_code=2, unit="m3")
 
     coordinator = MagicMock()
     coordinator.data = {"12345": mock_meter}
@@ -470,7 +558,7 @@ async def test_sensor_decrease_without_reading_date_is_ignored(mock_meter):
     """A reading can arrive without a parseable readingDate. It cannot be
     placed in the calendar year, so an annual reset cannot be recognised and
     the value must be dropped — not crash the coordinator callback."""
-    mock_meter = replace(mock_meter, meter_type="Radiator", unit="units")
+    mock_meter = replace(mock_meter, meter_type="Radiator", meter_type_code=1, unit="units")
 
     coordinator = MagicMock()
     coordinator.data = {"12345": mock_meter}
@@ -569,6 +657,7 @@ def _replaced_pair(mock_meter):
     old = replace(
         mock_meter,
         meter_type="Water",
+        meter_type_code=2,
         unit="m3",
         meter_no="M111",
         mounting_date=datetime(2018, 10, 23, 14, 10, tzinfo=UTC),
@@ -740,7 +829,7 @@ async def test_an_unrecognised_measuring_unit_is_allowed_to_fall(mock_meter):
 async def test_a_counting_meter_is_still_guarded(mock_meter):
     """The other half of the same rule: relaxing the guard for measurements
     must not relax it for consumption."""
-    meter = replace(mock_meter, meter_type="Water", unit="m3")
+    meter = replace(mock_meter, meter_type="Water", meter_type_code=2, unit="m3")
 
     coordinator = MagicMock()
     coordinator.data = {"12345": meter}
@@ -766,7 +855,7 @@ async def test_rejected_decrease_is_logged_once_per_run(mock_meter, caplog):
     """The cached value is never lowered, so a decrease rejected once is
     rejected again every poll — 24 identical lines a day, potentially forever.
     The first one carries everything the rest do."""
-    meter = replace(mock_meter, meter_type="Water", unit="m3")
+    meter = replace(mock_meter, meter_type="Water", meter_type_code=2, unit="m3")
 
     coordinator = MagicMock()
     coordinator.data = {"12345": meter}
