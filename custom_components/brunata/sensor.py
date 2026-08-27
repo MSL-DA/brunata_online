@@ -25,15 +25,27 @@ from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
-# Meter types that are reset on a schedule. Brunata reports heat cost
-# allocators with meter_type "Radiator" and zeroes them on 1 January, so a
-# decrease around new year needs no further evidence to be believed.
+# Meter types that are reset on a schedule. Brunata zeroes heat cost
+# allocators on 1 January, so a decrease around new year needs no further
+# evidence to be believed.
+#
+# Matched on Brunata's numeric meterType, not on the name it resolves to. The
+# name comes from the locale lookup table — a translation Brunata owns, fetched
+# in whatever language api.py's LOCALE asks for. Matching "radiator" in it was
+# a rule that would switch itself off silently the day Brunata relabelled the
+# entry to anything else, and because the cached value is never lowered, the
+# 1 January decrease would then be rejected as a glitch and *every* reading for
+# the rest of the year rejected with it. The code is the same value
+# SUPPORTED_METER_TYPES is enforced on, and it is read off the payload rather
+# than translated.
 #
 # This is not a list of the only meters that can ever drop: *any* meter starts
 # over from zero when the physical device is replaced (worn out, flat battery),
 # and that happens at any time of year. Those decreases are recognised by
 # _accept_reading() instead.
-ANNUAL_RESET_METER_TYPES = ("radiator",)
+#
+#   1 = heat cost allocator (radiator). Read off live account data.
+ANNUAL_RESET_METER_TYPES = frozenset({1})
 
 
 # Keys are the entries in Brunata's measurementUnit table, lowercased and
@@ -310,7 +322,6 @@ class BrunataSensor(
         raw_unit = meter.unit.strip()
         if raw_unit.lower() == UNDEFINED_UNIT:
             raw_unit = ""
-        meter_type = meter.meter_type.lower()
         unit = UNIT_MAP.get(raw_unit.lower())
 
         if unit is not None:
@@ -365,11 +376,11 @@ class BrunataSensor(
         else:
             self._attr_suggested_display_precision = 0
 
-        # Whether this meter is zeroed every 1 January. See
-        # ANNUAL_RESET_METER_TYPES and _accept_reading().
-        self._resets_annually = any(
-            k in meter_type for k in ANNUAL_RESET_METER_TYPES
-        )
+        # Whether this meter is zeroed every 1 January. Decided from the
+        # numeric meterType rather than its resolved name, so a relabelled or
+        # differently translated lookup table cannot quietly turn the rule off.
+        # See ANNUAL_RESET_METER_TYPES and _accept_reading().
+        self._resets_annually = meter.meter_type_code in ANNUAL_RESET_METER_TYPES
 
         # Group under a device per meter. The name is built by _device_name()
         # because _async_update_device_name() has to build the same one when
