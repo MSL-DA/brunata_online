@@ -34,6 +34,7 @@ log names its type, and that's all it takes to add support.
 ## 📦 Installation
 
 ### HACS (Recommended)
+**Requires Home Assistant 2025.3 or newer.**
 
 1. Open **HACS** in Home Assistant
 2. Click the three-dot menu (top right) → **Custom Repositories**
