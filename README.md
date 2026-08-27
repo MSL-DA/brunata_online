@@ -19,7 +19,7 @@ Built for [Brunata Online](https://online.brunata.com) accounts. If Brunata Onli
 ## ✨ Features
 
 - Automatic discovery of all supported meters on your Brunata Online account.
-Supports water (m³, liter) and heat cost allocator (units) meters — the two meter types verified against live data. Energy meters aren't supported yet; issue [#39](https://github.com/MSL-DA/brunata_online/issues/39) explains why and how you can help
+- Supports water (`m³`) and heat cost allocator (`units`) meters — the two meter types verified against live data. Energy meters (`kWh`) aren't supported yet; [issue #39](https://github.com/MSL-DA/brunata_online/issues/39) explains why and how you can help
 - Devices are named after the placement you set in Brunata Online, so a meter shows up as `Water - Bathroom (Cold)` rather than an unrecognisable serial number.
 - Groups sensors under devices for easy management.
 - Standard Home Assistant device classes and state classes, with full Long Term Statistics support.
