@@ -379,6 +379,31 @@ def test_trailing_whitespace_in_table_entries_is_stripped():
     assert meter.meter_type == "Radiator"
 
 
+@pytest.mark.parametrize("code", [-1, "-1", -99])
+def test_a_negative_code_falls_back_instead_of_wrapping_round_the_table(code):
+    """Python indexes lists from both ends. Brunata does not.
+
+    `table[-1]` does not raise IndexError — it returns the *last* entry, so a
+    negative unit code resolved to a real, wrong unit: wrong device class,
+    wrong state class, and long term statistics that look right and are not.
+    It happened silently, because _warn_unresolved_code() only fires when the
+    lookup fails.
+
+    meterType is shielded by the allowlist (-1 is not in SUPPORTED_METER_TYPES);
+    unit is not, so it is the field under test here.
+    """
+    item = _meter_item("abc")
+    item["unit"] = code
+
+    meter = _parse_meters(
+        [item],
+        meter_types=METER_TYPES,
+        measurement_units=["undefined", "units", "m3", "THE-LAST-ENTRY"],
+    )["abc"]
+
+    assert meter.unit == str(code)
+
+
 def test_unknown_codes_fall_back_to_the_raw_value():
     """An index past the end of the table must not take down the platform —
     passing a code through as-is once crashed every entity on
