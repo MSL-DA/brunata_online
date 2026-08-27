@@ -9,6 +9,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_EMAIL, CONF_PASSWORD, Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.event import async_track_time_change
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
@@ -86,6 +87,48 @@ async def async_unload_entry(hass: HomeAssistant, entry: BrunataConfigEntry) -> 
             await coordinator.client.async_close()
 
     return unload_ok
+
+
+async def async_remove_config_entry_device(
+    hass: HomeAssistant,
+    entry: BrunataConfigEntry,
+    device: dr.DeviceEntry,
+) -> bool:
+    """Allow deleting a device whose meter Brunata no longer reports.
+
+    Home Assistant only offers the delete button on an integration's devices
+    when this function exists. Without it a meter Brunata has dismounted stays
+    in the device registry forever: _parse_meters() drops it from the payload,
+    so the entity goes unavailable — correct — but the device itself cannot be
+    removed by any means short of deleting the whole config entry and setting
+    it up again. Meters are replaced every eight to ten years, so that is not
+    a hypothetical.
+
+    A device is removable exactly when its meter is absent from the latest
+    data. The identifiers are matched against what the coordinator holds
+    rather than against the entity registry, because the payload is the thing
+    that decides whether the meter still exists.
+
+    A failed update is not a reason to allow anything. On failure the
+    coordinator keeps the previous data, so the check is still made against
+    real meters — but if that data were ever empty at the same time, this
+    would happily agree to delete every device the integration owns. Refusing
+    while the last update failed costs the user one poll's wait and removes
+    that possibility entirely.
+    """
+    coordinator = entry.runtime_data
+    if not coordinator.last_update_success:
+        _LOGGER.debug(
+            "Refusing to remove device %s: the last update failed, so the "
+            "meter list cannot be trusted to be complete",
+            device.id,
+        )
+        return False
+
+    live = {
+        (DOMAIN, f"brunata_{meter_id}") for meter_id in (coordinator.data or {})
+    }
+    return not (device.identifiers & live)
 
 
 class BrunataDataUpdateCoordinator(DataUpdateCoordinator[dict[str, BrunataMeter]]):
