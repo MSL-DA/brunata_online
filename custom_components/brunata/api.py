@@ -78,6 +78,12 @@ METERS_URL = f"{BASE_URL}/react-online/meters-values"
 #
 # _log_unsupported_meter() names the code of anything dropped, so the way to
 # extend this list is to read that line from a user's log — not to infer it.
+# Where a user should report a meter this integration skipped. Named rather
+# than left to "please open an issue", because the log line already contains
+# the one thing that issue is asking for — sending people to file a fresh one
+# turns an answer into a duplicate.
+METER_TYPE_ISSUE_URL = "https://github.com/MSL-DA/brunata_online/issues/39"
+
 SUPPORTED_METER_TYPES = frozenset({1, 2})
 
 
@@ -113,12 +119,13 @@ def _log_unsupported_meter(meter_id: str, code: str) -> None:
     """
     _LOGGER.info(
         "Meter %s has meterType %s, which this integration does not support, "
-        "so no entity is created for it. Supported types are %s. If you "
-        "believe this meter measures water, heat or energy consumption, "
-        "please open an issue.",
+        "so no entity is created for it. Supported types are %s. If this "
+        "meter measures water, heat or energy consumption, please paste this "
+        "line into %s — that code is exactly what is needed to add support.",
         meter_id,
         code,
         sorted(SUPPORTED_METER_TYPES),
+        METER_TYPE_ISSUE_URL,
     )
 
 # Brunata's API is fronted by bot protection, so the requests are made to look
