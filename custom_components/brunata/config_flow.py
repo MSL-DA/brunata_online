@@ -157,17 +157,17 @@ class BrunataConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 **user_input,
                 CONF_EMAIL: _normalise_email(user_input[CONF_EMAIL]),
             }
-            # The account check first, the login second, which also puts
-            # _abort_if_unique_id_mismatch()'s AbortFlow outside the try below:
-            # it has to reach the flow manager to become a proper
-            # FlowResultType.ABORT, and it used to need an explicit re-raise to
-            # get past the broad handler.
-            # Both orders end in the
-            # same abort, but this one decides it locally: entering a different
-            # address is a mistake the unique_id already knows about, and
-            # spending a full Keycloak round trip against a bot-protected
-            # endpoint to find that out costs the user seconds and Brunata a
-            # request, for an answer that was never going to change.
+            # The account check first, the login second. Both orders end in
+            # the same wrong_account abort, but this one decides it locally:
+            # entering a different address is a mistake the unique_id already
+            # knows about, and a full Keycloak round trip against a
+            # bot-protected endpoint to reach the same answer costs the user
+            # seconds and Brunata a request for nothing.
+            #
+            # It also puts _abort_if_unique_id_mismatch()'s AbortFlow outside
+            # the try below, where it belongs: it has to reach the flow manager
+            # to become a proper FlowResultType.ABORT, and inside the try it
+            # needed an explicit re-raise to get past the broad handler.
             await self.async_set_unique_id(user_input[CONF_EMAIL])
             self._abort_if_unique_id_mismatch(reason="wrong_account")
             try:
@@ -197,6 +197,59 @@ class BrunataConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     vol.Required(CONF_PASSWORD): PASSWORD_SELECTOR,
                 }
             ),
+            errors=errors,
+        )
+
+
+    async def async_step_reconfigure(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Let the user replace the password before anything has failed.
+
+        Without this the only way to hand Home Assistant a password changed in
+        Brunata Online is to wait for the integration to fail on the old one.
+        Polling is hourly, so that is up to an hour of a broken integration and
+        a "could not authenticate" notification for something the user already
+        knew about and had fixed.
+
+        The address is not on the form. It is the entry's unique_id, so
+        changing it here would either orphan every entity and device behind it
+        or need a migration; a user who genuinely moved accounts should add the
+        new one and delete the old. It is passed as a placeholder instead, so
+        the dialog still says which account is being changed.
+        """
+        entry = self._get_reconfigure_entry()
+        errors = {}
+
+        if user_input is not None:
+            # The stored address, not one typed in — see the docstring. It is
+            # already normalised, because async_step_user normalised it before
+            # writing it.
+            credentials = {
+                CONF_EMAIL: entry.data[CONF_EMAIL],
+                CONF_PASSWORD: user_input[CONF_PASSWORD],
+            }
+            try:
+                await validate_input(self.hass, credentials)
+                _LOGGER.debug(
+                    "Reconfiguration successful for entry %s", entry.entry_id
+                )
+                return self.async_update_reload_and_abort(
+                    entry,
+                    data_updates=credentials,
+                )
+            except CannotConnect:
+                errors["base"] = "cannot_connect"
+            except InvalidAuth:
+                errors["base"] = "invalid_auth"
+            except Exception:  # pylint: disable=broad-except
+                _LOGGER.exception("Unexpected error during reconfiguration")
+                errors["base"] = "unknown"
+
+        return self.async_show_form(
+            step_id="reconfigure",
+            data_schema=vol.Schema({vol.Required(CONF_PASSWORD): PASSWORD_SELECTOR}),
+            description_placeholders={"email": entry.data[CONF_EMAIL]},
             errors=errors,
         )
 
