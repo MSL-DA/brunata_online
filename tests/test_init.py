@@ -158,3 +158,24 @@ async def test_nothing_is_removable_while_the_last_update_failed(
 
     assert entry.runtime_data.last_update_success is False
     assert await async_remove_config_entry_device(hass, entry, device) is False
+
+
+async def test_no_device_is_removable_when_the_entry_is_not_loaded(
+    hass: HomeAssistant, mock_brunata_client, mock_meter
+):
+    """Home Assistant does not require a loaded entry before calling the hook.
+
+    Its remove handler checks that the device exists, that the config entry
+    exists, that the entry supports device removal, and that the integration
+    imports — then calls this. Reading entry.runtime_data directly would raise
+    AttributeError for an entry that never set up or has since been unloaded,
+    which reaches the websocket handler as an unhandled exception instead of a
+    clean refusal.
+    """
+    entry, device = await _setup_with_meter(hass, mock_brunata_client, mock_meter)
+
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()
+    assert entry.state is ConfigEntryState.NOT_LOADED
+
+    assert await async_remove_config_entry_device(hass, entry, device) is False
