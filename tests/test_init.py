@@ -1,15 +1,25 @@
 """Test Brunata integration setup and teardown."""
 
-from unittest.mock import AsyncMock
+import asyncio
+import logging
+from unittest.mock import AsyncMock, patch
 
+import pytest
+
+from freezegun.api import FrozenDateTimeFactory
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from homeassistant.util import dt as dt_util
+from pytest_homeassistant_custom_component.common import (
+    MockConfigEntry,
+    async_fire_time_changed,
+)
 
 from custom_components.brunata import (
     BrunataDataUpdateCoordinator,
     async_remove_config_entry_device,
+    async_setup_entry,
 )
 from custom_components.brunata.api import (
     BrunataApiError,
@@ -179,3 +189,125 @@ async def test_no_device_is_removable_when_the_entry_is_not_loaded(
     assert entry.state is ConfigEntryState.NOT_LOADED
 
     assert await async_remove_config_entry_device(hass, entry, device) is False
+
+
+# --- the polling schedule --------------------------------------------------
+
+
+async def test_polling_is_driven_by_the_wall_clock(
+    hass: HomeAssistant, mock_brunata_client, freezer: FrozenDateTimeFactory
+):
+    """The coordinator has no update_interval on purpose.
+
+    async_track_time_change(minute=59, second=30) ties polling to the wall
+    clock, so it lands 30 seconds before each new hour no matter when Home
+    Assistant last started or the integration was last reloaded. An
+    update_interval would drift with the restart time instead, and nothing in
+    the suite noticed the difference until this test.
+    """
+    freezer.move_to("2026-08-27 10:00:00+00:00")
+    entry = _entry(hass)
+
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    coordinator = entry.runtime_data
+    assert coordinator.update_interval is None
+
+    calls_after_setup = mock_brunata_client.async_get_meters.call_count
+
+    # 10:30 is not on the schedule.
+    freezer.move_to("2026-08-27 10:30:00+00:00")
+    async_fire_time_changed(hass, dt_util.utcnow())
+    await hass.async_block_till_done()
+    assert mock_brunata_client.async_get_meters.call_count == calls_after_setup
+
+    # 10:59:30 is.
+    freezer.move_to("2026-08-27 10:59:30+00:00")
+    async_fire_time_changed(hass, dt_util.utcnow())
+    await hass.async_block_till_done()
+    assert mock_brunata_client.async_get_meters.call_count == calls_after_setup + 1
+
+
+async def test_unloading_stops_the_schedule(
+    hass: HomeAssistant, mock_brunata_client, freezer: FrozenDateTimeFactory
+):
+    """The listener is registered through entry.async_on_unload, so an unloaded
+    entry must stop polling. Without that, every reload leaves another timer
+    calling into a coordinator nobody is listening to."""
+    freezer.move_to("2026-08-27 10:00:00+00:00")
+    entry = _entry(hass)
+
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()
+
+    calls_after_unload = mock_brunata_client.async_get_meters.call_count
+
+    freezer.move_to("2026-08-27 10:59:30+00:00")
+    async_fire_time_changed(hass, dt_util.utcnow())
+    await hass.async_block_till_done()
+
+    assert mock_brunata_client.async_get_meters.call_count == calls_after_unload
+
+
+# --- the log level is not ours to set --------------------------------------
+
+
+async def test_setup_does_not_touch_the_log_level(
+    hass: HomeAssistant, mock_brunata_client
+):
+    """Setting up must leave custom_components.brunata's level alone.
+
+    An options flow used to write it from a stored flag, duplicating Home
+    Assistant's own "Enable debug logging" button. The option was removed
+    rather than kept alongside it, and this test is what keeps it removed: a
+    reintroduction would make the button's effect depend on whether the entry
+    happened to reload afterwards.
+    """
+    logger = logging.getLogger("custom_components.brunata")
+    original = logger.level
+    try:
+        logger.setLevel(logging.DEBUG)
+
+        entry = _entry(hass)
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+        assert logger.level == logging.DEBUG
+
+        assert await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
+        assert logger.level == logging.DEBUG
+    finally:
+        logger.setLevel(original)
+
+
+# --- abandoning setup must not leak the client -----------------------------
+
+
+async def test_a_cancelled_setup_still_closes_the_client(
+    hass: HomeAssistant, mock_brunata_client
+):
+    """asyncio.CancelledError is a BaseException, not an Exception.
+
+    Home Assistant cancels a setup that is still retrying when it shuts down,
+    and that path used to slip past the `except Exception` around the first
+    refresh — leaking the httpx client that had just been built, once per
+    attempt. The handler is `except BaseException` for exactly this.
+
+    The coordinator method is patched rather than the API mock, so the
+    cancellation lands in the same place a real one would without depending on
+    how DataUpdateCoordinator handles it on the way through.
+    """
+    entry = _entry(hass)
+
+    with patch.object(
+        BrunataDataUpdateCoordinator,
+        "async_config_entry_first_refresh",
+        side_effect=asyncio.CancelledError,
+    ), pytest.raises(asyncio.CancelledError):
+        await async_setup_entry(hass, entry)
+
+    assert mock_brunata_client.async_close.called
