@@ -9,33 +9,34 @@ name: Release
 # where the tag does not exist yet. So it is checked here, at the one moment
 # both numbers are known.
 #
-# This workflow also *creates* the release, and that is the point. A check that
-# only reports cannot stop anything: HACS installs from the GitHub release, and
-# a release made in the web UI already exists by the time a workflow triggered
-# by its tag gets to run. Failing afterwards is a notification, not a guard.
-# Creating the release here puts the check in front of it, so a mismatched
-# version means no release at all.
+# This workflow only reports, and that is deliberate. Releases are published
+# from the web UI, and publishing creates the tag in the same operation — so by
+# the time this runs, the release already exists and nothing here can stop it.
+# A red tick means "the release you just published carries the wrong version
+# number": fix manifest.json, then delete the release and its tag and publish
+# again.
 #
-#   Cut a release by pushing a tag:  git tag v1.4.0 && git push origin v1.4.0
-#   Do not create releases from the web UI — that skips this check.
+# An earlier version had this job create the release itself, which would have
+# made the check blocking. It also made publishing from the UI fail every time,
+# because gh release create found a release already there. Reporting is the
+# most a check can do without taking the publishing over, and taking it over is
+# not worth the change in workflow.
 
 on:
   push:
     tags:
       - "v*"
 
-# contents: write is required to create the release. It is the only elevated
-# permission here, and the job does nothing else with it.
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  release:
-    name: Publish release
+  version:
+    name: Tag matches manifest
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -50,7 +51,6 @@ jobs:
           python-version: "3.14"
 
       - name: Compare the tag with manifest.json
-        id: version
         run: |
           tag="${GITHUB_REF_NAME#v}"
           manifest=$(python -c "import json; print(json.load(open('custom_components/brunata/manifest.json'))['version'])")
@@ -59,24 +59,6 @@ jobs:
           echo "Manifest: $manifest"
 
           if [ "$tag" != "$manifest" ]; then
-            echo "::error::Tag $GITHUB_REF_NAME does not match manifest.json ($manifest). Bump manifest.json, or delete and re-push the tag."
+            echo "::error::Tag $GITHUB_REF_NAME does not match manifest.json ($manifest). Fix manifest.json, then delete this release and its tag and publish again."
             exit 1
           fi
-
-          # A version with a hyphen is a pre-release under semantic versioning
-          # (1.4.0-beta.1). Marking it as one keeps HACS from offering it to
-          # users who have not opted into betas.
-          if [ "${tag#*-}" != "$tag" ]; then
-            echo "prerelease=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "prerelease=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Create the GitHub release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release create "$GITHUB_REF_NAME" \
-            --title "$GITHUB_REF_NAME" \
-            --generate-notes \
-            ${{ steps.version.outputs.prerelease == 'true' && '--prerelease' || '' }}
