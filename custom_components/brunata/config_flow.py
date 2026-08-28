@@ -11,7 +11,6 @@ from homeassistant import config_entries
 from homeassistant.config_entries import ConfigFlowResult
 from homeassistant.const import CONF_EMAIL, CONF_PASSWORD
 from homeassistant.core import HomeAssistant
-from homeassistant.data_entry_flow import AbortFlow
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import selector
 
@@ -158,12 +157,21 @@ class BrunataConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 **user_input,
                 CONF_EMAIL: _normalise_email(user_input[CONF_EMAIL]),
             }
+            # The account check first, the login second, which also puts
+            # _abort_if_unique_id_mismatch()'s AbortFlow outside the try below:
+            # it has to reach the flow manager to become a proper
+            # FlowResultType.ABORT, and it used to need an explicit re-raise to
+            # get past the broad handler.
+            # Both orders end in the
+            # same abort, but this one decides it locally: entering a different
+            # address is a mistake the unique_id already knows about, and
+            # spending a full Keycloak round trip against a bot-protected
+            # endpoint to find that out costs the user seconds and Brunata a
+            # request, for an answer that was never going to change.
+            await self.async_set_unique_id(user_input[CONF_EMAIL])
+            self._abort_if_unique_id_mismatch(reason="wrong_account")
             try:
                 await validate_input(self.hass, user_input)
-                # Re-entering the correct address with different casing must
-                # not be rejected as a different account.
-                await self.async_set_unique_id(user_input[CONF_EMAIL])
-                self._abort_if_unique_id_mismatch(reason="wrong_account")
                 _LOGGER.debug(
                     "Re-authentication successful for entry %s", reauth_entry.entry_id
                 )
@@ -175,11 +183,6 @@ class BrunataConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 errors["base"] = "cannot_connect"
             except InvalidAuth:
                 errors["base"] = "invalid_auth"
-            except AbortFlow:
-                # Raised internally by _abort_if_unique_id_mismatch(); must
-                # propagate so the flow manager turns it into a proper
-                # FlowResultType.ABORT instead of being swallowed here.
-                raise
             except Exception:  # pylint: disable=broad-except
                 _LOGGER.exception("Unexpected error during re-authentication")
                 errors["base"] = "unknown"
