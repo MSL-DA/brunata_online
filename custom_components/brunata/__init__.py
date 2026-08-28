@@ -115,8 +115,26 @@ async def async_remove_config_entry_device(
     would happily agree to delete every device the integration owns. Refusing
     while the last update failed costs the user one poll's wait and removes
     that possibility entirely.
+
+    runtime_data is read defensively for the same reason it is in
+    async_unload_entry: it may not be there. Home Assistant's remove handler
+    checks that the device exists, that the config entry exists, that the entry
+    supports device removal, and that the integration imports — and then calls
+    this. It does *not* check that the entry is loaded, so this can run for an
+    entry that never set up or has since been unloaded, where reading
+    runtime_data directly raises AttributeError instead of refusing cleanly.
     """
-    coordinator = entry.runtime_data
+    coordinator: BrunataDataUpdateCoordinator | None = getattr(
+        entry, "runtime_data", None
+    )
+    if coordinator is None:
+        _LOGGER.debug(
+            "Refusing to remove device %s: the config entry is not loaded, so "
+            "there is no meter list to check it against",
+            device.id,
+        )
+        return False
+
     if not coordinator.last_update_success:
         _LOGGER.debug(
             "Refusing to remove device %s: the last update failed, so the "
