@@ -14,6 +14,12 @@
           "password": "Adgangskode"
         },
         "description": "Dine Brunata loginoplysninger er ikke længere gyldige. Indtast dem venligst igen for at fortsætte."
+      },
+      "reconfigure": {
+        "data": {
+          "password": "Adgangskode"
+        },
+        "description": "Indtast den nye adgangskode til {email}. Vil du bruge en anden konto, skal den tilføjes som en ny integration."
       }
     },
     "error": {
@@ -24,7 +30,8 @@
     "abort": {
       "already_configured": "Kontoen er allerede konfigureret",
       "reauth_successful": "Loginoplysningerne er opdateret",
-      "wrong_account": "E-mailen tilhører en anden konto. Log ind med den oprindelige konto."
+      "wrong_account": "E-mailen tilhører en anden konto. Log ind med den oprindelige konto.",
+      "reconfigure_successful": "Adgangskoden er opdateret"
     }
   },
   "entity": {
