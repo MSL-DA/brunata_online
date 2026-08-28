@@ -479,8 +479,13 @@ def test_decimals_and_transmitting_are_carried_through():
     assert meter.transmitting is True
 
 
-@pytest.mark.parametrize("decimals", [None, "3", 1.5])
+@pytest.mark.parametrize("decimals", [None, "3", 1.5, True, False])
 def test_non_integer_decimals_is_ignored(decimals):
+    """True and False are in this list because bool subclasses int.
+
+    `isinstance(True, int)` is True, so a payload carrying `true` used to
+    become a display precision of 1 — a number the meter never reported.
+    """
     item = _meter_item("abc")
     item["decimals"] = decimals
 
