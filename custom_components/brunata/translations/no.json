@@ -22,7 +22,7 @@
       "unknown": "Uventet feil"
     },
     "abort": {
-      "already_configured": "Enheten er allerede konfigurert",
+      "already_configured": "Denne kontoen er allerede konfigurert",
       "reauth_successful": "Påloggingsopplysningene er oppdatert",
       "wrong_account": "Denne e-postadressen tilhører en annen konto. Logg inn med den opprinnelige kontoen."
     }
