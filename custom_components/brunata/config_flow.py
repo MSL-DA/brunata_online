@@ -27,7 +27,18 @@ _LOGGER = logging.getLogger(__name__)
 
 
 def _normalise_email(email: str) -> str:
-    """Return the email in the canonical form used for the entry's unique_id."""
+    """Return the email in the canonical form the integration stores it in.
+
+    Applied to the whole of user_input before anything is done with it, not
+    just to the unique_id. Storing the raw string meant a value pasted from a
+    password manager as "  bruger@example.com " was sent to Keycloak with the
+    whitespace attached: the login failed, the user saw invalid_auth, and
+    nothing in the UI hinted at why. It also put the padding in the entry
+    title, and offered it back as the default on the reauth form.
+
+    Lowercasing as well as stripping keeps the stored address and the
+    unique_id derived from it in one form, so the two can never disagree.
+    """
     return email.strip().lower()
 
 
@@ -92,10 +103,18 @@ class BrunataConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         _LOGGER.debug("async_step_user called (form submitted: %s)", user_input is not None)
         errors = {}
         if user_input is not None:
-            # Normalise before using it as the unique_id, otherwise
-            # "Bruger@example.com" and "bruger@example.com" are treated as two
-            # separate accounts and the duplicate check never fires.
-            await self.async_set_unique_id(_normalise_email(user_input[CONF_EMAIL]))
+            # Normalised once, here, so the unique_id, the credentials sent to
+            # Brunata and the data written to the entry are all the same
+            # string. Doing it only for the unique_id left the raw value —
+            # whitespace and all — to be logged in with and stored.
+            user_input = {
+                **user_input,
+                CONF_EMAIL: _normalise_email(user_input[CONF_EMAIL]),
+            }
+            # Without this, "Bruger@example.com" and "bruger@example.com" are
+            # treated as two separate accounts and the duplicate check never
+            # fires.
+            await self.async_set_unique_id(user_input[CONF_EMAIL])
             self._abort_if_unique_id_configured()
             try:
                 info = await validate_input(self.hass, user_input)
@@ -132,12 +151,18 @@ class BrunataConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         errors = {}
 
         if user_input is not None:
+            # Normalised before the login for the same reason as in
+            # async_step_user: a padded address fails against Keycloak and the
+            # user is told their password is wrong.
+            user_input = {
+                **user_input,
+                CONF_EMAIL: _normalise_email(user_input[CONF_EMAIL]),
+            }
             try:
                 await validate_input(self.hass, user_input)
-                # Same normalisation as in async_step_user, so re-entering the
-                # correct address with different casing is not rejected as a
-                # different account.
-                await self.async_set_unique_id(_normalise_email(user_input[CONF_EMAIL]))
+                # Re-entering the correct address with different casing must
+                # not be rejected as a different account.
+                await self.async_set_unique_id(user_input[CONF_EMAIL])
                 self._abort_if_unique_id_mismatch(reason="wrong_account")
                 _LOGGER.debug(
                     "Re-authentication successful for entry %s", reauth_entry.entry_id
