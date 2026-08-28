@@ -1,85 +1,38 @@
 name: Release
 
-# HACS serves whatever manifest.json says, not what the tag says. A release
-# published with a stale version number is installable, but Home Assistant then
-# reports it as the previous version — and HACS will not offer the next update,
-# because as far as it can tell the user already has it.
+# HACS serves whatever manifest.json says, not what the tag says. A tag pushed
+# with a stale version number produces a release users can install but that
+# Home Assistant then reports as the previous version — and HACS will not offer
+# the next update, because as far as it can tell they already have it.
 #
-# Nothing else in CI catches that: pytest.yml and hassfest.yml run on the
-# branch, where the tag does not exist yet. This is the one moment both numbers
-# are known.
-#
-# The check only reports. Publishing from the web UI creates the tag and the
-# release in a single operation, so by the time anything here runs, the release
-# is already public. A red tick means "the release you just published carries
-# the wrong version number": fix manifest.json, then delete the release and its
-# tag and publish again. An earlier version tried to make the check blocking by
-# creating the release itself; that broke publishing from the UI every time,
-# because the release was already there. Reporting is as far as a check can go
-# without taking the publishing over.
+# Nothing else in CI checks this: pytest.yml and hassfest.yml run on the branch,
+# where the tag does not exist yet. So it is checked here, at the one moment
+# both numbers are known.
 
-# Two triggers on purpose.
-#
-# push/tags fires when a tag is pushed from the command line, or when
-# publishing a release creates a brand new tag.
-#
-# release/published fires whenever a release is published, including on a tag
-# that already existed — which the push trigger does not, because no tag is
-# created and therefore nothing is pushed. That case is easy to end up in: a
-# tag left behind by a deleted release, or one created before the release.
-#
-# A brand new tag fires both, so that release gets two runs. Harmless, and
-# preferable to the failure mode where a release is published and nothing
-# checks it at all.
 on:
   push:
     tags:
       - "v*"
-  release:
-    types: [published]
 
 permissions:
   contents: read
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event.release.tag_name || github.ref_name }}
-  cancel-in-progress: false
 
 jobs:
   version:
     name: Tag matches manifest
     runs-on: ubuntu-latest
     steps:
-      # Explicit ref rather than the default. On a push event the default is
-      # already the tag, but on a release event it is worth being precise about
-      # which commit the manifest is read from.
       - uses: actions/checkout@v7
-        with:
-          ref: ${{ github.event.release.tag_name || github.ref_name }}
-
-      # Explicit rather than relying on whatever Python the runner image
-      # happens to put on PATH. This job runs once per release and never in the
-      # normal cycle, so a surprise here would surface at the worst possible
-      # moment.
-      - name: Set up Python
-        uses: actions/setup-python@v7
-        with:
-          python-version: "3.14"
 
       - name: Compare the tag with manifest.json
-        env:
-          # github.ref_name is the tag on a push event; on a release event the
-          # tag name is read from the release itself.
-          TAG_NAME: ${{ github.event.release.tag_name || github.ref_name }}
         run: |
-          tag="${TAG_NAME#v}"
+          tag="${GITHUB_REF_NAME#v}"
           manifest=$(python -c "import json; print(json.load(open('custom_components/brunata/manifest.json'))['version'])")
 
-          echo "Triggered by: ${{ github.event_name }}"
-          echo "Tag:          $TAG_NAME (version $tag)"
-          echo "Manifest:     $manifest"
+          echo "Tag:      $GITHUB_REF_NAME (version $tag)"
+          echo "Manifest: $manifest"
 
           if [ "$tag" != "$manifest" ]; then
-            echo "::error::Tag $TAG_NAME does not match manifest.json ($manifest). Fix manifest.json, then delete this release and its tag and publish again."
+            echo "::error::Tag $GITHUB_REF_NAME does not match manifest.json ($manifest). Bump manifest.json, or delete and re-push the tag."
             exit 1
           fi
