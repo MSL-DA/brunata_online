@@ -1102,3 +1102,32 @@ async def test_availability_survives_a_coordinator_with_no_data_yet(mock_meter):
     entity._attr_native_value = 151.037
 
     assert entity.available is True
+
+
+async def test_transmitting_is_cleared_when_the_meter_disappears(mock_meter):
+    """`transmitting` is a claim about the meter right now.
+
+    A dismounted meter is dropped from the payload, and the attribute used to
+    keep whatever it last said — "true" on a meter that was physically taken
+    off the wall. The reading is deliberately kept, because it is the last
+    thing the meter really registered and dropping it would put a hole in the
+    statistics; the claim about the present is not.
+    """
+    coordinator = MagicMock()
+    coordinator.data = {"12345": mock_meter}
+    coordinator.last_update_success = True
+
+    entity = _make_entity(coordinator, mock_meter)
+    entity._apply_latest_reading()
+    assert entity.extra_state_attributes["transmitting"] is True
+
+    coordinator.data = {}
+    entity._apply_latest_reading()
+
+    # Dropped from the attributes entirely rather than reported as None:
+    # extra_state_attributes only includes what it actually knows, so an
+    # unknown value has no key. Asserting `is None` on the key would raise
+    # KeyError, not fail — which is why the absence is asserted directly.
+    assert "transmitting" not in entity.extra_state_attributes
+    assert entity.native_value == mock_meter.value
+    assert entity.available is False
