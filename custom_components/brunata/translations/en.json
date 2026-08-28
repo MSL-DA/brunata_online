@@ -14,6 +14,12 @@
           "password": "Password"
         },
         "description": "Your Brunata credentials are no longer valid. Please re-enter them to continue."
+      },
+      "reconfigure": {
+        "data": {
+          "password": "Password"
+        },
+        "description": "Enter the new password for {email}. To use a different account, add it as a new integration."
       }
     },
     "error": {
@@ -24,7 +30,8 @@
     "abort": {
       "already_configured": "This account is already configured",
       "reauth_successful": "Login credentials updated",
-      "wrong_account": "This email belongs to a different account. Log in with the original account."
+      "wrong_account": "This email belongs to a different account. Log in with the original account.",
+      "reconfigure_successful": "Password updated"
     }
   },
   "entity": {
