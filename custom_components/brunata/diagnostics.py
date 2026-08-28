@@ -82,7 +82,9 @@ async def async_get_config_entry_diagnostics(
         "entry": {
             "version": entry.version,
             "data": async_redact_data(dict(entry.data), TO_REDACT),
-            "options": dict(entry.options),
+            # No "options" key: this integration has no options flow, so it
+            # was reported as {} in every report ever downloaded. A field that
+            # cannot carry information costs the reader's attention each time.
         },
         "coordinator": {
             # A failing update leaves the sensors on their last known values,
