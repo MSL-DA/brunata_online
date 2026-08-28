@@ -22,7 +22,7 @@
       "unknown": "Une erreur inattendue s’est produite"
     },
     "abort": {
-      "already_configured": "L’appareil est déjà configuré",
+      "already_configured": "Ce compte est déjà configuré",
       "reauth_successful": "Les identifiants ont été mis à jour",
       "wrong_account": "Cette adresse e-mail est associée à un autre compte. Connectez-vous avec le compte d’origine."
     }
