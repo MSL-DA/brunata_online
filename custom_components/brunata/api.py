@@ -50,7 +50,13 @@ API_URL = f"{BASE_URL}/online-webservice/v2/rest"
 # is where the requests this client imitates come from — confirmed by reading
 # the live traffic in the browser's developer tools, not inherited from
 # brunata-api.
-METERS_URL = f"{BASE_URL}/react-online/meters-values"
+#
+# Named REFERER_URL, not METERS_URL. It is not the meters endpoint: that is
+# {API_URL}/consumer/metersforconsumer, built in async_get_meters(). The old
+# name invited exactly the confusion this codebase has already paid for twice —
+# METERS_URL was one of the three names a conclusion was drawn from instead of
+# read.
+REFERER_URL = f"{BASE_URL}/react-online/meters-values"
 
 # Where a user should report a meter this integration skipped. Named rather
 # than left to "please open an issue", because the log line already contains
@@ -581,7 +587,7 @@ class BrunataApiClient:
             url,
             headers={
                 "Authorization": f"{self._token_type} {self._access_token}",
-                "Referer": METERS_URL,
+                "Referer": REFERER_URL,
             },
         )
 
