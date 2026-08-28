@@ -138,13 +138,21 @@ def _log_unsupported_meter(meter_id: str, code: str) -> None:
 # Brunata's API is fronted by bot protection, so the requests are made to look
 # like the web app's. brunata-api randomised the Edge version through
 # fake_useragent; a fixed, plausible string avoids that dependency.
+# The browser version below is bumped by hand from time to time, and there is
+# no test that can tell when it is due: a stale version has no effect right up
+# until the day the bot protection decides it does. It is deliberately a fixed
+# string rather than randomised — brunata-api used fake_useragent for this,
+# which added a dependency and a moving target for no benefit.
+#
+# Last set to Edge 151 (stable, July 2026). If logins start failing with no
+# other explanation, this is the first thing to look at.
 DEFAULT_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0"
+        "(KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36 Edg/151.0.0.0"
     ),
     "Sec-Ch-Ua": (
-        '"Not/A)Brand";v="8", "Chromium";v="130", "Microsoft Edge";v="130"'
+        '"Not/A)Brand";v="8", "Chromium";v="151", "Microsoft Edge";v="151"'
     ),
     "Sec-Ch-Ua-Mobile": "?0",
     "Sec-Ch-Ua-Platform": '"Windows"',
