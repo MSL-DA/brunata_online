@@ -20,7 +20,7 @@ from homeassistant.helpers.restore_state import ExtraStoredData, RestoreEntity
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from . import BrunataConfigEntry, BrunataDataUpdateCoordinator
-from .api import BrunataMeter
+from .api import BrunataMeter, _parse_reading_date, _parse_timestamp
 from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
@@ -174,37 +174,22 @@ def _as_iso(value: date | datetime | str | None) -> str | None:
 def _as_date(value: date | datetime | str | None) -> date | None:
     """Return a reading date as a date object, or None if it can't be parsed.
 
-    Used only for the calendar-year comparison in _is_annual_reset(). A
-    state restored after a restart hands us the ISO string it was serialised
-    as, so it has to be parsed back; anything unparseable simply disables the
-    year rule and falls back to the December/January window.
+    Used only for the calendar-year comparison in _is_annual_reset(). A state
+    restored after a restart hands us the ISO string it was serialised as, so
+    it has to be parsed back; anything unparseable simply disables the year
+    rule and falls back to the December/January window.
+
+    The string case is api.py's parser, not a second copy of it. What the
+    restore store holds is what we serialised from the API's own values, so
+    there is one spelling of a Brunata date and one place that knows it. Two
+    private copies would have drifted without anything failing, because each
+    had its own test.
     """
     if isinstance(value, datetime):
         return value.date()
     if isinstance(value, date):
         return value
-    if isinstance(value, str):
-        try:
-            return date.fromisoformat(value[:10])
-        except ValueError:
-            return None
-    return None
-
-
-def _as_datetime(value: Any) -> datetime | None:
-    """Parse a stored ISO timestamp back into a datetime.
-
-    Counterpart to the isoformat() in BrunataRestoredData. Brunata's mounting
-    dates carry an offset, which round-trips through fromisoformat(), so the
-    restored value compares equal to the one the API hands us. Anything
-    unparseable becomes None.
-    """
-    if not isinstance(value, str):
-        return None
-    try:
-        return datetime.fromisoformat(value)
-    except ValueError:
-        return None
+    return _parse_reading_date(value)
 
 
 @dataclass
@@ -334,13 +319,18 @@ class BrunataSensor(
             # claim no device class for it — HA would reject the combination.
             self._attr_native_unit_of_measurement = raw_unit
 
-        # Determine device class and icon from the canonical unit.
+        # Determine the device class from the canonical unit.
+        #
+        # No icon is set for the two that have one: Home Assistant already
+        # draws mdi:water for device_class WATER and mdi:lightning-bolt for
+        # ENERGY, so setting them here only froze this integration's sensors
+        # to whatever those defaults happened to be. An allocation meter has
+        # no device class and therefore no default, so it keeps an explicit
+        # icon.
         if unit in VOLUME_UNITS:
             self._attr_device_class = SensorDeviceClass.WATER
-            self._attr_icon = "mdi:water"
         elif unit in ENERGY_UNITS:
             self._attr_device_class = SensorDeviceClass.ENERGY
-            self._attr_icon = "mdi:lightning-bolt"
         else:
             self._attr_icon = "mdi:gauge"
 
@@ -386,7 +376,6 @@ class BrunataSensor(
         # because _async_update_device_name() has to build the same one when
         # the label changes.
         self._placement = meter.placement
-        self._meter_type = meter.meter_type
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, f"brunata_{self._meter_id}")},
             name=_device_name(meter.meter_type, meter.placement, self._meter_id),
@@ -426,7 +415,9 @@ class BrunataSensor(
             restored_extra = BrunataRestoredData.from_dict(last_extra.as_dict())
             if restored_extra is not None:
                 self._meter_no = restored_extra.meter_no
-                self._mounting_date = _as_datetime(restored_extra.mounting_date)
+                self._mounting_date = _parse_timestamp(
+                    restored_extra.mounting_date
+                )
 
         last_state = await self.async_get_last_state()
         if last_state is not None and last_state.state not in (
