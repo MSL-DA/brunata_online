@@ -391,3 +391,82 @@ async def test_reauth_logs_in_with_the_normalised_email(
     assert validate.call_args.args[1]["email"] == "bruger@example.com"
     assert entry.data["email"] == "bruger@example.com"
     assert entry.data["password"] == "new-password"
+
+
+# --- reconfigure -----------------------------------------------------------
+
+
+async def test_reconfigure_updates_the_password(
+    hass: HomeAssistant, mock_brunata_client
+):
+    """Changing a password in Brunata Online should not require a failure first.
+
+    Without this step the only route is to wait for the integration to fail on
+    the old password and let reauth start — up to an hour of a broken
+    integration and a notification about something the user already fixed.
+    """
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        unique_id="test@example.com",
+        data={"email": "test@example.com", "password": "old_password"},
+    )
+    entry.add_to_hass(hass)
+
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={"source": config_entries.SOURCE_RECONFIGURE, "entry_id": entry.entry_id},
+    )
+    assert result["step_id"] == "reconfigure"
+
+    # The address is not on the form: it is the unique_id, and changing it
+    # would orphan every entity and device behind it.
+    assert "email" not in result["data_schema"].schema
+
+    with patch(
+        "custom_components.brunata.config_flow.validate_input",
+        return_value={"title": "Brunata (test@example.com)"},
+    ) as validate:
+        result2 = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            {"password": "new_password123"},
+        )
+        await hass.async_block_till_done()
+
+    assert result2["type"] == data_entry_flow.FlowResultType.ABORT
+    assert result2["reason"] == "reconfigure_successful"
+    assert entry.data["password"] == "new_password123"
+    # The stored address is reused, so a login is still attempted with both
+    # halves of the credentials.
+    assert validate.call_args.args[1]["email"] == "test@example.com"
+
+
+async def test_reconfigure_keeps_the_old_password_when_the_new_one_is_wrong(
+    hass: HomeAssistant, mock_brunata_client
+):
+    """A rejected password must not be written to the entry. Otherwise a typo
+    replaces working credentials with broken ones and reauth starts on the next
+    poll — the exact failure this step exists to avoid."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        unique_id="test@example.com",
+        data={"email": "test@example.com", "password": "old_password"},
+    )
+    entry.add_to_hass(hass)
+
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={"source": config_entries.SOURCE_RECONFIGURE, "entry_id": entry.entry_id},
+    )
+
+    with patch(
+        "custom_components.brunata.config_flow.validate_input",
+        side_effect=InvalidAuth,
+    ):
+        result2 = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            {"password": "wrong_password"},
+        )
+
+    assert result2["type"] == data_entry_flow.FlowResultType.FORM
+    assert result2["errors"] == {"base": "invalid_auth"}
+    assert entry.data["password"] == "old_password"
