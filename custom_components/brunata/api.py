@@ -52,6 +52,12 @@ API_URL = f"{BASE_URL}/online-webservice/v2/rest"
 # brunata-api.
 METERS_URL = f"{BASE_URL}/react-online/meters-values"
 
+# Where a user should report a meter this integration skipped. Named rather
+# than left to "please open an issue", because the log line already contains
+# the one thing that issue is asking for — sending people to file a fresh one
+# turns an answer into a duplicate.
+METER_TYPE_ISSUE_URL = "https://github.com/MSL-DA/brunata_online/issues/39"
+
 # The only meter types this integration will surface. Everything else in
 # Brunata's meterType table is dropped before it ever becomes an entity.
 #
@@ -78,12 +84,6 @@ METERS_URL = f"{BASE_URL}/react-online/meters-values"
 #
 # _log_unsupported_meter() names the code of anything dropped, so the way to
 # extend this list is to read that line from a user's log — not to infer it.
-# Where a user should report a meter this integration skipped. Named rather
-# than left to "please open an issue", because the log line already contains
-# the one thing that issue is asking for — sending people to file a fresh one
-# turns an answer into a duplicate.
-METER_TYPE_ISSUE_URL = "https://github.com/MSL-DA/brunata_online/issues/39"
-
 SUPPORTED_METER_TYPES = frozenset({1, 2})
 
 
@@ -127,6 +127,7 @@ def _log_unsupported_meter(meter_id: str, code: str) -> None:
         sorted(SUPPORTED_METER_TYPES),
         METER_TYPE_ISSUE_URL,
     )
+
 
 # Brunata's API is fronted by bot protection, so the requests are made to look
 # like the web app's. brunata-api randomised the Edge version through
@@ -907,7 +908,16 @@ def _parse_meters(
             reading_date=_parse_reading_date(item.get("latestReadingDate")),
             placement=placement if isinstance(placement, str) and placement else None,
             mounting_date=_parse_timestamp(item.get("mountingDate")),
-            decimals=int(decimals) if isinstance(decimals, int) else None,
+            # `not isinstance(decimals, bool)` because bool subclasses int, so
+            # a payload carrying `true` would otherwise become a display
+            # precision of 1. _meter_type_code() guards the same way for
+            # meterType; the two fields read the same kind of input and have to
+            # treat it the same way.
+            decimals=(
+                int(decimals)
+                if isinstance(decimals, int) and not isinstance(decimals, bool)
+                else None
+            ),
             transmitting=transmitting if isinstance(transmitting, bool) else None,
         )
 
