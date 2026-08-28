@@ -1027,3 +1027,83 @@ async def test_sensor_placement_is_cleared_when_it_disappears(mock_meter):
     entity._apply_latest_reading()
 
     assert "placement" not in entity.extra_state_attributes
+
+
+# --- availability ----------------------------------------------------------
+
+
+async def test_a_meter_that_disappears_from_the_payload_goes_unavailable(mock_meter):
+    """Brunata drops a dismounted meter, and _parse_meters() drops it again on
+    dismountedDate, so it simply stops appearing in the coordinator's data.
+
+    Reporting it as unavailable is the honest answer. The alternative is a
+    device sitting in Home Assistant showing a final reading forever,
+    indistinguishable from a working meter.
+    """
+    coordinator = MagicMock()
+    coordinator.data = {"12345": mock_meter}
+    coordinator.last_update_success = True
+
+    entity = _make_entity(coordinator, mock_meter)
+    entity._apply_latest_reading()
+    assert entity.available is True
+
+    coordinator.data = {}
+    assert entity.available is False
+
+
+async def test_a_failed_update_does_not_make_the_sensor_unavailable(mock_meter):
+    """This override exists to *ignore* coordinator.last_update_success, and
+    that is the decision the test is here to hold.
+
+    CoordinatorEntity.available would go False on a failed update. For a meter
+    polled once an hour over a cloud API, a transient failure would then punch
+    a hole in the Long Term Statistics — and statistics cannot be backfilled
+    afterwards, so the hole is permanent. The meter still exists and the value
+    is still the last one Brunata reported; reading_date is what says how
+    fresh it is.
+
+    If this test ever has to be loosened, that is the moment to think hard.
+    """
+    coordinator = MagicMock()
+    coordinator.data = {"12345": mock_meter}
+    coordinator.last_update_success = True
+
+    entity = _make_entity(coordinator, mock_meter)
+    entity._apply_latest_reading()
+    assert entity.available is True
+
+    # The coordinator keeps the previous data on failure, which is exactly the
+    # state being modelled here.
+    coordinator.last_update_success = False
+    assert entity.available is True
+
+
+async def test_a_meter_that_has_never_reported_is_unavailable(mock_meter):
+    """The entity is created for a meter with no reading — so it picks one up
+    when Brunata eventually sends it — but it must not present as a working
+    sensor with an empty state in the meantime."""
+    meter = replace(mock_meter, value=None, reading_date=None)
+    coordinator = MagicMock()
+    coordinator.data = {"12345": meter}
+    coordinator.last_update_success = True
+
+    entity = _make_entity(coordinator, meter)
+    entity._apply_latest_reading()
+
+    assert entity.native_value is None
+    assert entity.available is False
+
+
+async def test_availability_survives_a_coordinator_with_no_data_yet(mock_meter):
+    """coordinator.data is None before the first refresh completes. A restored
+    value must not be reported as unavailable just because the first poll has
+    not landed."""
+    coordinator = MagicMock()
+    coordinator.data = None
+    coordinator.last_update_success = True
+
+    entity = _make_entity(coordinator, mock_meter)
+    entity._attr_native_value = 151.037
+
+    assert entity.available is True
