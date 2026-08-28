@@ -22,7 +22,7 @@
       "unknown": "Unexpected error"
     },
     "abort": {
-      "already_configured": "Device is already configured",
+      "already_configured": "This account is already configured",
       "reauth_successful": "Login credentials updated",
       "wrong_account": "This email belongs to a different account. Log in with the original account."
     }
