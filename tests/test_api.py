@@ -14,7 +14,7 @@ import time
 import pytest
 
 from custom_components.brunata.api import (
-    METERS_URL,
+    REFERER_URL,
     BrunataApiClient,
     BrunataApiError,
     BrunataAuthError,
@@ -35,7 +35,12 @@ class FakeResponse:
         return self._json_data
 
 
-METER_TYPES = ["Pulse Collector", "Radiator", "Water", "Energy"]
+# Indices 1 and 2 are read off a live account. Indices 0 and 3 are stand-ins
+# for "some other type", deliberately not named: no source gives a numeric
+# meterType mapping, and a plausible-looking name here would be read back later
+# as evidence that it is one. Index 3 in particular used to say "Energy", which
+# is exactly the guess SUPPORTED_METER_TYPES refuses to make. See issue #39.
+METER_TYPES = ["Unverified type 0", "Radiator", "Water", "Unverified type 3"]
 # Index 8 is what live water meters report; the gaps stand in for units this
 # account does not use.
 MEASUREMENT_UNITS = ["", "units", "", "", "", "", "", "", "m3"]
@@ -518,7 +523,7 @@ async def test_meters_are_fetched_from_metersforconsumer():
     assert method == "GET"
     assert url.endswith("/consumer/metersforconsumer")
     assert headers["Authorization"] == "Bearer T"
-    assert headers["Referer"] == METERS_URL
+    assert headers["Referer"] == REFERER_URL
 
 
 async def test_stale_token_on_the_locale_endpoint_retries_with_a_fresh_login():
