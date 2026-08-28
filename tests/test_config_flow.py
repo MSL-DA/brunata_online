@@ -207,6 +207,43 @@ async def test_flow_reauth_wrong_account(hass: HomeAssistant, mock_brunata_clien
     assert entry.data["email"] == "test@example.com"
     assert entry.data["password"] == "old_password"
 
+
+async def test_reauth_rejects_the_wrong_account_without_logging_in(
+    hass: HomeAssistant, mock_brunata_client
+):
+    """The unique_id check comes before validate_input().
+
+    Both orders end in the same wrong_account abort, so the outcome above does
+    not pin the ordering down. Entering a different address is a mistake the
+    unique_id already knows about; spending a full Keycloak round trip against
+    a bot-protected endpoint to reach the same answer costs the user seconds
+    and Brunata a request for nothing.
+    """
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        unique_id="test@example.com",
+        data={"email": "test@example.com", "password": "old_password"},
+    )
+    entry.add_to_hass(hass)
+
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={"source": config_entries.SOURCE_REAUTH, "entry_id": entry.entry_id},
+    )
+
+    with patch(
+        "custom_components.brunata.config_flow.validate_input",
+        return_value={"title": "other@example.com"},
+    ) as validate:
+        result2 = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            {"email": "other@example.com", "password": "new_password123"},
+        )
+        await hass.async_block_till_done()
+
+    assert result2["reason"] == "wrong_account"
+    assert validate.call_count == 0
+
 async def test_credential_fields_use_selectors(hass: HomeAssistant, mock_brunata_client):
     """The password field must render masked, in both the initial and the
     reauth form. A bare `str` in the schema gives an ordinary text box, so the
