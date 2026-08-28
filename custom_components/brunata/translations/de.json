@@ -22,7 +22,7 @@
       "unknown": "Unerwarteter Fehler"
     },
     "abort": {
-      "already_configured": "Gerät bereits konfiguriert",
+      "already_configured": "Dieses Konto ist bereits konfiguriert",
       "reauth_successful": "Anmeldedaten aktualisiert",
       "wrong_account": "Diese E-Mail-Adresse gehört zu einem anderen Konto. Melden Sie sich mit dem ursprünglichen Konto an."
     }
