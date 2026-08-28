@@ -280,3 +280,77 @@ async def test_flow_user_normalises_email_for_unique_id(
 
     assert result2["type"] == data_entry_flow.FlowResultType.ABORT
     assert result2["reason"] == "already_configured"
+
+
+async def test_flow_user_stores_and_logs_in_with_the_normalised_email(
+    hass: HomeAssistant, mock_brunata_client
+):
+    """Normalisation has to reach the credentials and the entry, not just the
+    unique_id.
+
+    Storing the raw string meant an address pasted from a password manager as
+    "  Bruger@Example.COM " was sent to Keycloak with the whitespace attached:
+    the login failed, the user was told the password was wrong, and the entry
+    title carried the padding too.
+    """
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": config_entries.SOURCE_USER}
+    )
+
+    with patch(
+        "custom_components.brunata.config_flow.validate_input",
+        return_value={"title": "Brunata (bruger@example.com)"},
+    ) as validate:
+        result2 = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            {
+                "email": "  Bruger@Example.COM ",
+                "password": "password123",
+            },
+        )
+        await hass.async_block_till_done()
+
+    assert result2["type"] == data_entry_flow.FlowResultType.CREATE_ENTRY
+    assert result2["data"]["email"] == "bruger@example.com"
+    assert validate.call_args.args[1]["email"] == "bruger@example.com"
+
+
+async def test_reauth_logs_in_with_the_normalised_email(
+    hass: HomeAssistant, mock_brunata_client
+):
+    """Same on the reauth path, where it matters more: the form offers the
+    stored address as its default, so a padded one would be re-submitted every
+    time the user tried to fix their password."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        unique_id="bruger@example.com",
+        data={"email": "bruger@example.com", "password": "old"},
+    )
+    entry.add_to_hass(hass)
+
+    reauth = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={"source": config_entries.SOURCE_REAUTH, "entry_id": entry.entry_id},
+    )
+
+    with patch(
+        "custom_components.brunata.config_flow.validate_input",
+        return_value={"title": "Brunata (bruger@example.com)"},
+    ) as validate, patch(
+        "custom_components.brunata.BrunataDataUpdateCoordinator._async_update_data",
+        return_value={},
+    ):
+        result = await hass.config_entries.flow.async_configure(
+            reauth["flow_id"],
+            {
+                "email": " Bruger@Example.COM  ",
+                "password": "new-password",
+            },
+        )
+        await hass.async_block_till_done()
+
+    assert result["type"] == data_entry_flow.FlowResultType.ABORT
+    assert result["reason"] == "reauth_successful"
+    assert validate.call_args.args[1]["email"] == "bruger@example.com"
+    assert entry.data["email"] == "bruger@example.com"
+    assert entry.data["password"] == "new-password"
