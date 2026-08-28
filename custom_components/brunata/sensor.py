@@ -487,6 +487,17 @@ class BrunataSensor(
         """
         meter = (self.coordinator.data or {}).get(self._meter_id)
         if meter is None:
+            # Brunata no longer reports this meter, so nothing here is current
+            # any more. The reading is deliberately left alone — it is the last
+            # thing the meter really registered, and dropping it would put a
+            # hole in the statistics — but `transmitting` is a claim about the
+            # meter right now, and "true" on a dismounted meter is simply
+            # false. Cleared to None: unknown, which is what it is.
+            #
+            # `placement` is left as it was. It is a label, not a state, and it
+            # keeps the sensor's own attributes readable next to a device name
+            # that also still carries it.
+            self._transmitting = None
             return
 
         # Metadata is refreshed whether or not the reading below is accepted:
