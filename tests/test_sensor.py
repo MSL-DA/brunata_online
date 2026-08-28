@@ -82,7 +82,7 @@ async def test_sensor_setup(hass: HomeAssistant, mock_brunata_client, mock_meter
     assert entity_id is not None
 
     state = hass.states.get(entity_id)
-    assert state.attributes["friendly_name"] == "Heat (12345) Consumption"
+    assert state.attributes["friendly_name"] == "Water (12345) Consumption"
     # Always an ISO string, whether the value came from the API or from a
     # restored state after a restart.
     assert state.attributes["reading_date"] == "2024-01-01"
@@ -145,16 +145,13 @@ async def test_sensor_display_precision_comes_from_the_api(mock_meter):
     coordinator = MagicMock()
     coordinator.data = {"12345": mock_meter}
 
-    for meter_type, raw_unit, decimals in (
-        ("Radiator", "units", 0),
-        ("Water", "m3", 3),
-        ("Energy", "kWh", 2),
-    ):
+    # The meter type is not part of this: only the unit and Brunata's own
+    # decimals reach suggested_display_precision. kWh is here because UNIT_MAP
+    # can express it, not because any meter type reaching this code reports it.
+    for raw_unit, decimals in (("units", 0), ("m3", 3), ("kWh", 2)):
         entity = _make_entity(
             coordinator,
-            replace(
-                mock_meter, meter_type=meter_type, unit=raw_unit, decimals=decimals
-            ),
+            replace(mock_meter, unit=raw_unit, decimals=decimals),
         )
         assert entity.suggested_display_precision == decimals
 
@@ -169,17 +166,15 @@ async def test_sensor_display_precision_falls_back_to_the_unit(mock_meter):
     coordinator = MagicMock()
     coordinator.data = {"12345": mock_meter}
 
-    for meter_type, raw_unit, expected_precision in (
-        ("Radiator", "units", 0),
-        ("Water", "m3", 3),
-        ("Water", "l", 3),
-        ("Energy", "kWh", 2),
+    for raw_unit, expected_precision in (
+        ("units", 0),
+        ("m3", 3),
+        ("l", 3),
+        ("kWh", 2),
     ):
         entity = _make_entity(
             coordinator,
-            replace(
-                mock_meter, meter_type=meter_type, unit=raw_unit, decimals=None
-            ),
+            replace(mock_meter, unit=raw_unit, decimals=None),
         )
         assert entity.suggested_display_precision == expected_precision
 
@@ -579,10 +574,10 @@ async def test_sensor_restores_last_state_before_coordinator_has_data(
     available even if the coordinator has not delivered a fresh reading yet —
     this is the exact gap async_added_to_hass()'s restore closes."""
     # has_entity_name + the device name determine the generated entity_id: the
-    # device is "Heat (12345)" and the entity name is "Consumption". Confirmed
+    # device is "Water (12345)" and the entity name is "Consumption". Confirmed
     # against a real run — if the device naming in __init__ changes, this
     # string changes with it.
-    entity_id = "sensor.heat_12345_consumption"
+    entity_id = "sensor.water_12345_consumption"
     mock_restore_cache(
         hass,
         [State(entity_id, "500.0", {"reading_date": "2024-12-31"})],
@@ -903,7 +898,7 @@ async def test_sensor_device_name_uses_placement_when_present(mock_meter):
     coordinator.data = {"12345": meter}
     entity = _make_entity(coordinator, meter)
 
-    assert entity._attr_device_info["name"] == "Heat - Bathroom (Cold)"
+    assert entity._attr_device_info["name"] == "Water - Bathroom (Cold)"
 
 
 async def test_sensor_device_name_falls_back_without_placement(mock_meter):
@@ -913,7 +908,7 @@ async def test_sensor_device_name_falls_back_without_placement(mock_meter):
     coordinator.data = {"12345": mock_meter}
     entity = _make_entity(coordinator, mock_meter)
 
-    assert entity._attr_device_info["name"] == "Heat (12345)"
+    assert entity._attr_device_info["name"] == "Water (12345)"
 
 
 async def test_sensor_extra_state_attributes_include_placement_when_set(mock_meter):
@@ -984,7 +979,7 @@ async def test_device_name_follows_a_relabelled_meter(
     """DeviceInfo is only read when the entity is added, so a meter renamed in
     Brunata's own UI used to keep its old device name until the config entry
     was reloaded — while the placement attribute updated on the next poll. The
-    attribute saying "Kitchen" next to a device called "Heat - Living room" is
+    attribute saying "Kitchen" next to a device called "Water - Living room" is
     what a user notices."""
     meter = replace(mock_meter, placement="Living room")
     mock_brunata_client.async_get_meters = AsyncMock(return_value={"12345": meter})
@@ -1001,7 +996,7 @@ async def test_device_name_follows_a_relabelled_meter(
     device_registry = dr.async_get(hass)
     identifiers = {(DOMAIN, "brunata_12345")}
     assert device_registry.async_get_device(identifiers=identifiers).name == (
-        "Heat - Living room"
+        "Water - Living room"
     )
 
     mock_brunata_client.async_get_meters = AsyncMock(
@@ -1011,7 +1006,7 @@ async def test_device_name_follows_a_relabelled_meter(
     await hass.async_block_till_done()
 
     assert device_registry.async_get_device(identifiers=identifiers).name == (
-        "Heat - Kitchen"
+        "Water - Kitchen"
     )
 
 
