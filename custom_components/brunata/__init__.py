@@ -50,9 +50,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: BrunataConfigEntry) -> b
     # own backoff. Both are simply allowed to bubble up.
     try:
         await coordinator.async_config_entry_first_refresh()
-    except Exception:
+    except BaseException:
         # Setup is being abandoned, so async_unload_entry will never run for
         # this attempt — close the client here or every retry leaks one.
+        #
+        # BaseException, not Exception: asyncio.CancelledError is a
+        # BaseException, and cancellation is exactly what Home Assistant does
+        # to a setup still retrying when it shuts down. That path used to slip
+        # past this handler and leak the httpx client it had just built.
         await client.async_close()
         raise
 
