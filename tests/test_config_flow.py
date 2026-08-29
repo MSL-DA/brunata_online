@@ -440,6 +440,52 @@ async def test_reconfigure_updates_the_password(
     assert validate.call_args.args[1]["email"] == "test@example.com"
 
 
+async def test_reconfigure_normalises_an_address_stored_before_1_4_0(
+    hass: HomeAssistant, mock_brunata_client
+):
+    """The stored address is normalised on the way out, not assumed to be clean.
+
+    async_step_user only started normalising what it writes in 1.4.0. Before
+    that, only the unique_id derived from the address was cleaned up, so an
+    older entry can hold "  Bruger@Example.COM " verbatim. Reconfigure logs in
+    with the stored value, so without normalising it here Keycloak rejects the
+    padded string and the user is told their password is wrong — the exact
+    failure normalisation was added to prevent, on the one path that was added
+    in the same release and never got it.
+    """
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        unique_id="bruger@example.com",
+        data={"email": "  Bruger@Example.COM ", "password": "old_password"},
+    )
+    entry.add_to_hass(hass)
+
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={"source": config_entries.SOURCE_RECONFIGURE, "entry_id": entry.entry_id},
+    )
+    # The dialog says which account is being changed, so it must not offer the
+    # padded string either.
+    assert result["description_placeholders"]["email"] == "bruger@example.com"
+
+    with patch(
+        "custom_components.brunata.config_flow.validate_input",
+        return_value={"title": "Brunata (bruger@example.com)"},
+    ) as validate:
+        result2 = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            {"password": "new_password123"},
+        )
+        await hass.async_block_till_done()
+
+    assert result2["type"] == data_entry_flow.FlowResultType.ABORT
+    assert validate.call_args.args[1]["email"] == "bruger@example.com"
+    # And written back, so the entry corrects itself rather than staying odd
+    # until someone deletes and re-adds it.
+    assert entry.data["email"] == "bruger@example.com"
+    assert entry.data["password"] == "new_password123"
+
+
 async def test_reconfigure_keeps_the_old_password_when_the_new_one_is_wrong(
     hass: HomeAssistant, mock_brunata_client
 ):
