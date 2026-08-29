@@ -64,6 +64,11 @@ REFERER_URL = f"{BASE_URL}/react-online/meters-values"
 # turns an answer into a duplicate.
 METER_TYPE_ISSUE_URL = "https://github.com/MSL-DA/brunata_online/issues/39"
 
+# Where a fault with no issue of its own is reported. Separate from the line
+# above on purpose: #39 asks one specific question and an unrelated report
+# there is noise in it.
+ISSUE_TRACKER_URL = "https://github.com/MSL-DA/brunata_online/issues"
+
 # The only meter types this integration will surface. Everything else in
 # Brunata's meterType table is dropped before it ever becomes an entity.
 #
@@ -91,6 +96,38 @@ METER_TYPE_ISSUE_URL = "https://github.com/MSL-DA/brunata_online/issues/39"
 # _log_unsupported_meter() names the code of anything dropped, so the way to
 # extend this list is to read that line from a user's log — not to infer it.
 SUPPORTED_METER_TYPES = frozenset({1, 2})
+
+# Index 0 of Brunata's measurementUnit table is the literal string "undefined".
+# It resolves, but it is Brunata saying it has not stated a unit — which is the
+# same position as a code that does not resolve at all, and is treated the same
+# way. See _parse_meters().
+UNDEFINED_UNIT = "undefined"
+
+
+@lru_cache(maxsize=64)
+def _log_unresolved_unit(meter_id: str, code: str) -> None:
+    """Note a meter skipped for an unusable unit, once per process.
+
+    Same shape as _log_unsupported_meter() below and for the same reason: this
+    runs once per meter per poll, and the lookup tables do not change between
+    them.
+
+    The wording matters more here than in most log lines, because what the user
+    sees is a sensor that has stopped updating. It has to say that the data is
+    safe and that nothing needs doing.
+    """
+    _LOGGER.warning(
+        "Meter %s reports unit code %s, which cannot be resolved to a unit, so "
+        "this meter is skipped for now. Its sensor stops updating and keeps "
+        "the history it already has; it comes back on its own as soon as the "
+        "unit resolves again. Creating it with the raw code as its unit would "
+        "make Home Assistant treat it as a different measurement and discard "
+        "that history, which cannot be undone. If this persists, please report "
+        "it with this line at %s.",
+        meter_id,
+        code,
+        ISSUE_TRACKER_URL,
+    )
 
 
 def _meter_type_code(raw: Any) -> int | None:
@@ -228,6 +265,10 @@ class BrunataMeter:
     # a translation Brunata owns and we ask for with LOCALE, so it belongs in
     # device names and nowhere a decision is made — see meter_type_code.
     meter_type: str
+    # The resolved unit name, e.g. "m3" or "units". Never a raw code and never
+    # empty: _parse_meters() drops a meter whose unit it cannot name, because
+    # an entity created with the wrong unit loses its history permanently and
+    # a skipped one does not.
     unit: str
     # The raw meterType from the payload, already checked against
     # SUPPORTED_METER_TYPES. Carried because it is the stable half of the pair:
@@ -257,7 +298,7 @@ def _as_text(raw: Any) -> str:
     """Coerce a lookup code to text.
 
     Brunata's v2 payload carries meter type and unit as numeric codes, which
-    _lookup() resolves against the tables from the locale resource. Those codes
+    _resolve() looks up in the tables from the locale resource. Those codes
     have been observed as both integers and strings, so they are normalised
     here before being parsed, and an absent code becomes "" rather than the
     string "None".
@@ -274,7 +315,7 @@ def _as_text(raw: Any) -> str:
 def _warn_unresolved_code(what: str, code: str, table_size: int) -> None:
     """Warn about an unresolved lookup code, once per process.
 
-    _lookup() runs for every meter on every poll, so a code that does not
+    _resolve() runs for every meter on every poll, so a code that does not
     resolve would otherwise produce one warning per meter per hour for as long
     as the meter exists — 24 identical lines a day, drowning out everything
     else in the log. The lookup tables are static and account-independent, so
@@ -282,27 +323,31 @@ def _warn_unresolved_code(what: str, code: str, table_size: int) -> None:
 
     The cache is what makes it fire once: lru_cache only executes the body on
     a combination of arguments it has not seen before.
+
+    It says only that the code did not resolve. What happens next differs by
+    field — the meter type falls back, the unit skips the meter — so the
+    callers say that part.
     """
     _LOGGER.warning(
-        "Brunata %s code %r does not resolve in the lookup table "
-        "(%s entries). Falling back to the raw code.",
+        "Brunata %s code %r does not resolve in the lookup table (%s entries).",
         what,
         code,
         table_size,
     )
 
 
-def _lookup(table: list[str], raw: Any, what: str) -> str:
+def _resolve(table: list[str], raw: Any, what: str) -> str | None:
     """Resolve a numeric code against one of the locale lookup tables.
 
     The meter payload carries indices, not names: meterType 2 means whatever
-    sits at index 2 of the meterType table. An unresolved code falls back to
-    the raw number so the entity is still created, rather than taking down the
-    whole platform.
+    sits at index 2 of the meterType table. Returns None when the table cannot
+    answer, and leaves it to the caller to decide what that is worth — the two
+    fields this is used for do not deserve the same answer. See _lookup() and
+    _parse_meters().
     """
     code = _as_text(raw)
     if not code:
-        return ""
+        return None
 
     try:
         index = int(code)
@@ -310,9 +355,7 @@ def _lookup(table: list[str], raw: Any, what: str) -> str:
         # this, a code of -1 would not raise IndexError; it would quietly
         # return the *last* entry of the table — a wrong but perfectly valid
         # unit, with the wrong device class, the wrong state class, and long
-        # term statistics that look right and are not. Every other unresolvable
-        # code falls back to the raw number with a warning, and a negative one
-        # has to do the same.
+        # term statistics that look right and are not.
         if index < 0:
             raise IndexError(index)
         name = table[index]
@@ -321,17 +364,31 @@ def _lookup(table: list[str], raw: Any, what: str) -> str:
 
     # The live tables contain null entries — 7 of 28 meter types and 34 of 96
     # units are None, reserved slots Brunata has not filled in. An index
-    # landing on one must be treated exactly like an index past the end:
-    # returning the None would put it straight into BrunataMeter.meter_type,
-    # and the sensor platform would then die on meter_type.lower(), taking
-    # every entity with it rather than just the odd one.
+    # landing on one is treated exactly like an index past the end: the table
+    # does not know what this code means.
     if not isinstance(name, str) or not name.strip():
         _warn_unresolved_code(what, code, len(table))
-        return code
+        return None
 
     # Some entries in the live table carry a trailing space, which would
     # otherwise end up in the device name.
     return name.strip()
+
+
+def _lookup(table: list[str], raw: Any, what: str) -> str:
+    """Resolve a code, falling back to the raw code when the table cannot.
+
+    Used for the meter type only, and the fallback is deliberate there. The
+    name is used for the device name and the `model` field and for nothing
+    else: every decision hangs on meter_type_code, the number the allowlist
+    was enforced on. A device called "2" is ugly, visible and fixes itself the
+    moment the table resolves again.
+
+    The unit gets no such fallback — see _parse_meters(). That asymmetry is the
+    point: one of these two fields is cosmetic when it goes wrong, and the
+    other one costs the meter its history.
+    """
+    return _resolve(table, raw, what) or _as_text(raw)
 
 
 def parse_timestamp(raw: Any) -> datetime | None:
@@ -908,6 +965,28 @@ def _parse_meters(
             _log_unsupported_meter(str(raw_id), repr(item.get("meterType")))
             continue
 
+        # And is its unit something we can actually name? A code that does not
+        # resolve, a code Brunata has left as "undefined", or no code at all
+        # all say the same thing: nobody knows what this meter measures in.
+        #
+        # Skipped rather than filled in. Home Assistant treats a changed unit
+        # on an existing sensor as a different measurement and discards the
+        # long term statistics behind the old one, and that cannot be undone
+        # afterwards — so "8" or a guessed default in place of "m³" is a
+        # permanent loss, while skipping is a pause the meter recovers from by
+        # itself on the next poll that resolves.
+        #
+        # This is the same rule the meterType allowlist above follows, applied
+        # to the field where getting it wrong is the more expensive of the two.
+        # The meter type keeps its fallback because its name only reaches the
+        # device name; see _lookup().
+        unit = _resolve(
+            measurement_units or [], item.get("unit"), "measurement unit"
+        )
+        if unit is None or unit.lower() == UNDEFINED_UNIT:
+            _log_unresolved_unit(str(raw_id), repr(item.get("unit")))
+            continue
+
         value = _parse_value(item.get("latestReadingValue"))
         decimals = item.get("decimals")
         placement = item.get("placement")
@@ -932,9 +1011,7 @@ def _parse_meters(
             # The code the allowlist check above was made on, not a second
             # reading of the field: the two must never be able to disagree.
             meter_type_code=type_code,
-            unit=_lookup(
-                measurement_units or [], item.get("unit"), "measurement unit"
-            ),
+            unit=unit,
             value=value,
             reading_date=parse_reading_date(item.get("latestReadingDate")),
             placement=placement if isinstance(placement, str) and placement else None,
