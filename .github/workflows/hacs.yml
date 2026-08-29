@@ -1,25 +1,30 @@
 ---
-name: "Hassfest"
+name: HACS Validation
 
 on:
-  workflow_dispatch:
-  schedule:
-    - cron: "0 6 * * *"
   pull_request:
     branches:
-      - "main"
+      - main
+  push:
+    tags:
+      - "v*"
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  hassfest:
-    name: "Hassfest Validation"
-    runs-on: "ubuntu-latest"
+  hacs:
+    name: HACS Validation
+    runs-on: ubuntu-latest
     steps:
-      - name: "Checkout the repository"
-        uses: "actions/checkout@v7"
+      - name: Check out code from GitHub
+        uses: actions/checkout@v7
 
-      - name: "Run hassfest validation"
-        uses: "home-assistant/actions/hassfest@master"
+      - name: Run HACS validation
+        uses: hacs/action@main
+        with:
+          category: integration
