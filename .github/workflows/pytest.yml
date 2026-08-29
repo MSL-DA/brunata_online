@@ -1,3 +1,4 @@
+---
 name: Pytest
 
 on:
@@ -31,6 +32,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements_test.txt
 
+      # The pin in requirements_test.txt decides which Home Assistant this runs
+      # against, and it is not stated anywhere in the log otherwise. When a
+      # failure has to be explained six months later, that version is the first
+      # thing anyone looks for. pytest-latest.yml has carried this step from
+      # the start; the blocking workflow needs it more, not less.
       - name: Show resolved versions
         run: |
           pip show homeassistant pytest-homeassistant-custom-component \
@@ -38,4 +44,3 @@ jobs:
 
       - name: Run pytest
         run: pytest tests/ -v
-        
