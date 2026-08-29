@@ -242,18 +242,25 @@ def test_a_null_meter_type_entry_falls_back_to_the_raw_code():
     The meter type falls back to the raw code, because that name only reaches
     the device name and the model field: a device called "1" is ugly, visible,
     and fixes itself the moment the table resolves again. The unit does not —
-    see the test below."""
+    see the test below.
+
+    The unit code is set to one the table can answer. Left at the payload's
+    own "8", it lands on a reserved null slot in the unit table below, the
+    meter is skipped, and this test would be asserting the unit rule while
+    claiming to assert the type rule."""
     types = ["Collector", None, "Water"] + [None] * 25
     units = ["undefined", "units"] + [None] * 94
 
     item = _meter_item("abc")
     item["meterType"] = 1
+    item["unit"] = 1
 
     meter = _parse_meters(
         [item], meter_types=types, measurement_units=units
     )["abc"]
     assert meter.meter_type == "1"
     assert meter.meter_type_code == 1
+    assert meter.unit == "units"
 
 
 @pytest.mark.parametrize("code", [21, 99, -1, "-1", -99, 8.0, "eight", None, ""])
