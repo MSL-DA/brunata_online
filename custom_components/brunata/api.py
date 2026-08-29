@@ -136,13 +136,13 @@ def _log_unsupported_meter(meter_id: str, code: str) -> None:
 
 
 # Brunata's API is fronted by bot protection, so the requests are made to look
-# like the web app's. brunata-api randomised the Edge version through
-# fake_useragent; a fixed, plausible string avoids that dependency.
+# like the web app's. The string is deliberately fixed rather than randomised —
+# brunata-api used fake_useragent for this, which added a dependency and a
+# moving target for no benefit.
+#
 # The browser version below is bumped by hand from time to time, and there is
 # no test that can tell when it is due: a stale version has no effect right up
-# until the day the bot protection decides it does. It is deliberately a fixed
-# string rather than randomised — brunata-api used fake_useragent for this,
-# which added a dependency and a moving target for no benefit.
+# until the day the bot protection decides it does.
 #
 # Last set to Edge 151 (stable, July 2026). If logins start failing with no
 # other explanation, this is the first thing to look at.
@@ -261,11 +261,12 @@ def _as_text(raw: Any) -> str:
     have been observed as both integers and strings, so they are normalised
     here before being parsed, and an absent code becomes "" rather than the
     string "None".
+
+    There is no separate branch for a code that is already a string: str()
+    returns one unchanged, so the branch only looked like it did something.
     """
     if raw is None:
         return ""
-    if isinstance(raw, str):
-        return raw
     return str(raw)
 
 
@@ -333,12 +334,18 @@ def _lookup(table: list[str], raw: Any, what: str) -> str:
     return name.strip()
 
 
-def _parse_timestamp(raw: Any) -> datetime | None:
+def parse_timestamp(raw: Any) -> datetime | None:
     """Parse one of Brunata's ISO timestamps, e.g. mountingDate.
 
     They carry an offset ("2018-10-23T14:09:22+02:00"), so the result is
     timezone-aware. Anything unparseable becomes None rather than raising: a
     meter with an odd date is still a meter.
+
+    Public rather than underscored, because sensor.py calls it. What the
+    restore store holds is what this module serialised from the API's own
+    values, so there is one spelling of a Brunata date and one place that
+    knows it. A leading underscore would say the opposite of that decision to
+    the next reader.
     """
     if isinstance(raw, str):
         try:
@@ -367,8 +374,12 @@ def _parse_value(raw: Any) -> float | None:
         return None
 
 
-def _parse_reading_date(raw: Any) -> date | None:
-    """Parse Brunata's reading date, tolerating a full timestamp."""
+def parse_reading_date(raw: Any) -> date | None:
+    """Parse Brunata's reading date, tolerating a full timestamp.
+
+    Public for the same reason as parse_timestamp() above: sensor._as_date()
+    hands it the string it read back out of the restore store.
+    """
     if isinstance(raw, str):
         try:
             return date.fromisoformat(raw[:10])
@@ -868,20 +879,17 @@ def _parse_meters(
             _LOGGER.debug("Item %s skipped: meterId is null", index)
             continue
 
-        # Before anything else is read from the item: is this a kind of meter
-        # we are willing to surface at all? See SUPPORTED_METER_TYPES — this
-        # keeps leak and smoke detectors out of Home Assistant entirely,
-        # because an hourly cloud poll must never look like an alarm.
-        type_code = _meter_type_code(item.get("meterType"))
-        if type_code not in SUPPORTED_METER_TYPES:
-            _log_unsupported_meter(str(raw_id), repr(item.get("meterType")))
-            continue
-
         # A dismounted meter is one Brunata has physically removed. Its final
         # reading never changes again, so carrying it would leave a device in
         # Home Assistant frozen forever. Dropping it here makes the entity go
         # unavailable instead, which is what a removed meter should look like.
-        dismounted = _parse_timestamp(item.get("dismountedDate"))
+        #
+        # Checked before the allowlist below, not after. Both drop the item, so
+        # the order cannot change which meters reach Home Assistant — but the
+        # allowlist writes a log line asking the user to report the meter's
+        # type to the issue tracker, and a meter Brunata has taken off the wall
+        # is not one anybody needs identified.
+        dismounted = parse_timestamp(item.get("dismountedDate"))
         if dismounted is not None:
             _LOGGER.debug(
                 "Item %s (meter %s) skipped: dismounted on %s",
@@ -889,6 +897,15 @@ def _parse_meters(
                 raw_id,
                 dismounted.date(),
             )
+            continue
+
+        # Before anything else is read from the item: is this a kind of meter
+        # we are willing to surface at all? See SUPPORTED_METER_TYPES — this
+        # keeps leak and smoke detectors out of Home Assistant entirely,
+        # because an hourly cloud poll must never look like an alarm.
+        type_code = _meter_type_code(item.get("meterType"))
+        if type_code not in SUPPORTED_METER_TYPES:
+            _log_unsupported_meter(str(raw_id), repr(item.get("meterType")))
             continue
 
         value = _parse_value(item.get("latestReadingValue"))
@@ -919,9 +936,9 @@ def _parse_meters(
                 measurement_units or [], item.get("unit"), "measurement unit"
             ),
             value=value,
-            reading_date=_parse_reading_date(item.get("latestReadingDate")),
+            reading_date=parse_reading_date(item.get("latestReadingDate")),
             placement=placement if isinstance(placement, str) and placement else None,
-            mounting_date=_parse_timestamp(item.get("mountingDate")),
+            mounting_date=parse_timestamp(item.get("mountingDate")),
             # `not isinstance(decimals, bool)` because bool subclasses int, so
             # a payload carrying `true` would otherwise become a display
             # precision of 1. _meter_type_code() guards the same way for
