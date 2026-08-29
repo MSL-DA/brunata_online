@@ -150,6 +150,48 @@ async def test_a_device_whose_meter_still_reports_cannot_be_removed(
     assert await async_remove_config_entry_device(hass, entry, device) is False
 
 
+async def test_removing_a_device_lets_the_meter_come_back(
+    hass: HomeAssistant, mock_brunata_client, mock_meter
+):
+    """Deleting the device has to let the entity be built again.
+
+    The sensor platform keeps the meter ids it has already created an entity
+    for, so it does not add a second one on every poll. That bookkeeping used
+    to live in a closure nobody else could reach, so a deleted device left its
+    id behind and the meter could never come back without reloading the entry.
+    """
+    entry, device = await _setup_with_meter(hass, mock_brunata_client, mock_meter)
+    coordinator = entry.runtime_data
+    assert coordinator.known_meter_ids == {"12345"}
+
+    mock_brunata_client.async_get_meters = AsyncMock(return_value={})
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+
+    assert await async_remove_config_entry_device(hass, entry, device) is True
+    assert coordinator.known_meter_ids == set()
+
+
+async def test_a_meter_that_is_merely_gone_is_not_forgotten(
+    hass: HomeAssistant, mock_brunata_client, mock_meter
+):
+    """The other half, and the trap in the obvious fix.
+
+    A meter absent from one payload still has its entity registered in Home
+    Assistant. Forgetting its id would have the platform create a second entity
+    with the same unique_id when the meter returns, which the platform rejects
+    outright. Only an id whose device has actually been deleted may be dropped.
+    """
+    entry, _ = await _setup_with_meter(hass, mock_brunata_client, mock_meter)
+    coordinator = entry.runtime_data
+
+    mock_brunata_client.async_get_meters = AsyncMock(return_value={})
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+
+    assert coordinator.known_meter_ids == {"12345"}
+
+
 async def test_nothing_is_removable_while_the_last_update_failed(
     hass: HomeAssistant, mock_brunata_client, mock_meter
 ):
@@ -187,6 +229,14 @@ async def test_no_device_is_removable_when_the_entry_is_not_loaded(
     assert await hass.config_entries.async_unload(entry.entry_id)
     await hass.async_block_till_done()
     assert entry.state is ConfigEntryState.NOT_LOADED
+
+    # The premise, asserted rather than assumed. Home Assistant deletes
+    # runtime_data after a successful unload, which is what makes a direct
+    # entry.runtime_data raise here. Without this line the test passes whether
+    # or not the guard exists: the meter is still in the coordinator's data, so
+    # a surviving runtime_data would reach the identifier check and return
+    # False for a completely different reason.
+    assert not hasattr(entry, "runtime_data")
 
     assert await async_remove_config_entry_device(hass, entry, device) is False
 
