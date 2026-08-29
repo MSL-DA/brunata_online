@@ -233,28 +233,79 @@ def test_codes_are_resolved_through_the_lookup_tables(
     assert meter.unit == expected_unit
 
 
-@pytest.mark.parametrize(("field", "code"), [("meterType", 1), ("unit", 21)])
-def test_null_table_entries_fall_back_to_the_raw_code(field, code):
+def test_a_null_meter_type_entry_falls_back_to_the_raw_code():
     """Brunata's live tables contain null entries — 7 of 28 meter types and 34
     of 96 units are reserved slots. Returning the None would put it straight
     into BrunataMeter.meter_type, and the sensor platform would die on
     meter_type.lower(), taking every entity with it.
 
-    A supported meterType is used rather than an arbitrary index, because
-    anything outside SUPPORTED_METER_TYPES is dropped before the table is
-    consulted at all; this test is about the table, not about the allowlist."""
+    The meter type falls back to the raw code, because that name only reaches
+    the device name and the model field: a device called "1" is ugly, visible,
+    and fixes itself the moment the table resolves again. The unit does not —
+    see the test below."""
     types = ["Collector", None, "Water"] + [None] * 25
     units = ["undefined", "units"] + [None] * 94
 
     item = _meter_item("abc")
-    item[field] = code
+    item["meterType"] = 1
 
     meter = _parse_meters(
         [item], meter_types=types, measurement_units=units
     )["abc"]
-    assert isinstance(meter.meter_type, str)
-    assert isinstance(meter.unit, str)
-    assert (meter.meter_type if field == "meterType" else meter.unit) == str(code)
+    assert meter.meter_type == "1"
+    assert meter.meter_type_code == 1
+
+
+@pytest.mark.parametrize("code", [21, 99, -1, "-1", -99, 8.0, "eight", None, ""])
+def test_a_meter_whose_unit_cannot_be_resolved_is_skipped(code):
+    """The unit gets no fallback, and that asymmetry is the whole point.
+
+    Home Assistant treats a changed unit on an existing sensor as a different
+    measurement and discards the long term statistics behind the old one. So a
+    meter carrying "99" where the user had "m³" does not lose a label — it
+    loses years of history, permanently. Skipping costs a pause the meter
+    recovers from by itself on the next poll that resolves.
+
+    Every value here is a way the table can fail to answer: past the end, a
+    reserved null slot, a negative index Python would otherwise read from the
+    wrong end of the list, a float, a non-number, and nothing at all.
+
+    If this test ever needs relaxing, that is the moment to think very hard
+    about what is being traded for what.
+    """
+    units = ["undefined", "units"] + [None] * 94
+
+    item = _meter_item("abc")
+    item["unit"] = code
+
+    assert _parse_meters(
+        [item], meter_types=METER_TYPES, measurement_units=units
+    ) == {}
+
+
+def test_a_meter_brunata_calls_undefined_is_skipped():
+    """Index 0 of the unit table is the literal string "undefined".
+
+    It resolves, so it is not caught by the test above — but it is Brunata
+    saying it has not stated a unit, which is the same position as a code that
+    does not resolve, and it gets the same answer. It used to become "units",
+    which is a claim nobody had read anywhere."""
+    item = _meter_item("abc")
+    item["unit"] = 0
+
+    assert _parse_meters(
+        [item], meter_types=METER_TYPES, measurement_units=["undefined", "units"]
+    ) == {}
+
+
+def test_one_unusable_unit_does_not_cost_the_other_meters():
+    """The skip drops one item, not the response — the same shape as the
+    meterType allowlist."""
+    good = _meter_item("good")
+    bad = _meter_item("bad")
+    bad["unit"] = 99
+
+    assert sorted(_parse([bad, good])) == ["good"]
 
 
 @pytest.mark.parametrize("code", [1, 2])
@@ -285,11 +336,16 @@ def test_the_numeric_meter_type_is_carried_alongside_its_name(code):
 
 def test_the_numeric_meter_type_survives_an_unresolvable_name():
     """The code is read off the payload, not out of the lookup table, so it is
-    still there when the name falls back to the raw code."""
+    still there when the name falls back to the raw code.
+
+    The unit table is supplied, because an unresolvable unit would now skip the
+    meter before this could be asserted — and this test is about the type."""
     item = _meter_item("abc")
     item["meterType"] = 1
 
-    meter = _parse_meters([item], meter_types=[], measurement_units=[])["abc"]
+    meter = _parse_meters(
+        [item], meter_types=[], measurement_units=MEASUREMENT_UNITS
+    )["abc"]
 
     assert meter.meter_type == "1"
     assert meter.meter_type_code == 1
@@ -384,56 +440,61 @@ def test_trailing_whitespace_in_table_entries_is_stripped():
     assert meter.meter_type == "Radiator"
 
 
-@pytest.mark.parametrize("code", [-1, "-1", -99])
-def test_a_negative_code_falls_back_instead_of_wrapping_round_the_table(code):
+def test_a_negative_unit_code_does_not_wrap_round_the_table():
     """Python indexes lists from both ends. Brunata does not.
 
     `table[-1]` does not raise IndexError — it returns the *last* entry, so a
     negative unit code resolved to a real, wrong unit: wrong device class,
     wrong state class, and long term statistics that look right and are not.
-    It happened silently, because _warn_unresolved_code() only fires when the
-    lookup fails.
+    It happened silently, because the warning only fires when the lookup fails.
 
-    meterType is shielded by the allowlist (-1 is not in SUPPORTED_METER_TYPES);
-    unit is not, so it is the field under test here.
+    The guard is still what this covers; what changed is the outcome. The meter
+    is skipped rather than given the raw code, so the assertion is that
+    "THE-LAST-ENTRY" is nowhere near the result.
     """
     item = _meter_item("abc")
-    item["unit"] = code
+    item["unit"] = -1
 
-    meter = _parse_meters(
+    assert _parse_meters(
         [item],
         meter_types=METER_TYPES,
         measurement_units=["undefined", "units", "m3", "THE-LAST-ENTRY"],
-    )["abc"]
-
-    assert meter.unit == str(code)
+    ) == {}
 
 
-def test_unknown_codes_fall_back_to_the_raw_value():
-    """An index past the end of the table must not take down the platform —
-    passing a code through as-is once crashed every entity on
-    meter.meter_type.lower(), not just the unrecognised one.
+def test_an_unknown_meter_type_code_still_falls_back():
+    """The meter type keeps its fallback, and this is the test that says so.
+
+    Passing a code through as-is once crashed every entity on
+    meter.meter_type.lower(), not just the unrecognised one. The name reaches
+    the device name and the model field and nothing else — every decision hangs
+    on meter_type_code — so a device called "2" is a cosmetic problem that
+    fixes itself when the table resolves again.
 
     A short meter type table is used so that meterType 2 — supported, so it
     reaches the lookup — lands past the end of it."""
     item = _meter_item("abc")
     item["meterType"] = 2
-    item["unit"] = 99
 
     meter = _parse_meters(
         [item], meter_types=["Collector", "Radiator"],
         measurement_units=MEASUREMENT_UNITS,
     )["abc"]
     assert meter.meter_type == "2"
-    assert meter.unit == "99"
+    assert meter.meter_type_code == 2
+    # And the unit, which did resolve, is untouched by the type's trouble.
+    assert meter.unit == "m3"
 
 
-def test_missing_lookup_tables_do_not_crash():
-    """If the locale resource ever fails to load, entities should still be
-    created rather than the platform failing outright."""
-    meter = _parse_meters([_meter_item("abc")])["abc"]
-    assert meter.meter_type == "2"
-    assert meter.unit == "8"
+def test_without_lookup_tables_no_meter_is_created():
+    """The locale resource failing to load is already an error the coordinator
+    turns into a retry, so this path should not be reachable in production —
+    but if it ever is, no meter may come out of it.
+
+    Every unit is unresolvable without the table, so every meter is skipped.
+    That is the safe end: the sensors keep the values and the history they
+    already have, and the next poll that loads the tables brings them back."""
+    assert _parse_meters([_meter_item("abc")]) == {}
 
 
 def test_non_list_payload_raises_api_error():
