@@ -219,14 +219,23 @@ class BrunataConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         the dialog still says which account is being changed.
         """
         entry = self._get_reconfigure_entry()
+        # Normalised on the way out of the entry, not assumed to have been
+        # normalised on the way in. async_step_user only started doing that in
+        # 1.4.0; an entry created before then can hold "  Bruger@Example.COM "
+        # verbatim, because only the unique_id derived from it was cleaned up.
+        # Logging in with that string is the exact failure normalisation was
+        # added to prevent — Keycloak rejects it, the user is told the password
+        # is wrong, and nothing in the UI hints at why.
+        #
+        # Writing it back below is what makes such an entry correct itself the
+        # first time its owner changes their password.
+        email = _normalise_email(entry.data[CONF_EMAIL])
         errors = {}
 
         if user_input is not None:
-            # The stored address, not one typed in — see the docstring. It is
-            # already normalised, because async_step_user normalised it before
-            # writing it.
+            # The stored address, not one typed in — see the docstring.
             credentials = {
-                CONF_EMAIL: entry.data[CONF_EMAIL],
+                CONF_EMAIL: email,
                 CONF_PASSWORD: user_input[CONF_PASSWORD],
             }
             try:
@@ -249,7 +258,7 @@ class BrunataConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return self.async_show_form(
             step_id="reconfigure",
             data_schema=vol.Schema({vol.Required(CONF_PASSWORD): PASSWORD_SELECTOR}),
-            description_placeholders={"email": entry.data[CONF_EMAIL]},
+            description_placeholders={"email": email},
             errors=errors,
         )
 
