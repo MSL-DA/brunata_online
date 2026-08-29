@@ -20,8 +20,8 @@ from homeassistant.helpers.restore_state import ExtraStoredData, RestoreEntity
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from . import BrunataConfigEntry, BrunataDataUpdateCoordinator
-from .api import BrunataMeter, _parse_reading_date, _parse_timestamp
-from .const import DOMAIN
+from .api import BrunataMeter, parse_reading_date, parse_timestamp
+from .const import DEVICE_ID_PREFIX, DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -165,8 +165,13 @@ def _as_iso(value: date | datetime | str | None) -> str | None:
     yields the string it was serialised as. Normalising here keeps the
     reading_date attribute a single type across restarts, so templates and
     automations reading it don't break on reload.
+
+    `date` alone covers both: datetime subclasses date, and both spell
+    isoformat(). That is also why _as_date() below checks datetime *first* —
+    there the subclassing is load-bearing, and a `(date, datetime)` tuple here
+    would suggest to the next reader that it is not.
     """
-    if isinstance(value, (date, datetime)):
+    if isinstance(value, date):
         return value.isoformat()
     return value
 
@@ -189,7 +194,7 @@ def _as_date(value: date | datetime | str | None) -> date | None:
         return value.date()
     if isinstance(value, date):
         return value
-    return _parse_reading_date(value)
+    return parse_reading_date(value)
 
 
 @dataclass
@@ -243,7 +248,12 @@ async def async_setup_entry(
     _LOGGER.debug("Setting up Brunata sensors for entry %s", entry.entry_id)
     coordinator = entry.runtime_data
 
-    known_meter_ids: set[str] = set()
+    # Held on the coordinator, not in a closure here, so that
+    # async_remove_config_entry_device() can take an id back out of it when the
+    # user deletes a dismounted meter's device. Without that, the id stayed in
+    # the set for the life of the config entry and the entity could never be
+    # built again.
+    known_meter_ids = coordinator.known_meter_ids
 
     @callback
     def _add_new_meters() -> None:
@@ -373,12 +383,16 @@ class BrunataSensor(
         self._resets_annually = meter.meter_type_code in ANNUAL_RESET_METER_TYPES
 
         # Group under a device per meter. The name is built by _device_name()
-        # because _async_update_device_name() has to build the same one when
-        # the label changes.
+        # and kept, because _apply_latest_reading() compares the name it builds
+        # from each payload against this one to decide whether the device
+        # registry needs updating.
         self._placement = meter.placement
+        self._device_name = _device_name(
+            meter.meter_type, meter.placement, self._meter_id
+        )
         self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, f"brunata_{self._meter_id}")},
-            name=_device_name(meter.meter_type, meter.placement, self._meter_id),
+            identifiers={(DOMAIN, f"{DEVICE_ID_PREFIX}{self._meter_id}")},
+            name=self._device_name,
             manufacturer="Brunata",
             model=meter.meter_type,
         )
@@ -415,7 +429,7 @@ class BrunataSensor(
             restored_extra = BrunataRestoredData.from_dict(last_extra.as_dict())
             if restored_extra is not None:
                 self._meter_no = restored_extra.meter_no
-                self._mounting_date = _parse_timestamp(
+                self._mounting_date = parse_timestamp(
                     restored_extra.mounting_date
                 )
 
@@ -502,10 +516,18 @@ class BrunataSensor(
 
         # Metadata is refreshed whether or not the reading below is accepted:
         # a rejected value says nothing about the meter's label.
-        if meter.placement != self._placement:
-            self._placement = meter.placement
-            self._async_update_device_name(meter)
+        self._placement = meter.placement
         self._transmitting = meter.transmitting
+
+        # Compared on the built name rather than on placement alone. The device
+        # name is placement *and* meter type, so gating on the label would have
+        # let a changed type sit unnoticed until the entry was reloaded; and
+        # comparing here rather than inside the function below keeps the common
+        # case free of a device registry lookup.
+        name = _device_name(meter.meter_type, meter.placement, self._meter_id)
+        if name != self._device_name:
+            self._device_name = name
+            self._async_update_device_name(name)
 
         if meter.value is None or not self._accept_reading(meter):
             return
@@ -515,12 +537,26 @@ class BrunataSensor(
         self._attr_native_value = meter.value
         self._meter_no = meter.meter_no
         self._mounting_date = meter.mounting_date
-        self._last_reading_date = _as_iso(meter.reading_date)
-        self._last_reading_day = meter.reading_date
+
+        # Only when the reading actually carries a date. An accepted reading
+        # without one used to overwrite both fields with None, and
+        # _is_annual_reset() reads a missing _last_reading_day as "no baseline",
+        # which switches it back to the December/January window that the
+        # calendar-year rule replaced. One undated reading therefore reopened
+        # that window for the rest of the December and January it fell in, and a
+        # glitch dated 31 December was then adopted as an annual reset.
+        #
+        # The cost of keeping them is that the reading_date attribute describes
+        # the last reading Brunata dated rather than the value now shown. That
+        # is the smaller of the two: an attribute that lags is visible, and a
+        # guard that quietly widened is not.
+        if meter.reading_date is not None:
+            self._last_reading_date = _as_iso(meter.reading_date)
+            self._last_reading_day = meter.reading_date
 
     @callback
-    def _async_update_device_name(self, meter: BrunataMeter) -> None:
-        """Follow a relabelled meter into the device registry.
+    def _async_update_device_name(self, name: str) -> None:
+        """Follow a renamed meter into the device registry.
 
         DeviceInfo is only read when the entity is added, so without this a
         meter renamed in Brunata's own UI keeps its old device name until the
@@ -528,16 +564,19 @@ class BrunataSensor(
         next poll. That split is what a user notices: the attribute says
         "Kitchen" and the device is still called "Water - Living room".
 
+        Takes the finished name rather than the meter, because the caller has
+        already built it in order to notice that it changed. Building it twice
+        would be two places that have to agree on what a device is called.
+
         Only `name` is written. A name the user typed in Home Assistant lands
         in `name_by_user`, which the UI prefers and which this leaves alone.
         """
         if self.hass is None:
             return
 
-        name = _device_name(meter.meter_type, meter.placement, self._meter_id)
         device_registry = dr.async_get(self.hass)
         device = device_registry.async_get_device(
-            identifiers={(DOMAIN, f"brunata_{self._meter_id}")}
+            identifiers={(DOMAIN, f"{DEVICE_ID_PREFIX}{self._meter_id}")}
         )
         if device is None or device.name == name:
             return
