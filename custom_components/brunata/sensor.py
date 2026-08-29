@@ -98,23 +98,17 @@ ENERGY_UNITS = (
     UnitOfEnergy.GIGA_CALORIE,
 )
 
-# Fallback for the rare case where Brunata omits the unit field entirely. Heat
-# cost allocators — the only meters that could plausibly arrive without a unit
-# — report "units", so that is the sensible guess and keeps such a sensor
-# consistent with its siblings. Note this is only a fallback for a *missing*
-# field: a meter that reports "units" normally takes the pass-through branch
-# below, which deliberately preserves Brunata's own capitalisation.
-FALLBACK_UNIT = "units"
-
-# Index 0 of Brunata's measurementUnit table is the literal string
-# "undefined". A meter pointing at it has no unit stated, so it is treated the
-# same as a missing one rather than being labelled "undefined" in the UI.
-UNDEFINED_UNIT = "undefined"
-
 # Substrings that identify an allocator unit — a count that only ever climbs.
 # Brunata's table carries a dozen vendor-specific variants ("Doprimo units",
-# "Zenner units"), and FALLBACK_UNIT is one too, so matching the marker rather
-# than listing the spellings keeps a new vendor from being misclassified.
+# "Zenner units"), so matching the marker rather than listing the spellings
+# keeps a new vendor from being misclassified.
+#
+# There is no fallback unit here any more, and no special case for the table's
+# "undefined" entry. Both used to stand in for a unit Brunata had not given us,
+# and both produced a plausible-looking sensor carrying a unit nobody had
+# actually read — which Home Assistant then treats as a different measurement
+# from the one it replaced, discarding the history behind it. api.py drops such
+# a meter instead, so anything reaching this module has a unit that resolved.
 ALLOCATOR_UNIT_MARKERS = ("unit", "pts")
 
 
@@ -313,20 +307,19 @@ class BrunataSensor(
         self._attr_has_entity_name = True
         self._attr_translation_key = "consumption"
 
-        # Resolve the reported unit to a canonical Home Assistant unit.
+        # Map the reported unit to a canonical Home Assistant unit. api.py has
+        # already resolved it against Brunata's table and dropped the meter if
+        # it could not, so this is a real unit name, never a raw code.
         raw_unit = meter.unit.strip()
-        if raw_unit.lower() == UNDEFINED_UNIT:
-            raw_unit = ""
         unit = UNIT_MAP.get(raw_unit.lower())
 
         if unit is not None:
             self._attr_native_unit_of_measurement = unit
-        elif not raw_unit:
-            # unit missing from the API response — see FALLBACK_UNIT.
-            self._attr_native_unit_of_measurement = FALLBACK_UNIT
         else:
-            # Unrecognised unit: pass it through unchanged, but deliberately
-            # claim no device class for it — HA would reject the combination.
+            # A unit Home Assistant has no constant for — allocator units are
+            # the everyday case. Passed through exactly as Brunata spells it,
+            # and deliberately claiming no device class: HA rejects the
+            # combination of a device class with a unit it does not recognise.
             self._attr_native_unit_of_measurement = raw_unit
 
         # Determine the device class from the canonical unit.
