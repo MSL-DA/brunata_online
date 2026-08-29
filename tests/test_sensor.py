@@ -20,7 +20,6 @@ from custom_components.brunata.api import SUPPORTED_METER_TYPES
 from custom_components.brunata.const import DOMAIN
 from custom_components.brunata.sensor import (
     ANNUAL_RESET_METER_TYPES,
-    FALLBACK_UNIT,
     BrunataRestoredData,
     BrunataSensor,
 )
@@ -133,11 +132,9 @@ async def test_sensor_allocator_unit_is_passed_through_verbatim(mock_meter):
         assert entity.native_unit_of_measurement == raw_unit
         assert entity.device_class is None
 
-    # Only a genuinely absent unit falls back to the default.
-    for missing in ("", "   ", None):
-        entity = _make_entity(coordinator, replace(mock_meter, unit=missing or ""))
-        assert entity.native_unit_of_measurement == FALLBACK_UNIT
-        assert entity.device_class is None
+    # A meter with no usable unit no longer reaches this module at all: api.py
+    # drops it rather than filling one in. See
+    # test_a_meter_whose_unit_cannot_be_resolved_is_skipped in test_api.py.
 
 
 async def test_sensor_display_precision_comes_from_the_api(mock_meter):
@@ -222,15 +219,6 @@ async def test_sensor_unmappable_units_claim_no_device_class(mock_meter, raw_uni
     entity = _make_entity(MagicMock(), replace(mock_meter, unit=raw_unit))
 
     assert entity.native_unit_of_measurement == raw_unit
-    assert entity.device_class is None
-
-
-async def test_sensor_undefined_unit_is_treated_as_absent(mock_meter):
-    """Index 0 of the table is the literal string "undefined". Passing it
-    through would put that word in the UI as the unit."""
-    entity = _make_entity(MagicMock(), replace(mock_meter, unit="undefined"))
-
-    assert entity.native_unit_of_measurement == FALLBACK_UNIT
     assert entity.device_class is None
 
 
@@ -440,7 +428,7 @@ async def test_annual_reset_follows_the_code_not_the_resolved_name(
     wrong data.
 
     "1" is in this list because it is what _lookup() falls back to when the
-    code does not resolve at all.
+    meter type code does not resolve at all. The unit gets no such fallback.
     """
     meter = replace(
         mock_meter, meter_type=meter_type, meter_type_code=1, unit="units"
@@ -833,9 +821,6 @@ async def test_unusable_extra_data_leaves_the_init_baseline_alone(mock_meter, st
         ("Doprimo units", SensorStateClass.TOTAL_INCREASING),
         ("Zenner units", SensorStateClass.TOTAL_INCREASING),
         ("pts", SensorStateClass.TOTAL_INCREASING),
-        # No unit stated at all falls back to FALLBACK_UNIT, which is one.
-        ("", SensorStateClass.TOTAL_INCREASING),
-        ("undefined", SensorStateClass.TOTAL_INCREASING),
         # Instantaneous readings: these fall as readily as they rise.
         ("°C", SensorStateClass.MEASUREMENT),
         ("%", SensorStateClass.MEASUREMENT),
