@@ -6,7 +6,7 @@ name: Pytest (latest Home Assistant)
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 4 * * *"
+    - cron: "0 6 * * 6"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
