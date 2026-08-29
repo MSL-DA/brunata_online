@@ -5,14 +5,9 @@ on:
   workflow_dispatch:
   schedule:
     - cron: "0 6 * * *"
-  push:
-    branches:
-      - "main"
-      - "beta"
   pull_request:
     branches:
       - "main"
-      - "beta"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
