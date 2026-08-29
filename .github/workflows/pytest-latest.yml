@@ -1,3 +1,4 @@
+---
 name: Pytest (latest Home Assistant)
 
 # Early warning that a new Home Assistant release breaks the integration.
