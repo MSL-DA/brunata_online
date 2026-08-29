@@ -1,3 +1,4 @@
+---
 name: Release
 
 # HACS serves whatever manifest.json says, not what the tag says. A tag pushed
@@ -8,6 +9,18 @@ name: Release
 # Nothing else in CI checks this: pytest.yml and hassfest.yml run on the branch,
 # where the tag does not exist yet. So it is checked here, at the one moment
 # both numbers are known.
+#
+# This job cannot block the release. HACS installs from the GitHub release, and
+# a workflow triggered by the tag always arrives after that release exists. An
+# attempt to make it blocking, by having the job create the release itself with
+# `gh release create`, failed on two releases in a row: this repo publishes from
+# the Releases page, and "Publish release" creates the tag and the release in
+# one operation, so the CLI always met a release that already existed and
+# returned HTTP 422. The file is back to reporting only.
+#
+# There is deliberately no `concurrency` block. Every other workflow here has
+# one because a branch can collect several pushes; a tag ref is created once and
+# never has a competing run to cancel.
 
 on:
   push:
@@ -23,6 +36,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+
+      # The step below reads manifest.json with Python. Without this it would
+      # run on whatever the runner image happens to have on PATH, which is not
+      # something this repo controls or gets told about when it changes. Every
+      # other workflow here pins the same version.
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
 
       - name: Compare the tag with manifest.json
         run: |
