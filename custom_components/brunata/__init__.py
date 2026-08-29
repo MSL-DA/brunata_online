@@ -20,7 +20,7 @@ from .api import (
     BrunataConnectionError,
     BrunataMeter,
 )
-from .const import DOMAIN
+from .const import DEVICE_ID_PREFIX, DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -128,6 +128,13 @@ async def async_remove_config_entry_device(
     this. It does *not* check that the entry is loaded, so this can run for an
     entry that never set up or has since been unloaded, where reading
     runtime_data directly raises AttributeError instead of refusing cleanly.
+
+    Agreeing to a removal also means forgetting the meter id, so the sensor
+    platform will build the entity again if Brunata ever reports that meter
+    again — see BrunataDataUpdateCoordinator.known_meter_ids. Only ids we have
+    just agreed to delete are forgotten. An id whose entity is merely
+    unavailable must stay, because that entity is still registered and a second
+    one carrying the same unique_id would be rejected by the platform.
     """
     coordinator: BrunataDataUpdateCoordinator | None = getattr(
         entry, "runtime_data", None
@@ -149,9 +156,18 @@ async def async_remove_config_entry_device(
         return False
 
     live = {
-        (DOMAIN, f"brunata_{meter_id}") for meter_id in (coordinator.data or {})
+        (DOMAIN, f"{DEVICE_ID_PREFIX}{meter_id}")
+        for meter_id in (coordinator.data or {})
     }
-    return not (device.identifiers & live)
+    if device.identifiers & live:
+        return False
+
+    for domain, identifier in device.identifiers:
+        if domain == DOMAIN and identifier.startswith(DEVICE_ID_PREFIX):
+            coordinator.known_meter_ids.discard(
+                identifier.removeprefix(DEVICE_ID_PREFIX)
+            )
+    return True
 
 
 class BrunataDataUpdateCoordinator(DataUpdateCoordinator[dict[str, BrunataMeter]]):
@@ -165,6 +181,12 @@ class BrunataDataUpdateCoordinator(DataUpdateCoordinator[dict[str, BrunataMeter]
     ) -> None:
         """Initialize."""
         self.client = client
+        # Meter ids the sensor platform has already built an entity for. It
+        # lives here rather than in a closure inside sensor.py because
+        # async_remove_config_entry_device() has to be able to take an id back
+        # out of it: the device and its entity are gone, so the platform must
+        # be free to create them again if the meter returns.
+        self.known_meter_ids: set[str] = set()
         super().__init__(
             hass,
             _LOGGER,
