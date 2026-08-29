@@ -14,7 +14,7 @@ coordinator's last error.
 from __future__ import annotations
 
 from dataclasses import asdict
-from datetime import date, datetime
+from datetime import date
 from typing import Any
 
 from homeassistant.components.diagnostics import async_redact_data
@@ -22,7 +22,7 @@ from homeassistant.const import CONF_EMAIL, CONF_PASSWORD
 from homeassistant.core import HomeAssistant
 
 from . import BrunataConfigEntry
-from .api import BrunataApiError
+from .api import BrunataApiError, BrunataMeter
 
 # The email is the account identifier and the password is the account. Neither
 # is ever needed to understand a fault.
@@ -35,14 +35,21 @@ TO_REDACT_METER = {"meter_no"}
 
 
 def _serialise(value: Any) -> Any:
-    """Make a value safe for the diagnostics JSON payload."""
-    if isinstance(value, (date, datetime)):
+    """Make a value safe for the diagnostics JSON payload.
+
+    `date` covers datetime too — it is a subclass — and both spell isoformat().
+    """
+    if isinstance(value, date):
         return value.isoformat()
     return value
 
 
-def _meter_diagnostics(meter: Any) -> dict[str, Any]:
-    """Describe one meter, redacted."""
+def _meter_diagnostics(meter: BrunataMeter) -> dict[str, Any]:
+    """Describe one meter, redacted.
+
+    Annotated with the real type rather than Any: asdict() below only works on
+    a dataclass instance, so the signature should say so.
+    """
     return async_redact_data(
         {key: _serialise(value) for key, value in asdict(meter).items()},
         TO_REDACT_METER,
@@ -73,19 +80,41 @@ def _api_status(err: BaseException | None) -> int | None:
 async def async_get_config_entry_diagnostics(
     hass: HomeAssistant, entry: BrunataConfigEntry
 ) -> dict[str, Any]:
-    """Return diagnostics for a config entry."""
-    coordinator = entry.runtime_data
+    """Return diagnostics for a config entry.
+
+    runtime_data is read defensively, the same way async_unload_entry() and
+    async_remove_config_entry_device() read it. Whether Home Assistant can
+    actually reach this function for an entry that is not loaded has not been
+    established — it would mean the download handler skipping the state check —
+    but the answer only decides whether the branch below ever runs, not whether
+    it belongs. A diagnostics download exists to explain a broken integration,
+    and an integration that failed to set up is the case where it is needed
+    most; returning a stack trace there would be the worst possible moment for
+    one.
+    """
+    entry_report = {
+        "version": entry.version,
+        "data": async_redact_data(dict(entry.data), TO_REDACT),
+        # No "options" key: this integration has no options flow, so it
+        # was reported as {} in every report ever downloaded. A field that
+        # cannot carry information costs the reader's attention each time.
+    }
+
+    coordinator = getattr(entry, "runtime_data", None)
+    if coordinator is None:
+        return {
+            "entry": entry_report,
+            # Named rather than left out, so a reader can tell "the entry was
+            # never set up" from "the report is missing a section".
+            "loaded": False,
+        }
+
     client = coordinator.client
     meters = coordinator.data or {}
 
     return {
-        "entry": {
-            "version": entry.version,
-            "data": async_redact_data(dict(entry.data), TO_REDACT),
-            # No "options" key: this integration has no options flow, so it
-            # was reported as {} in every report ever downloaded. A field that
-            # cannot carry information costs the reader's attention each time.
-        },
+        "entry": entry_report,
+        "loaded": True,
         "coordinator": {
             # A failing update leaves the sensors on their last known values,
             # so "everything looks fine but the numbers are old" and "the API
