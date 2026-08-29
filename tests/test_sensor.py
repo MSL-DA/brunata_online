@@ -16,8 +16,10 @@ from homeassistant.core import HomeAssistant, State
 from homeassistant.helpers import device_registry as dr
 from pytest_homeassistant_custom_component.common import MockConfigEntry, mock_restore_cache
 
+from custom_components.brunata.api import SUPPORTED_METER_TYPES
 from custom_components.brunata.const import DOMAIN
 from custom_components.brunata.sensor import (
+    ANNUAL_RESET_METER_TYPES,
     FALLBACK_UNIT,
     BrunataRestoredData,
     BrunataSensor,
@@ -337,6 +339,68 @@ async def test_january_window_still_applies_without_a_previous_date(mock_meter):
     # And the accepted reading becomes the baseline, so the window is not
     # consulted again next time.
     assert entity._last_reading_day == date(2026, 1, 17)
+
+
+async def test_an_undated_reading_does_not_reopen_the_january_window(mock_meter):
+    """An accepted reading without a date must not clear the year baseline.
+
+    _is_annual_reset() reads a missing _last_reading_day as "no baseline" and
+    falls back to the December/January window — the wider rule the calendar-year
+    comparison replaced. Overwriting the baseline with None on every accepted
+    reading meant one undated reading reopened that window for the rest of the
+    December and January it fell in, and a glitch dated 31 December was then
+    adopted as an annual reset.
+
+    The control below is the point of the test: the same glitch, without the
+    undated reading in front of it, is rejected.
+    """
+    meter = replace(mock_meter, meter_type="Radiator", meter_type_code=1, unit="units")
+
+    coordinator = MagicMock()
+    coordinator.data = {"12345": meter}
+    entity = _make_entity(coordinator, meter)
+
+    coordinator.data = {
+        "12345": replace(meter, value=4820.0, reading_date=date(2025, 12, 20))
+    }
+    entity._apply_latest_reading()
+    assert entity._last_reading_day == date(2025, 12, 20)
+
+    # A reading Brunata sent with no usable readingDate. The value is fresher,
+    # so it is taken; the baseline is not something it can speak to.
+    coordinator.data = {
+        "12345": replace(meter, value=4830.0, reading_date=None)
+    }
+    entity._apply_latest_reading()
+    assert entity.native_value == 4830.0
+    assert entity._last_reading_day == date(2025, 12, 20)
+    assert entity.extra_state_attributes["reading_date"] == "2025-12-20"
+
+    # 31 December of the same year: inside the fallback window, but no year
+    # boundary has been crossed, so it is a glitch.
+    coordinator.data = {
+        "12345": replace(meter, value=3.0, reading_date=date(2025, 12, 31))
+    }
+    entity._apply_latest_reading()
+    assert entity.native_value == 4830.0
+
+    # And the year rule still works afterwards.
+    coordinator.data = {
+        "12345": replace(meter, value=3.0, reading_date=date(2026, 1, 4))
+    }
+    entity._apply_latest_reading()
+    assert entity.native_value == 3.0
+
+
+async def test_every_annually_reset_type_is_a_supported_type():
+    """The two sets number the same thing and live in different files.
+
+    ANNUAL_RESET_METER_TYPES is read off meter_type_code, which _parse_meters()
+    only ever sets for a code that passed SUPPORTED_METER_TYPES. A type in the
+    reset set but not the allowlist would therefore be a rule that can never
+    fire — dead, and misleading about which meters this integration handles.
+    """
+    assert ANNUAL_RESET_METER_TYPES <= SUPPORTED_METER_TYPES
 
 
 async def test_january_window_is_not_consulted_once_a_date_is_known(mock_meter):
