@@ -49,40 +49,59 @@ API_URL = f"{BASE_URL}/online-webservice/v2/rest"
 # reading, and it cost a production outage.
 REFERER_URL = f"{BASE_URL}/react-online/meters-values"
 
-# Where to report a meter this integration skipped. Named rather than left to
-# "please open an issue": the log line already carries what that issue asks
-# for, so sending people to file a fresh one turns an answer into a duplicate.
-METER_TYPE_ISSUE_URL = "https://github.com/MSL-DA/brunata_online/issues/39"
-
-# For a fault with no issue of its own. Kept separate because #39 asks one
-# specific question and an unrelated report there is noise in it.
+# Where anything this integration could not handle is reported.
+#
+# There used to be two: this one, and a link straight to issue #39, which asked
+# users to paste the numeric meterType of a meter that got skipped. That
+# question is answered — see SUPPORTED_METER_TYPES — so both log lines point at
+# the tracker itself. A meter still landing there is a fresh report, not an
+# answer to the old one.
 ISSUE_TRACKER_URL = "https://github.com/MSL-DA/brunata_online/issues"
 
 # The only meter types this integration will surface. Everything else is
 # dropped before it can become an entity.
 #
 # A safety boundary, not a feature limit. Brunata's portal can carry leak and
-# smoke detectors, and this integration polls hourly over a cloud API — up to
-# 59½ minutes between an event and Home Assistant hearing about it. An entity
-# invites an automation, and that automation would be dangerously slow. The
-# only safe answer is not to create it.
+# smoke detectors — meterType 13 and 12 — and this integration polls hourly
+# over a cloud API, up to an hour between an event and Home Assistant hearing
+# about it. An entity invites an automation, and that automation would be
+# dangerously slow. The only safe answer is not to create it.
 #
 # It fails closed: a meterType that is missing, unparseable or simply not
 # listed here is skipped.
 #
-#   1 = heat cost allocator (radiator). Read off live account data.
-#   2 = water. Read off live account data.
+#   1 = heat cost allocator (radiator)
+#   2 = water
+#   5 = electricity
 #
-# Nothing else, because nothing else has been read off a real account. Energy
-# meters are almost certainly some other code, but which one is unknown, and a
-# guess does not belong on a safety boundary. The presence of GJ/Gcal in
-# sensor.py's UNIT_MAP says nothing about it: that is the measurementUnit
-# table, a different table entirely, and reasoning from one to the other is how
-# this codebase has been burned before.
+# How those numbers were established, because it matters: Brunata's own
+# meterType table is returned by the locale resource, and a debug log from a
+# live account printed it in full. In that table index 1 is "Radiator" and
+# index 2 is "Water" — the two types whose meters we can check against real
+# entities — so the same table's answer for 5 is a reading, not a guess. This
+# is what issue #39 was waiting for.
+#
+# The same table gives 6 = "Energy", and it is deliberately *not* listed. A
+# code being readable is not a reason to surface a meter type nobody has asked
+# for: energy meters appear to be sold to housing associations rather than to
+# private customers, so the first person to want one can say so and be the
+# person it gets tested against. Adding it is one number and one line in the
+# README. Leaving it out costs nothing until then.
+#
+# Note what is still untested even for 5: no electricity meter has passed
+# through this code, so which unit such a meter reports is unconfirmed. Every
+# energy unit in the live measurementUnit table is already in sensor.py's
+# UNIT_MAP, so it should resolve — but "should" is the operative word, and a
+# unit that does not resolve now skips the meter rather than mislabelling it.
+#
+# The old reasoning is still wrong and worth keeping wrong: the presence of
+# GJ/Gcal in UNIT_MAP never said anything about meterType. That is the
+# measurementUnit table, a different table entirely. What changed is that the
+# right table was finally read, not that the inference became acceptable.
 #
 # _log_unsupported_meter() names the code of anything dropped, so the list is
 # extended by reading that line from a user's log, not by inference.
-SUPPORTED_METER_TYPES = frozenset({1, 2})
+SUPPORTED_METER_TYPES = frozenset({1, 2, 5})
 
 # Index 0 of Brunata's measurementUnit table is the literal string "undefined":
 # Brunata saying it has not stated a unit, which is the same position as a code
@@ -146,12 +165,14 @@ def _log_unsupported_meter(meter_id: str, code: str) -> None:
     _LOGGER.info(
         "Meter %s has meterType %s, which this integration does not support, "
         "so no entity is created for it. Supported types are %s. If this "
-        "meter measures water, heat or energy consumption, please paste this "
-        "line into %s — that code is exactly what is needed to add support.",
+        "meter measures consumption you expected to see in Home Assistant, "
+        "please report it at %s with this line and what the meter physically "
+        "measures — the log can give the code, but only you can say what the "
+        "box on the wall is.",
         meter_id,
         code,
         sorted(SUPPORTED_METER_TYPES),
-        METER_TYPE_ISSUE_URL,
+        ISSUE_TRACKER_URL,
     )
 
 
@@ -221,11 +242,20 @@ class BrunataApiError(BrunataError):
     503 from 404 without parsing the message; diagnostics.py reports it. None
     for failures with no status of their own — a login flow that changed
     shape, a locale resource without mappers.
+
+    `retry_after` is set only for 429, from the header of the same name, and is
+    how long Brunata asked us to wait. None when it did not say.
     """
 
-    def __init__(self, message: str, status: int | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        status: int | None = None,
+        retry_after: float | None = None,
+    ) -> None:
         super().__init__(message)
         self.status = status
+        self.retry_after = retry_after
 
 
 @dataclass(frozen=True, slots=True)
@@ -809,6 +839,15 @@ class BrunataApiClient:
         auth_code = _code_from_url(location)
         if not auth_code:
             raise BrunataApiError("Brunata returned no authorization code")
+
+        # Logged because the alternative routes each say so — the refresh
+        # ("access token renewed via refresh token") and the SSO shortcut
+        # ("SSO session still active"). Without this line a full login was the
+        # only path that produced no output at all, so a log could not tell
+        # "the refresh token is working" from "we log in from scratch every
+        # hour" — which is the difference between two requests per poll and
+        # four, and the one that matters to a bot-protected endpoint.
+        _LOGGER.debug("Brunata login form accepted the credentials")
         return auth_code
 
 
@@ -817,12 +856,35 @@ def _code_from_url(url: Any) -> str | None:
     return parse_qs(urlparse(str(url)).query).get("code", [None])[0]
 
 
+def _retry_after_seconds(response: httpx.Response) -> float | None:
+    """Read the Retry-After header, in its delay-seconds form.
+
+    RFC 9110 also allows an HTTP-date. That form is not read here: it needs the
+    server's clock to agree with ours to be worth anything, and getting it
+    wrong means waiting either far too long or not at all. Falling back to a
+    fixed hour is the safer failure, and the coordinator does that.
+    """
+    raw = response.headers.get("Retry-After")
+    if raw is None:
+        return None
+    try:
+        seconds = float(str(raw).strip())
+    except ValueError:
+        _LOGGER.debug("Brunata sent an unreadable Retry-After: %r", raw)
+        return None
+    return seconds if seconds > 0 else None
+
+
 def _payload(response: httpx.Response) -> Any:
     """Decode a JSON response, raising on anything that isn't usable."""
     status = response.status_code
 
     if status == 429:
-        raise BrunataApiError(f"Brunata rate limit reached ({status})", status)
+        raise BrunataApiError(
+            f"Brunata rate limit reached ({status})",
+            status,
+            _retry_after_seconds(response),
+        )
     if status >= 500:
         raise BrunataApiError(f"Brunata server error ({status})", status)
     if status == 404:
