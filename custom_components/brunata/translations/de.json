@@ -14,6 +14,12 @@
           "password": "Passwort"
         },
         "description": "Ihre Brunata-Zugangsdaten sind nicht mehr gültig. Bitte geben Sie sie erneut ein, um fortzufahren."
+      },
+      "reconfigure": {
+        "data": {
+          "password": "Passwort"
+        },
+        "description": "Geben Sie das neue Passwort für {email} ein. Für ein anderes Konto fügen Sie es als neue Integration hinzu."
       }
     },
     "error": {
@@ -22,9 +28,10 @@
       "unknown": "Unerwarteter Fehler"
     },
     "abort": {
-      "already_configured": "Gerät bereits konfiguriert",
+      "already_configured": "Dieses Konto ist bereits konfiguriert",
       "reauth_successful": "Anmeldedaten aktualisiert",
-      "wrong_account": "Diese E-Mail-Adresse gehört zu einem anderen Konto. Melden Sie sich mit dem ursprünglichen Konto an."
+      "wrong_account": "Diese E-Mail-Adresse gehört zu einem anderen Konto. Melden Sie sich mit dem ursprünglichen Konto an.",
+      "reconfigure_successful": "Passwort aktualisiert"
     }
   },
   "entity": {

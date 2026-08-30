@@ -14,6 +14,12 @@
           "password": "Lösenord"
         },
         "description": "Dina inloggningsuppgifter för Brunata är inte längre giltiga. Ange dem igen för att fortsätta."
+      },
+      "reconfigure": {
+        "data": {
+          "password": "Lösenord"
+        },
+        "description": "Ange det nya lösenordet för {email}. Vill du använda ett annat konto lägger du till det som en ny integration."
       }
     },
     "error": {
@@ -22,9 +28,10 @@
       "unknown": "Ett oväntat fel inträffade"
     },
     "abort": {
-      "already_configured": "Enheten är redan konfigurerad",
+      "already_configured": "Det här kontot är redan konfigurerat",
       "reauth_successful": "Inloggningsuppgifterna har uppdaterats",
-      "wrong_account": "Den här e-postadressen tillhör ett annat konto. Logga in med det ursprungliga kontot."
+      "wrong_account": "Den här e-postadressen tillhör ett annat konto. Logga in med det ursprungliga kontot.",
+      "reconfigure_successful": "Lösenordet har uppdaterats"
     }
   },
   "entity": {

@@ -4,15 +4,10 @@ name: "Hassfest"
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 0 * * *"
-  push:
-    branches:
-      - "main"
-      - "beta"
+    - cron: "0 6 * * *"
   pull_request:
     branches:
       - "main"
-      - "beta"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -26,5 +21,11 @@ jobs:
       - name: "Checkout the repository"
         uses: "actions/checkout@v7"
 
+      # Unpinned on purpose. `@master` is what Home Assistant's own README for
+      # this action tells you to use, and the repository publishes no release
+      # tags to pin to instead. Dependabot cannot follow a branch, so nothing
+      # will say when it moves — that is the price of using it as documented,
+      # and it is a smaller price than a version number nobody can check.
+      # hacs.yml carries the same note for the same reason.
       - name: "Run hassfest validation"
         uses: "home-assistant/actions/hassfest@master"

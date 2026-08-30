@@ -1,3 +1,4 @@
+---
 name: Pytest (latest Home Assistant)
 
 # Early warning that a new Home Assistant release breaks the integration.
@@ -6,7 +7,11 @@ name: Pytest (latest Home Assistant)
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 4 * * *"
+    - cron: "0 6 * * 6"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   pytest-latest:

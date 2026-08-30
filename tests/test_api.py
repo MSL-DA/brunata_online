@@ -14,7 +14,8 @@ import time
 import pytest
 
 from custom_components.brunata.api import (
-    METERS_URL,
+    REFERER_URL,
+    SUPPORTED_METER_TYPES,
     BrunataApiClient,
     BrunataApiError,
     BrunataAuthError,
@@ -24,8 +25,9 @@ from custom_components.brunata.api import (
 
 
 class FakeResponse:
-    def __init__(self, status_code=200, *, json_data=None, raises=None):
+    def __init__(self, status_code=200, *, json_data=None, raises=None, headers=None):
         self.status_code = status_code
+        self.headers = headers or {}
         self._json_data = json_data
         self._raises = raises
 
@@ -35,7 +37,21 @@ class FakeResponse:
         return self._json_data
 
 
-METER_TYPES = ["Pulse Collector", "Radiator", "Water", "Energy"]
+# Brunata's own meterType table, as printed by a debug log from a live
+# account. Indices 1 and 2 are the two types whose meters can be checked
+# against real entities, which is what makes the rest of the table credible —
+# see SUPPORTED_METER_TYPES. Index 3 used to say "Energy" here as a stand-in,
+# and that guess was wrong: energy is 6.
+METER_TYPES = [
+    "Collector",
+    "Radiator",
+    "Water",
+    "Temperature",
+    "Gas",
+    "Electricity",
+    "Energy",
+    "Humidity",
+]
 # Index 8 is what live water meters report; the gaps stand in for units this
 # account does not use.
 MEASUREMENT_UNITS = ["", "units", "", "", "", "", "", "", "m3"]
@@ -76,6 +92,36 @@ def test_error_statuses_raise_api_error(status, match):
     with pytest.raises(BrunataApiError, match=match) as err:
         _payload(FakeResponse(status))
     assert err.value.status == status
+
+
+@pytest.mark.parametrize(
+    ("headers", "expected"),
+    [
+        ({"Retry-After": "120"}, 120.0),
+        ({"Retry-After": " 90 "}, 90.0),
+        ({}, None),
+        # The HTTP-date form is deliberately not read: it needs Brunata's clock
+        # to agree with ours, and guessing wrong means waiting far too long or
+        # not at all. The caller falls back to a fixed hour instead.
+        ({"Retry-After": "Wed, 21 Oct 2026 07:28:00 GMT"}, None),
+        ({"Retry-After": "0"}, None),
+        ({"Retry-After": "-5"}, None),
+    ],
+)
+def test_retry_after_is_read_from_a_rate_limit(headers, expected):
+    """429 is the one status where retrying quickly is actively harmful, so
+    what Brunata asks for has to survive the trip to the coordinator."""
+    with pytest.raises(BrunataApiError) as err:
+        _payload(FakeResponse(429, headers=headers))
+    assert err.value.status == 429
+    assert err.value.retry_after == expected
+
+
+def test_only_a_rate_limit_carries_a_retry_after():
+    """A 503 is Brunata having a bad day, not a request to stay away."""
+    with pytest.raises(BrunataApiError) as err:
+        _payload(FakeResponse(503, headers={"Retry-After": "3600"}))
+    assert err.value.retry_after is None
 
 
 def test_unparseable_json_raises_api_error():
@@ -228,31 +274,89 @@ def test_codes_are_resolved_through_the_lookup_tables(
     assert meter.unit == expected_unit
 
 
-@pytest.mark.parametrize(("field", "code"), [("meterType", 1), ("unit", 21)])
-def test_null_table_entries_fall_back_to_the_raw_code(field, code):
+def test_a_null_meter_type_entry_falls_back_to_the_raw_code():
     """Brunata's live tables contain null entries — 7 of 28 meter types and 34
     of 96 units are reserved slots. Returning the None would put it straight
     into BrunataMeter.meter_type, and the sensor platform would die on
     meter_type.lower(), taking every entity with it.
 
-    A supported meterType is used rather than an arbitrary index, because
-    anything outside SUPPORTED_METER_TYPES is dropped before the table is
-    consulted at all; this test is about the table, not about the allowlist."""
+    The meter type falls back to the raw code, because that name only reaches
+    the device name and the model field: a device called "1" is ugly, visible,
+    and fixes itself the moment the table resolves again. The unit does not —
+    see the test below.
+
+    The unit code is set to one the table can answer. Left at the payload's
+    own "8", it lands on a reserved null slot in the unit table below, the
+    meter is skipped, and this test would be asserting the unit rule while
+    claiming to assert the type rule."""
     types = ["Collector", None, "Water"] + [None] * 25
     units = ["undefined", "units"] + [None] * 94
 
     item = _meter_item("abc")
-    item[field] = code
+    item["meterType"] = 1
+    item["unit"] = 1
 
     meter = _parse_meters(
         [item], meter_types=types, measurement_units=units
     )["abc"]
-    assert isinstance(meter.meter_type, str)
-    assert isinstance(meter.unit, str)
-    assert (meter.meter_type if field == "meterType" else meter.unit) == str(code)
+    assert meter.meter_type == "1"
+    assert meter.meter_type_code == 1
+    assert meter.unit == "units"
 
 
-@pytest.mark.parametrize("code", [1, 2])
+@pytest.mark.parametrize("code", [21, 99, -1, "-1", -99, 8.0, "eight", None, ""])
+def test_a_meter_whose_unit_cannot_be_resolved_is_skipped(code):
+    """The unit gets no fallback, and that asymmetry is the whole point.
+
+    Home Assistant treats a changed unit on an existing sensor as a different
+    measurement and discards the long term statistics behind the old one. So a
+    meter carrying "99" where the user had "m³" does not lose a label — it
+    loses years of history, permanently. Skipping costs a pause the meter
+    recovers from by itself on the next poll that resolves.
+
+    Every value here is a way the table can fail to answer: past the end, a
+    reserved null slot, a negative index Python would otherwise read from the
+    wrong end of the list, a float, a non-number, and nothing at all.
+
+    If this test ever needs relaxing, that is the moment to think very hard
+    about what is being traded for what.
+    """
+    units = ["undefined", "units"] + [None] * 94
+
+    item = _meter_item("abc")
+    item["unit"] = code
+
+    assert _parse_meters(
+        [item], meter_types=METER_TYPES, measurement_units=units
+    ) == {}
+
+
+def test_a_meter_brunata_calls_undefined_is_skipped():
+    """Index 0 of the unit table is the literal string "undefined".
+
+    It resolves, so it is not caught by the test above — but it is Brunata
+    saying it has not stated a unit, which is the same position as a code that
+    does not resolve, and it gets the same answer. It used to become "units",
+    which is a claim nobody had read anywhere."""
+    item = _meter_item("abc")
+    item["unit"] = 0
+
+    assert _parse_meters(
+        [item], meter_types=METER_TYPES, measurement_units=["undefined", "units"]
+    ) == {}
+
+
+def test_one_unusable_unit_does_not_cost_the_other_meters():
+    """The skip drops one item, not the response — the same shape as the
+    meterType allowlist."""
+    good = _meter_item("good")
+    bad = _meter_item("bad")
+    bad["unit"] = 99
+
+    assert sorted(_parse([bad, good])) == ["good"]
+
+
+@pytest.mark.parametrize("code", [1, 2, 5])
 def test_supported_meter_types_are_parsed(code):
     """The two codes read off live account data: 1 = heat cost allocator
     (radiator), 2 = water. Nothing else is on the list, because nothing else
@@ -263,7 +367,89 @@ def test_supported_meter_types_are_parsed(code):
     assert "abc" in _parse([item])
 
 
-@pytest.mark.parametrize("code", [0, 3, 4, 5, 9, 17, 27, -1, 99])
+@pytest.mark.parametrize("code", [1, 2, 5])
+def test_the_numeric_meter_type_is_carried_alongside_its_name(code):
+    """sensor.py decides the 1 January reset from this number.
+
+    The name next to it is a translation from Brunata's locale table, so a
+    rule matching on it would switch itself off the day the entry was
+    relabelled. Carried from the same value the allowlist check above was made
+    on, so the two cannot disagree.
+    """
+    item = _meter_item("abc")
+    item["meterType"] = code
+
+    assert _parse([item])["abc"].meter_type_code == code
+
+
+def test_the_numeric_meter_type_survives_an_unresolvable_name():
+    """The code is read off the payload, not out of the lookup table, so it is
+    still there when the name falls back to the raw code.
+
+    The unit table is supplied, because an unresolvable unit would now skip the
+    meter before this could be asserted — and this test is about the type."""
+    item = _meter_item("abc")
+    item["meterType"] = 1
+
+    meter = _parse_meters(
+        [item], meter_types=[], measurement_units=MEASUREMENT_UNITS
+    )["abc"]
+
+    assert meter.meter_type == "1"
+    assert meter.meter_type_code == 1
+
+
+def test_a_meter_type_given_as_a_string_is_carried_as_an_int():
+    """`unit` arrives as a string in this payload, so meterType could too. The
+    code must be comparable to the ints in SUPPORTED_METER_TYPES and
+    ANNUAL_RESET_METER_TYPES either way."""
+    item = _meter_item("abc")
+    item["meterType"] = "1"
+
+    assert _parse([item])["abc"].meter_type_code == 1
+
+
+def test_detectors_never_become_entities():
+    """The whole reason SUPPORTED_METER_TYPES exists.
+
+    Brunata's table carries a smoke detector at 12 and a leakage detector at
+    13. This integration polls hourly over a cloud API, so an entity for either
+    would invite an automation that could be an hour late. If this test is ever
+    softened, that is the moment to think very hard: no amount of usefulness
+    elsewhere buys back a fire alarm that fires at the top of the next hour.
+    """
+    assert 12 not in SUPPORTED_METER_TYPES
+    assert 13 not in SUPPORTED_METER_TYPES
+
+
+def test_the_allowlist_is_what_the_table_says_it_is():
+    """The numbers, written down once, next to what they mean.
+
+    Read off Brunata's own meterType table via a debug log from a live
+    account. Indices 1 and 2 in that table match the meters that can be
+    verified against real entities, which is what makes 5 a reading rather
+    than the guess issue #39 refused to make.
+
+    Index 6 is asserted too, and is deliberately absent from the allowlist.
+    Knowing what a code means and choosing to surface it are separate
+    decisions, and this test holds both: the reading is recorded so nobody has
+    to find it again, and energy stays out until somebody has such a meter.
+    """
+    assert SUPPORTED_METER_TYPES == frozenset({1, 2, 5})
+    assert METER_TYPES[1] == "Radiator"
+    assert METER_TYPES[2] == "Water"
+    assert METER_TYPES[5] == "Electricity"
+    assert METER_TYPES[6] == "Energy"
+    assert 6 not in SUPPORTED_METER_TYPES
+
+
+# 12 and 13 are the smoke and leakage detectors, named explicitly because
+# they are the reason this boundary exists at all. 6 is energy: the table
+# names it, but it stays off the allowlist until somebody actually has one
+# — see SUPPORTED_METER_TYPES. 4 is gas and 3 is temperature: real types
+# Brunata can report that this integration has not been built for. 27 is
+# the last named entry in the table, -1 and 99 are outside it.
+@pytest.mark.parametrize("code", [0, 3, 4, 6, 9, 12, 13, 17, 27, -1, 99])
 def test_unsupported_meter_types_never_become_entities(code):
     """The safety boundary. Brunata's portal can carry leak and smoke
     detectors, and this integration polls once an hour over a cloud API — up
@@ -342,31 +528,61 @@ def test_trailing_whitespace_in_table_entries_is_stripped():
     assert meter.meter_type == "Radiator"
 
 
-def test_unknown_codes_fall_back_to_the_raw_value():
-    """An index past the end of the table must not take down the platform —
-    passing a code through as-is once crashed every entity on
-    meter.meter_type.lower(), not just the unrecognised one.
+def test_a_negative_unit_code_does_not_wrap_round_the_table():
+    """Python indexes lists from both ends. Brunata does not.
+
+    `table[-1]` does not raise IndexError — it returns the *last* entry, so a
+    negative unit code resolved to a real, wrong unit: wrong device class,
+    wrong state class, and long term statistics that look right and are not.
+    It happened silently, because the warning only fires when the lookup fails.
+
+    The guard is still what this covers; what changed is the outcome. The meter
+    is skipped rather than given the raw code, so the assertion is that
+    "THE-LAST-ENTRY" is nowhere near the result.
+    """
+    item = _meter_item("abc")
+    item["unit"] = -1
+
+    assert _parse_meters(
+        [item],
+        meter_types=METER_TYPES,
+        measurement_units=["undefined", "units", "m3", "THE-LAST-ENTRY"],
+    ) == {}
+
+
+def test_an_unknown_meter_type_code_still_falls_back():
+    """The meter type keeps its fallback, and this is the test that says so.
+
+    Passing a code through as-is once crashed every entity on
+    meter.meter_type.lower(), not just the unrecognised one. The name reaches
+    the device name and the model field and nothing else — every decision hangs
+    on meter_type_code — so a device called "2" is a cosmetic problem that
+    fixes itself when the table resolves again.
 
     A short meter type table is used so that meterType 2 — supported, so it
     reaches the lookup — lands past the end of it."""
     item = _meter_item("abc")
     item["meterType"] = 2
-    item["unit"] = 99
 
     meter = _parse_meters(
         [item], meter_types=["Collector", "Radiator"],
         measurement_units=MEASUREMENT_UNITS,
     )["abc"]
     assert meter.meter_type == "2"
-    assert meter.unit == "99"
+    assert meter.meter_type_code == 2
+    # And the unit, which did resolve, is untouched by the type's trouble.
+    assert meter.unit == "m3"
 
 
-def test_missing_lookup_tables_do_not_crash():
-    """If the locale resource ever fails to load, entities should still be
-    created rather than the platform failing outright."""
-    meter = _parse_meters([_meter_item("abc")])["abc"]
-    assert meter.meter_type == "2"
-    assert meter.unit == "8"
+def test_without_lookup_tables_no_meter_is_created():
+    """The locale resource failing to load is already an error the coordinator
+    turns into a retry, so this path should not be reachable in production —
+    but if it ever is, no meter may come out of it.
+
+    Every unit is unresolvable without the table, so every meter is skipped.
+    That is the safe end: the sensors keep the values and the history they
+    already have, and the next poll that loads the tables brings them back."""
+    assert _parse_meters([_meter_item("abc")]) == {}
 
 
 def test_non_list_payload_raises_api_error():
@@ -417,8 +633,13 @@ def test_decimals_and_transmitting_are_carried_through():
     assert meter.transmitting is True
 
 
-@pytest.mark.parametrize("decimals", [None, "3", 1.5])
+@pytest.mark.parametrize("decimals", [None, "3", 1.5, True, False])
 def test_non_integer_decimals_is_ignored(decimals):
+    """True and False are in this list because bool subclasses int.
+
+    `isinstance(True, int)` is True, so a payload carrying `true` used to
+    become a display precision of 1 — a number the meter never reported.
+    """
     item = _meter_item("abc")
     item["decimals"] = decimals
 
@@ -451,7 +672,7 @@ async def test_meters_are_fetched_from_metersforconsumer():
     assert method == "GET"
     assert url.endswith("/consumer/metersforconsumer")
     assert headers["Authorization"] == "Bearer T"
-    assert headers["Referer"] == METERS_URL
+    assert headers["Referer"] == REFERER_URL
 
 
 async def test_stale_token_on_the_locale_endpoint_retries_with_a_fresh_login():
@@ -509,6 +730,51 @@ async def test_client_diagnostics_reports_tokens_without_quoting_them():
     # the parser resolves meter types against.
     report["meter_types"].append("Injected")
     assert client._meter_types == ["Collector", "Radiator"]
+
+
+@pytest.mark.parametrize(
+    "mappers",
+    [
+        {},
+        {"meterType": [], "measurementUnit": ["units"]},
+        {"meterType": ["Collector", "Radiator"], "measurementUnit": []},
+        {"meterType": [], "measurementUnit": []},
+        {"meterType": None, "measurementUnit": None},
+    ],
+)
+async def test_empty_lookup_tables_fail_the_update_instead_of_creating_wrong_units(
+    mappers,
+):
+    """An empty table is as unusable as a missing one, and continuing costs
+    more than failing.
+
+    With no table every meter is named and united by its raw code — "8" where
+    the user had "m³" — and Home Assistant treats a changed unit on an existing
+    sensor as a new series, discarding the long term statistics behind the old
+    one. That cannot be undone afterwards. Failing the update costs one poll:
+    the coordinator turns BrunataApiError into UpdateFailed and the sensors
+    keep the values they already have.
+
+    This used to be a warning followed by carrying on.
+    """
+
+    class FakeHttp:
+        async def request(self, method, url, **kwargs):
+            return FakeResponse(200, json_data={"mappers": mappers})
+
+    client = BrunataApiClient("user@example.com", "s3cret", FakeHttp())
+    client._access_token = "T"
+    client._expires_at = time.time() + 300
+
+    with pytest.raises(BrunataApiError, match="cannot be resolved"):
+        await client._async_ensure_lookup_tables()
+
+    # Not marked as loaded, so the next poll fetches the resource again rather
+    # than serving empty tables for the life of the client. The flag exists to
+    # stop a *loaded* table being re-fetched; there is nothing loaded here.
+    assert client._lookup_tables_loaded is False
+    assert client._meter_types == []
+    assert client._measurement_units == []
 
 
 @pytest.mark.parametrize("payload", [[], "text", None])

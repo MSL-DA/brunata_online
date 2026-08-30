@@ -45,15 +45,24 @@ def mock_brunata_client():
 
 @pytest.fixture
 def mock_meter():
-    """A single meter with a reading, as the API layer would return it."""
+    """A single meter with a reading, as the API layer would return it.
+
+    A water meter, matching the one on the maintainer's own account. It used to
+    be meter_type "Heat" with unit "kWh" — a combination Brunata cannot
+    produce, and one that SUPPORTED_METER_TYPES now stops before it becomes an
+    entity at all. It read as a real type in assertions like
+    "Heat (12345) Consumption", which is how an invented example turns into
+    something a later reader takes for a reading.
+    """
     return BrunataMeter(
         meter_id="12345",
         meter_no="M12345",
-        meter_type="Heat",
-        unit="kWh",
+        meter_type="Water",
+        meter_type_code=2,
+        unit="m3",
         value=100.5,
         reading_date=date(2024, 1, 1),
         mounting_date=datetime(2018, 10, 23, 14, 10, tzinfo=UTC),
-        decimals=2,
+        decimals=3,
         transmitting=True,
     )

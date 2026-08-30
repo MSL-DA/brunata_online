@@ -26,8 +26,10 @@ then died on import with
     AttributeError: module 'pycares' has no attribute 'ares_query_a_result'
 
 which is the PyPI problem described below, not a fault in the integration.
-2025.8 is covered anyway by the pin in requirements_test.txt, which CI runs
-green on every push.
+They stay unmeasured, and that is not a hole in the claim: the floor is the
+*oldest* release that works, and that one was measured directly. The pin in
+requirements_test.txt, which CI runs green on every push, is Home Assistant
+2026.8 — it says nothing about any release in 2025.
 
 Testing against that floor was tried and dropped. Installing a year-old Home
 Assistant from PyPI today pulls newer releases of its loosely pinned indirect

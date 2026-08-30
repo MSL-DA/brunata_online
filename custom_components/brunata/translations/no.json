@@ -14,6 +14,12 @@
           "password": "Passord"
         },
         "description": "Påloggingsopplysningene dine for Brunata er ikke lenger gyldige. Skriv dem inn på nytt for å fortsette."
+      },
+      "reconfigure": {
+        "data": {
+          "password": "Passord"
+        },
+        "description": "Skriv inn det nye passordet for {email}. Vil du bruke en annen konto, må den legges til som en ny integrasjon."
       }
     },
     "error": {
@@ -22,9 +28,10 @@
       "unknown": "Uventet feil"
     },
     "abort": {
-      "already_configured": "Enheten er allerede konfigurert",
+      "already_configured": "Denne kontoen er allerede konfigurert",
       "reauth_successful": "Påloggingsopplysningene er oppdatert",
-      "wrong_account": "Denne e-postadressen tilhører en annen konto. Logg inn med den opprinnelige kontoen."
+      "wrong_account": "Denne e-postadressen tilhører en annen konto. Logg inn med den opprinnelige kontoen.",
+      "reconfigure_successful": "Passordet er oppdatert"
     }
   },
   "entity": {

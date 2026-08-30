@@ -3,9 +3,10 @@ name: HACS Validation
 
 on:
   pull_request:
+  push:
     branches:
       - main
-  push:
+      - beta
     tags:
       - "v*"
   schedule:
@@ -24,6 +25,11 @@ jobs:
       - name: Check out code from GitHub
         uses: actions/checkout@v7
 
+      # Unpinned on purpose. HACS recommends `@main` itself, and while its
+      # documentation says you may pin and let Dependabot follow, the version to
+      # pin to could not be looked up — and a guessed version number is exactly
+      # the pattern this repository has been burned by. hassfest.yml carries the
+      # same note.
       - name: Run HACS validation
         uses: hacs/action@main
         with:

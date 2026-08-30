@@ -5,9 +5,9 @@
 
 ![Brunata logo](images/logo_readme.png)
 
-# Brunata for Home Assistant
+# Brunata Online for Home Assistant
 
-The **Brunata Integration** for Home Assistant allows you to monitor your Brunata meters (water, energy, and heat cost allocator) directly in your dashboard. Meters are automatically discovered and grouped under devices for easy management.
+The **Brunata Integration** for Home Assistant allows you to monitor your Brunata meters (water, heat cost allocator and electricity) directly in your dashboard. Meters are automatically discovered and grouped under devices for easy management.
 
 Built for [Brunata Online](https://online.brunata.com) accounts. If Brunata Online is available in your country, this integration is expected to work.
 
@@ -19,21 +19,19 @@ Built for [Brunata Online](https://online.brunata.com) accounts. If Brunata Onli
 ## ✨ Features
 
 - Automatic discovery of all supported meters on your Brunata Online account.
-Supports water (m³, liter) and heat cost allocator (units) meters — the two meter types verified against live data. Energy meters aren't supported yet; issue [#39](https://github.com/MSL-DA/brunata_online/issues/39) explains why and how you can help
+- Supports water (`m³`), heat cost allocator (`units`) and electricity (`kWh`) meters. If you have a meter that isn't supported, please [open an issue](https://github.com/MSL-DA/brunata_online/issues) — the log line it produces contains what's needed to add it.
 - Devices are named after the placement you set in Brunata Online, so a meter shows up as `Water - Bathroom (Cold)` rather than an unrecognisable serial number.
 - Groups sensors under devices for easy management.
 - Standard Home Assistant device classes and state classes, with full Long Term Statistics support.
-- Polls Brunata once an hour via `DataUpdateCoordinator`, at xx:59:30 — how often a *new* reading actually appears depends on the meter's own reporting interval, not on this schedule.
-
-Other meter types are skipped. If you have an energy meter and it's missing,
-[open an issue](https://github.com/MSL-DA/brunata_online/issues) — the debug
-log names its type, and that's all it takes to add support.
+- Polls Brunata Online once an hour at a fixed time between xx:58:30 and xx:59:30. This time is automatically chosen when the integration is installed and remains the same afterwards. How often a *new* reading actually appears depends on the meter's own reporting interval, not on this schedule.
+- When nothing has changed for several hours in a row, polling drops to once every four hours until a reading moves. Brunata's meters report rarely, and this keeps the integration from asking for the same numbers 24 times a day.
 
 ---
 
 ## 📦 Installation
 
 ### HACS (Recommended)
+**Requires Home Assistant 2025.3 or newer.**
 
 1. Open **HACS** in Home Assistant
 2. Click the three-dot menu (top right) → **Custom Repositories**
@@ -66,9 +64,3 @@ https://github.com/MSL-DA/brunata_online
 ## 📖 Documentation
 
 See the [wiki](https://github.com/MSL-DA/brunata_online/wiki) for details on using the sensors — including which meters work in the Energy dashboard and why consumption graphs show 0 right after setup.
-
----
-
-## 🔗 Credits
-
-Special thanks to the [brunata-api](https://pypi.org/project/brunata-api/) project, which this integration was originally built on. The client now lives in `custom_components/brunata/api.py`, so the integration has no external Python dependencies.

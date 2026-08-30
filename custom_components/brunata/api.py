@@ -1,22 +1,17 @@
 """Client for the Brunata Online API.
 
-This replaces the external ``brunata-api`` package. That package targeted
-Brunata's retired Azure AD B2C login and v1 data API, so the integration had to
-monkey-patch ``Client._get_tokens`` and rebind the module-level ``API_URL`` at
-import time, then reach into ``_session``, ``_username``, ``_password``,
-``_tokens``, ``_is_token_valid``, ``_meters`` and ``_init_mappers``. Every one
-of those is private, so any release of the library could have broken the
-integration at runtime with no warning.
+This replaces the external ``brunata-api`` package, which targeted Brunata's
+retired Azure AD B2C login and v1 data API: the integration had to
+monkey-patch ``Client._get_tokens``, rebind ``API_URL`` at import time and
+read a dozen private attributes, any of which could break without warning.
 
-Everything the integration actually used is implemented here instead: the
-Keycloak login and the single ``/consumer/metersforconsumer`` call that
-Brunata's own readings page uses, which carries each meter's reading together
-with its customer-assigned placement label.
+Implemented here instead: the Keycloak login and the single
+``/consumer/metersforconsumer`` call Brunata's own readings page uses, which
+carries each meter's reading together with its placement label.
 
 The HTTP client is built and owned here, deliberately *not* taken from
-``homeassistant.helpers.httpx_client`` — see ``async_create()`` for why, and
-for why it is constructed in the executor. Anything that reads like an
-argument for dropping ``async_close()`` is out of date.
+``homeassistant.helpers.httpx_client`` — see ``async_create()``. Anything that
+reads like an argument for dropping ``async_close()`` is out of date.
 """
 
 from __future__ import annotations
@@ -41,53 +36,110 @@ from homeassistant.core import HomeAssistant
 _LOGGER = logging.getLogger(__name__)
 
 # Brunata retired the v1 data API alongside the Keycloak migration: with a
-# valid token, the v1 equivalent of this endpoint answers 401 while v2
-# returns the meter data.
+# valid token, the v1 equivalent of this endpoint answers 401 while v2 works.
 BASE_URL = "https://online.brunata.com"
 API_URL = f"{BASE_URL}/online-webservice/v2/rest"
 
-# Sent as the Referer on API calls. It is Brunata's own readings page, which
-# is where the requests this client imitates come from — confirmed by reading
-# the live traffic in the browser's developer tools, not inherited from
-# brunata-api.
-METERS_URL = f"{BASE_URL}/react-online/meters-values"
+# Sent as the Referer on API calls — Brunata's own readings page, read off the
+# live traffic in the browser's developer tools.
+#
+# Named REFERER_URL, not METERS_URL. It is *not* the meters endpoint, which is
+# {API_URL}/consumer/metersforconsumer and is built in async_get_meters(). The
+# old name was one of the three this codebase drew a conclusion from instead of
+# reading, and it cost a production outage.
+REFERER_URL = f"{BASE_URL}/react-online/meters-values"
 
-# The only meter types this integration will surface. Everything else in
-# Brunata's meterType table is dropped before it ever becomes an entity.
+# Where anything this integration could not handle is reported.
 #
-# This is a safety boundary, not a feature limit. Brunata's portal can carry
-# leak and smoke detectors, and this integration polls once an hour over a
-# cloud API — up to 59 minutes and 30 seconds can pass between an event and
-# Home Assistant hearing about it. A detector appearing as an entity invites
-# someone to automate on it, and that automation would be dangerously slow.
-# The only safe answer is not to create the entity at all.
+# There used to be two: this one, and a link straight to issue #39, which asked
+# users to paste the numeric meterType of a meter that got skipped. That
+# question is answered — see SUPPORTED_METER_TYPES — so both log lines point at
+# the tracker itself. A meter still landing there is a fresh report, not an
+# answer to the old one.
+ISSUE_TRACKER_URL = "https://github.com/MSL-DA/brunata_online/issues"
+
+# The only meter types this integration will surface. Everything else is
+# dropped before it can become an entity.
 #
-# It also fails closed: a meterType that is missing, unparseable, or simply
-# not listed here is skipped. If Brunata adds a type, it stays out until
-# someone has looked at what it actually is.
+# A safety boundary, not a feature limit. Brunata's portal can carry leak and
+# smoke detectors — meterType 13 and 12 — and this integration polls hourly
+# over a cloud API, up to an hour between an event and Home Assistant hearing
+# about it. An entity invites an automation, and that automation would be
+# dangerously slow. The only safe answer is not to create it.
 #
-#   1 = heat cost allocator (radiator). Read off live account data.
-#   2 = water. Read off live account data.
+# It fails closed: a meterType that is missing, unparseable or simply not
+# listed here is skipped.
 #
-# Nothing else is listed, because nothing else has been read off a real
-# account. Energy meters in particular are almost certainly some other code —
-# but which one is unknown, and a guess does not belong on a safety boundary.
-# Note that the presence of GJ/Gcal in sensor.py's UNIT_MAP says nothing about
-# this: that is the measurementUnit table, a different table entirely, and
-# reasoning from one to the other is how this codebase has been burned before.
+#   1 = heat cost allocator (radiator)
+#   2 = water
+#   5 = electricity
 #
-# _log_unsupported_meter() names the code of anything dropped, so the way to
-# extend this list is to read that line from a user's log — not to infer it.
-SUPPORTED_METER_TYPES = frozenset({1, 2})
+# How those numbers were established, because it matters: Brunata's own
+# meterType table is returned by the locale resource, and a debug log from a
+# live account printed it in full. In that table index 1 is "Radiator" and
+# index 2 is "Water" — the two types whose meters we can check against real
+# entities — so the same table's answer for 5 is a reading, not a guess. This
+# is what issue #39 was waiting for.
+#
+# The same table gives 6 = "Energy", and it is deliberately *not* listed. A
+# code being readable is not a reason to surface a meter type nobody has asked
+# for: energy meters appear to be sold to housing associations rather than to
+# private customers, so the first person to want one can say so and be the
+# person it gets tested against. Adding it is one number and one line in the
+# README. Leaving it out costs nothing until then.
+#
+# Note what is still untested even for 5: no electricity meter has passed
+# through this code, so which unit such a meter reports is unconfirmed. Every
+# energy unit in the live measurementUnit table is already in sensor.py's
+# UNIT_MAP, so it should resolve — but "should" is the operative word, and a
+# unit that does not resolve now skips the meter rather than mislabelling it.
+#
+# The old reasoning is still wrong and worth keeping wrong: the presence of
+# GJ/Gcal in UNIT_MAP never said anything about meterType. That is the
+# measurementUnit table, a different table entirely. What changed is that the
+# right table was finally read, not that the inference became acceptable.
+#
+# _log_unsupported_meter() names the code of anything dropped, so the list is
+# extended by reading that line from a user's log, not by inference.
+SUPPORTED_METER_TYPES = frozenset({1, 2, 5})
+
+# Index 0 of Brunata's measurementUnit table is the literal string "undefined":
+# Brunata saying it has not stated a unit, which is the same position as a code
+# that does not resolve at all and is treated the same way. See _parse_meters().
+UNDEFINED_UNIT = "undefined"
+
+
+@lru_cache(maxsize=64)
+def _log_unresolved_unit(meter_id: str, code: str) -> None:
+    """Note a meter skipped for an unusable unit, once per process.
+
+    Cached for the same reason as _log_unsupported_meter(): this runs per
+    meter per poll, and the lookup tables do not change between them.
+
+    The wording is deliberate. What the user sees is a sensor that stopped
+    updating, so the line has to say the data is safe and nothing needs doing.
+    """
+    _LOGGER.warning(
+        "Meter %s reports unit code %s, which cannot be resolved to a unit, so "
+        "this meter is skipped for now. Its sensor stops updating and keeps "
+        "the history it already has; it comes back on its own as soon as the "
+        "unit resolves again. Creating it with the raw code as its unit would "
+        "make Home Assistant treat it as a different measurement and discard "
+        "that history, which cannot be undone. If this persists, please report "
+        "it with this line at %s.",
+        meter_id,
+        code,
+        ISSUE_TRACKER_URL,
+    )
 
 
 def _meter_type_code(raw: Any) -> int | None:
     """Coerce Brunata's meterType to an int, or None if it isn't one.
 
-    Observed as an integer in the metersforconsumer payload, but `unit` in
-    that same payload is a string where it used to be an integer, so the same
-    could happen here. None means "cannot be checked against the allowlist",
-    which SUPPORTED_METER_TYPES treats as "do not surface".
+    Observed as an integer, but `unit` in the same payload is a string where it
+    used to be an integer, so the same could happen here. None means "cannot be
+    checked against the allowlist", which SUPPORTED_METER_TYPES treats as "do
+    not surface".
     """
     if isinstance(raw, bool):
         return None
@@ -105,32 +157,40 @@ def _meter_type_code(raw: Any) -> int | None:
 def _log_unsupported_meter(meter_id: str, code: str) -> None:
     """Note a skipped meter once per process, not once per poll.
 
-    `code` is pre-formatted by the caller rather than passed raw: lru_cache
-    hashes its arguments, and a meterType that arrives as a dict or a list is
-    unhashable. Passing it straight in raised TypeError out of _parse_meters()
-    — costing every meter that update, which is the exact failure this filter
-    exists to avoid.
+    `code` is pre-formatted by the caller: lru_cache hashes its arguments, and
+    a meterType arriving as a dict or list is unhashable. Passing it raw threw
+    TypeError out of _parse_meters(), costing every meter that update — the
+    exact failure this filter exists to avoid.
     """
     _LOGGER.info(
         "Meter %s has meterType %s, which this integration does not support, "
-        "so no entity is created for it. Supported types are %s. If you "
-        "believe this meter measures water, heat or energy consumption, "
-        "please open an issue.",
+        "so no entity is created for it. Supported types are %s. If this "
+        "meter measures consumption you expected to see in Home Assistant, "
+        "please report it at %s with this line and what the meter physically "
+        "measures — the log can give the code, but only you can say what the "
+        "box on the wall is.",
         meter_id,
         code,
         sorted(SUPPORTED_METER_TYPES),
+        ISSUE_TRACKER_URL,
     )
 
-# Brunata's API is fronted by bot protection, so the requests are made to look
-# like the web app's. brunata-api randomised the Edge version through
-# fake_useragent; a fixed, plausible string avoids that dependency.
+
+# Brunata's API is fronted by bot protection, so requests are made to look like
+# the web app's. Fixed rather than randomised: brunata-api used fake_useragent,
+# which added a dependency and a moving target for no benefit.
+#
+# Bumped by hand, and no test can tell when it is due — a stale version has no
+# effect right up until the day the bot protection decides it does. Last set to
+# Edge 151 (stable, July 2026). If logins start failing with no other
+# explanation, look here first.
 DEFAULT_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0"
+        "(KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36 Edg/151.0.0.0"
     ),
     "Sec-Ch-Ua": (
-        '"Not/A)Brand";v="8", "Chromium";v="130", "Microsoft Edge";v="130"'
+        '"Not/A)Brand";v="8", "Chromium";v="151", "Microsoft Edge";v="151"'
     ),
     "Sec-Ch-Ua-Mobile": "?0",
     "Sec-Ch-Ua-Platform": '"Windows"',
@@ -179,16 +239,23 @@ class BrunataApiError(BrunataError):
     """The server answered, but not with something usable.
 
     Carries the HTTP status when there was one, so a caller can tell 429 from
-    503 from 404 without parsing the message. diagnostics.py reports it: "the
-    last update failed with 429" is a different problem from "the last update
-    failed with 500", and a bug report that distinguishes them saves a round
-    trip. It is None for the failures that have no status of their own — a
-    login flow that changed shape, a locale resource without mappers.
+    503 from 404 without parsing the message; diagnostics.py reports it. None
+    for failures with no status of their own — a login flow that changed
+    shape, a locale resource without mappers.
+
+    `retry_after` is set only for 429, from the header of the same name, and is
+    how long Brunata asked us to wait. None when it did not say.
     """
 
-    def __init__(self, message: str, status: int | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        status: int | None = None,
+        retry_after: float | None = None,
+    ) -> None:
         super().__init__(message)
         self.status = status
+        self.retry_after = retry_after
 
 
 @dataclass(frozen=True, slots=True)
@@ -202,15 +269,30 @@ class BrunataMeter:
 
     meter_id: str
     meter_no: str | None
+    # Resolved through the locale lookup table, e.g. "Radiator". A translation
+    # Brunata owns, so it belongs in device names and nowhere a decision is
+    # made — see meter_type_code.
     meter_type: str
+    # The resolved unit name, e.g. "m3" or "units". Never a raw code and never
+    # empty: _parse_meters() drops a meter whose unit it cannot name, because
+    # an entity created with the wrong unit loses its history permanently and
+    # a skipped one does not.
     unit: str
+    # The raw meterType, already checked against SUPPORTED_METER_TYPES. This is
+    # the stable half of the pair: sensor.py decides whether a meter is zeroed
+    # every 1 January from this number, not from the name above, which would
+    # silently stop matching if Brunata relabelled the entry.
+    #
+    # Defaults to None because that is what _meter_type_code() returns for a
+    # value it cannot check, and every rule reading it must treat "unknown" the
+    # way the allowlist does: as not one of ours.
+    meter_type_code: int | None = None
     value: float | None = None
     reading_date: date | None = None
-    # The customer-assigned label from Brunata's own UI, e.g. "Koldt vand" or
-    # "Soveværelse". None when the meter has no label set.
+    # The customer's own label from Brunata's UI, e.g. "Koldt vand".
     placement: str | None = None
-    # When Brunata installed the physical device. A change here is a meter
-    # replacement stated as fact, rather than inferred from a falling value.
+    # When Brunata installed the physical device. A change is a replacement
+    # stated as fact, rather than inferred from a falling value.
     mounting_date: datetime | None = None
     # Digits Brunata itself displays: 3 for water, 0 for heat cost allocators.
     decimals: int | None = None
@@ -221,16 +303,13 @@ class BrunataMeter:
 def _as_text(raw: Any) -> str:
     """Coerce a lookup code to text.
 
-    Brunata's v2 payload carries meter type and unit as numeric codes, which
-    _lookup() resolves against the tables from the locale resource. Those codes
-    have been observed as both integers and strings, so they are normalised
-    here before being parsed, and an absent code becomes "" rather than the
-    string "None".
+    The codes have been observed as both integers and strings, so they are
+    normalised before being parsed, and an absent code becomes "" rather than
+    the string "None". There is no branch for a code that is already a string:
+    str() returns one unchanged.
     """
     if raw is None:
         return ""
-    if isinstance(raw, str):
-        return raw
     return str(raw)
 
 
@@ -238,62 +317,84 @@ def _as_text(raw: Any) -> str:
 def _warn_unresolved_code(what: str, code: str, table_size: int) -> None:
     """Warn about an unresolved lookup code, once per process.
 
-    _lookup() runs for every meter on every poll, so a code that does not
-    resolve would otherwise produce one warning per meter per hour for as long
-    as the meter exists — 24 identical lines a day, drowning out everything
-    else in the log. The lookup tables are static and account-independent, so
-    the second warning carries nothing the first did not.
+    _resolve() runs per meter per poll, so without the cache an unresolvable
+    code means 24 identical lines a day. The tables are static and
+    account-independent, so the second warning carries nothing the first did.
 
-    The cache is what makes it fire once: lru_cache only executes the body on
-    a combination of arguments it has not seen before.
+    It says only that the code did not resolve. What happens next differs by
+    field — the meter type falls back, the unit skips the meter — so the
+    callers say that part.
     """
     _LOGGER.warning(
-        "Brunata %s code %r does not resolve in the lookup table "
-        "(%s entries). Falling back to the raw code.",
+        "Brunata %s code %r does not resolve in the lookup table (%s entries).",
         what,
         code,
         table_size,
     )
 
 
-def _lookup(table: list[str], raw: Any, what: str) -> str:
+def _resolve(table: list[str], raw: Any, what: str) -> str | None:
     """Resolve a numeric code against one of the locale lookup tables.
 
-    The meter payload carries indices, not names: meterType 2 means whatever
-    sits at index 2 of the meterType table. An unresolved code falls back to
-    the raw number so the entity is still created, rather than taking down the
-    whole platform.
+    The payload carries indices, not names: meterType 2 means whatever sits at
+    index 2 of the meterType table. Returns None when the table cannot answer
+    and leaves it to the caller to decide what that is worth — the two fields
+    this serves do not deserve the same answer. See _lookup() and
+    _parse_meters().
     """
     code = _as_text(raw)
     if not code:
-        return ""
+        return None
 
     try:
-        name = table[int(code)]
+        index = int(code)
+        # Python indexes lists from both ends and Brunata does not. Without
+        # this, -1 returns the table's *last* entry rather than raising: a
+        # wrong but perfectly valid unit, with the wrong device class, the
+        # wrong state class, and statistics that look right and are not.
+        if index < 0:
+            raise IndexError(index)
+        name = table[index]
     except (ValueError, IndexError):
         name = None
 
     # The live tables contain null entries — 7 of 28 meter types and 34 of 96
-    # units are None, reserved slots Brunata has not filled in. An index
-    # landing on one must be treated exactly like an index past the end:
-    # returning the None would put it straight into BrunataMeter.meter_type,
-    # and the sensor platform would then die on meter_type.lower(), taking
-    # every entity with it rather than just the odd one.
+    # units are reserved slots Brunata has not filled in. An index landing on
+    # one means the same as an index past the end.
     if not isinstance(name, str) or not name.strip():
         _warn_unresolved_code(what, code, len(table))
-        return code
+        return None
 
-    # Some entries in the live table carry a trailing space, which would
-    # otherwise end up in the device name.
+    # Some live entries carry a trailing space, which would end up in the
+    # device name.
     return name.strip()
 
 
-def _parse_timestamp(raw: Any) -> datetime | None:
+def _lookup(table: list[str], raw: Any, what: str) -> str:
+    """Resolve a code, falling back to the raw code when the table cannot.
+
+    Used for the meter type only, where the fallback is deliberate: the name
+    reaches the device name and the `model` field and nothing else, since every
+    decision hangs on meter_type_code. A device called "2" is ugly, visible and
+    fixes itself when the table resolves again.
+
+    The unit gets no fallback — see _parse_meters(). That asymmetry is the
+    point: one field is cosmetic when it goes wrong, the other costs the meter
+    its history.
+    """
+    return _resolve(table, raw, what) or _as_text(raw)
+
+
+def parse_timestamp(raw: Any) -> datetime | None:
     """Parse one of Brunata's ISO timestamps, e.g. mountingDate.
 
     They carry an offset ("2018-10-23T14:09:22+02:00"), so the result is
-    timezone-aware. Anything unparseable becomes None rather than raising: a
-    meter with an odd date is still a meter.
+    timezone-aware. Unparseable becomes None rather than raising: a meter with
+    an odd date is still a meter.
+
+    Public rather than underscored because sensor.py calls it. The restore
+    store holds what this module serialised, so there is one spelling of a
+    Brunata date and one place that knows it.
     """
     if isinstance(raw, str):
         try:
@@ -306,12 +407,10 @@ def _parse_timestamp(raw: Any) -> datetime | None:
 def _parse_value(raw: Any) -> float | None:
     """Parse a meter reading, tolerating anything that is not a number.
 
-    Every other field in _parse_meters() degrades to None rather than raising,
-    so one odd row costs one meter. A bare float() here would break that rule:
-    a ValueError escapes _parse_meters(), passes api.py's own error types
-    without being translated, and reaches DataUpdateCoordinator as an
-    unexpected exception — costing every meter that update, not just the one
-    with the bad value.
+    Every other field here degrades to None rather than raising, so one odd row
+    costs one meter. A bare float() would break that: the ValueError escapes
+    _parse_meters() untranslated and reaches the coordinator as an unexpected
+    exception, costing every meter that update.
     """
     if raw is None:
         return None
@@ -322,8 +421,12 @@ def _parse_value(raw: Any) -> float | None:
         return None
 
 
-def _parse_reading_date(raw: Any) -> date | None:
-    """Parse Brunata's reading date, tolerating a full timestamp."""
+def parse_reading_date(raw: Any) -> date | None:
+    """Parse Brunata's reading date, tolerating a full timestamp.
+
+    Public for the same reason as parse_timestamp(): sensor._as_date() hands it
+    the string it read back out of the restore store.
+    """
     if isinstance(raw, str):
         try:
             return date.fromisoformat(raw[:10])
@@ -360,13 +463,11 @@ class BrunataApiClient:
 
         Deliberately not homeassistant.helpers.httpx_client: that returns a
         client Home Assistant owns and closes at shutdown, and it warns when an
-        integration closes it. Since we hold Keycloak session cookies and a
-        bearer token, and want them gone the moment the config entry unloads,
-        we own the client ourselves.
+        integration closes it. We hold Keycloak session cookies and a bearer
+        token and want them gone the moment the entry unloads, so we own it.
 
-        httpx.AsyncClient loads the certificate store from disk when it builds
-        its SSL context, so it is constructed in the executor rather than on
-        the event loop.
+        Built in the executor because httpx.AsyncClient loads the certificate
+        store from disk when it builds its SSL context.
         """
         http_client = await hass.async_add_executor_job(
             partial(
@@ -380,20 +481,19 @@ class BrunataApiClient:
     def diagnostics(self) -> dict[str, Any]:
         """Return the client's internal state for the diagnostics download.
 
-        A method here rather than five attribute reads from diagnostics.py:
-        the decision about what is safe to publish belongs with the fields, not
-        with the module that happens to render them. Vendoring this client
-        removed a dozen reads of a third party's private attributes; there is
-        no reason to reintroduce the pattern against ourselves.
+        A method rather than five attribute reads from diagnostics.py: what is
+        safe to publish belongs with the fields. Vendoring this client removed
+        a dozen reads of a third party's private attributes, and there is no
+        reason to reintroduce the pattern against ourselves.
 
         Neither token is included, only whether one exists. An access token is
-        a working credential for as long as it lives, and diagnostics files get
-        attached to public issues.
+        a working credential, and diagnostics files get attached to public
+        issues.
         """
         return {
             "lookup_tables_loaded": self._lookup_tables_loaded,
             # Copied, not handed out: the caller serialises these into a file
-            # and must not be able to mutate what the parser looks things up in.
+            # and must not be able to mutate what the parser looks up in.
             "meter_types": list(self._meter_types),
             "measurement_units": list(self._measurement_units),
             "has_access_token": self._access_token is not None,
@@ -403,9 +503,8 @@ class BrunataApiClient:
     async def async_close(self) -> None:
         """Close the underlying HTTP client.
 
-        Called when the config entry is unloaded. Without it every reload —
-        including the automatic one after saving options or completing a
-        reauth — leaks keep-alive sockets for the life of the process.
+        Called on unload. Without it every reload — including the automatic one
+        after a reauth — leaks keep-alive sockets for the life of the process.
         """
         await self._client.aclose()
 
@@ -423,9 +522,8 @@ class BrunataApiClient:
         """Return every mounted meter, keyed by meter ID.
 
         One call to /consumer/metersforconsumer, which is what Brunata's own
-        readings page uses. It carries the meter, its latest reading, its
-        customer-assigned placement, its mounting and dismounting dates and its
-        display precision in a single flat list.
+        readings page uses: meter, latest reading, placement, mounting and
+        dismounting dates and display precision in a single flat list.
         """
         await self._async_ensure_lookup_tables()
 
@@ -440,18 +538,23 @@ class BrunataApiClient:
         )
 
     async def _async_ensure_lookup_tables(self) -> None:
-        """Fetch the locale resource once per client.
+        """Fetch the locale resource once per client, or fail the update.
 
-        The meter payload identifies type and unit by index into these tables,
-        so without them a water meter's unit is unknown — which Home Assistant
-        treats as a unit change and responds to by suppressing the sensor's
-        long term statistics.
+        The meter payload identifies type and unit by index into these tables.
+        Without them every meter is united by a bare number — "8" where the
+        user had "m³" — and Home Assistant treats a changed unit as a new
+        series, discarding the statistics behind the old one. That cannot be
+        undone.
 
-        The guard is a separate flag rather than "are the tables non-empty".
-        A response carrying a mappers object with an empty or missing
-        meterType would leave the list empty, so a non-empty check would never
-        be satisfied and this endpoint would be re-fetched on every single
-        update, forever, for no benefit.
+        So an unusable response is an error, not a warning: failing costs one
+        poll, and the sensors keep their values until the next hour. An empty
+        table counts as unusable too — both mean no lookups are possible, and
+        the shape of the failure is Brunata's business.
+
+        The caching guard is a separate flag rather than "are the tables
+        non-empty", and it is only set on the success path. Its job is to stop
+        a *loaded* table being re-fetched; leaving it unset when nothing loaded
+        is a retry, not that loop.
         """
         if self._lookup_tables_loaded:
             return
@@ -467,34 +570,32 @@ class BrunataApiClient:
         if not isinstance(mappers, dict):
             raise BrunataApiError("Brunata locale resource carried no mappers")
 
-        self._meter_types = list(mappers.get("meterType") or [])
-        self._measurement_units = list(mappers.get("measurementUnit") or [])
+        meter_types = list(mappers.get("meterType") or [])
+        measurement_units = list(mappers.get("measurementUnit") or [])
+
+        if not meter_types or not measurement_units:
+            raise BrunataApiError(
+                f"Brunata locale resource carried {len(meter_types)} meter "
+                f"types and {len(measurement_units)} units, so meter types "
+                "and units cannot be resolved"
+            )
+
+        self._meter_types = meter_types
+        self._measurement_units = measurement_units
         self._lookup_tables_loaded = True
 
-        if not self._meter_types or not self._measurement_units:
-            # Not fatal: _lookup() falls back to the raw code, so entities are
-            # still created. But every meter will be named and united by a bare
-            # number, so say so once rather than only per meter.
-            _LOGGER.warning(
-                "Brunata locale resource carried %s meter types and %s units. "
-                "Meter types and units will fall back to their raw codes.",
-                len(self._meter_types),
-                len(self._measurement_units),
-            )
-        else:
-            # Logged in full, not just counted. These are Brunata's own
-            # translation tables — static, identical for every account and free
-            # of personal data — and they are the only authoritative answer to
-            # which meter types and units the service can express at all. The
-            # meters on any one account use a handful of the entries.
-            _LOGGER.debug(
-                "Loaded Brunata lookup tables (%s meter types, %s units). "
-                "meterType=%s measurementUnit=%s",
-                len(self._meter_types),
-                len(self._measurement_units),
-                self._meter_types,
-                self._measurement_units,
-            )
+        # Logged in full, not just counted. These are Brunata's own translation
+        # tables — static, identical for every account, free of personal data —
+        # and the only authoritative answer to which meter types and units the
+        # service can express at all. Any one account uses a handful.
+        _LOGGER.debug(
+            "Loaded Brunata lookup tables (%s meter types, %s units). "
+            "meterType=%s measurementUnit=%s",
+            len(self._meter_types),
+            len(self._measurement_units),
+            self._meter_types,
+            self._measurement_units,
+        )
 
     # --- HTTP ---------------------------------------------------------------
 
@@ -502,17 +603,15 @@ class BrunataApiClient:
         """GET an API endpoint, retrying once with a brand-new login on 401/403.
 
         A cached token can look locally valid while the server no longer
-        accepts it — the Keycloak session may have been revoked, or our clock
-        may disagree with theirs. Rather than immediately declare the
-        credentials wrong and prompt the user, discard the token and try
-        exactly one brand-new login. Only a 401 on *that* attempt means the
-        credentials themselves are no longer accepted.
+        accepts it — a revoked Keycloak session, or clock drift. Rather than
+        declaring the credentials wrong, discard the token and try exactly one
+        fresh login. Only a 401 on *that* attempt means the credentials are no
+        longer accepted.
 
-        Shared by both endpoints on purpose. The retry used to sit inside the
+        Shared by both endpoints on purpose. The retry used to sit in the
         meters call alone, so a stale token on the locale resource surfaced as
-        "invalid JSON" from _payload() — and since the lookup tables are only
-        fetched once per client, that failure repeated on every poll until
-        something else happened to fix it.
+        "invalid JSON" — and since the tables are fetched once per client, that
+        repeated on every poll until something else happened to fix it.
         """
         response = await self._async_get(url, force_login=False)
         if response.status_code not in (401, 403):
@@ -540,7 +639,7 @@ class BrunataApiClient:
             url,
             headers={
                 "Authorization": f"{self._token_type} {self._access_token}",
-                "Referer": METERS_URL,
+                "Referer": REFERER_URL,
             },
         )
 
@@ -560,9 +659,9 @@ class BrunataApiClient:
     def _store_tokens(self, payload: dict[str, Any]) -> None:
         """Record a token response.
 
-        Every field is replaced rather than merged. Merging previously let an
-        old expiry survive a response that carried none, so an expired token
-        could be reported as usable and the login it needed was skipped.
+        Every field is replaced rather than merged. Merging let an old expiry
+        survive a response that carried none, so an expired token could be
+        reported as usable and the login it needed was skipped.
         """
         access_token = payload.get("access_token")
         if not access_token:
@@ -693,21 +792,18 @@ class BrunataApiClient:
                 page.status_code,
             )
 
-        # When a Keycloak SSO session is still alive, this request is
-        # redirected straight to the redirect URI carrying ?code=... and no
-        # login form is rendered. That is success, not failure — treating the
-        # missing form as an error would prompt the user to re-enter
-        # credentials that are perfectly valid.
+        # A live Keycloak SSO session redirects straight to the redirect URI
+        # with ?code=... and renders no form. That is success: treating the
+        # missing form as an error would prompt for credentials that work.
         if auth_code := _code_from_url(page.url):
             _LOGGER.debug("Brunata SSO session still active — no login form needed")
             return auth_code
 
         # Not a BrunataAuthError. Nothing here says the credentials are wrong;
         # it says Keycloak rendered something this code no longer recognises.
-        # Raising an auth error would open a reauth flow and ask the user to
-        # re-enter a password that is perfectly valid — and the next attempt
-        # would fail in exactly the same place. An API error becomes
-        # UpdateFailed instead, so Home Assistant retries and the log says
+        # An auth error would open reauth and ask for a password that is
+        # perfectly valid, and the next attempt would fail in the same place.
+        # An API error becomes UpdateFailed, so HA retries and the log says
         # what actually broke.
         match = _KC_FORM_ACTION_RE.search(page.text)
         if not match:
@@ -732,10 +828,10 @@ class BrunataApiClient:
                 "Brunata rejected the login — check the email and password"
             )
 
-        # Both of these mean the credentials were accepted — Keycloak issued a
-        # redirect — and that what came back afterwards is not the shape this
-        # code expects. Same reasoning as the missing form above: an API error,
-        # not a prompt for credentials that already worked.
+        # Both mean the credentials were accepted — Keycloak issued a redirect
+        # — and that what came back is not the shape this code expects. Same
+        # reasoning as the missing form above: an API error, not a prompt for
+        # credentials that already worked.
         location = auth.headers.get("Location", "")
         if not location.startswith(KC_REDIRECT_URI):
             raise BrunataApiError(f"Unexpected redirect after login: {location}")
@@ -743,6 +839,15 @@ class BrunataApiClient:
         auth_code = _code_from_url(location)
         if not auth_code:
             raise BrunataApiError("Brunata returned no authorization code")
+
+        # Logged because the alternative routes each say so — the refresh
+        # ("access token renewed via refresh token") and the SSO shortcut
+        # ("SSO session still active"). Without this line a full login was the
+        # only path that produced no output at all, so a log could not tell
+        # "the refresh token is working" from "we log in from scratch every
+        # hour" — which is the difference between two requests per poll and
+        # four, and the one that matters to a bot-protected endpoint.
+        _LOGGER.debug("Brunata login form accepted the credentials")
         return auth_code
 
 
@@ -751,12 +856,35 @@ def _code_from_url(url: Any) -> str | None:
     return parse_qs(urlparse(str(url)).query).get("code", [None])[0]
 
 
+def _retry_after_seconds(response: httpx.Response) -> float | None:
+    """Read the Retry-After header, in its delay-seconds form.
+
+    RFC 9110 also allows an HTTP-date. That form is not read here: it needs the
+    server's clock to agree with ours to be worth anything, and getting it
+    wrong means waiting either far too long or not at all. Falling back to a
+    fixed hour is the safer failure, and the coordinator does that.
+    """
+    raw = response.headers.get("Retry-After")
+    if raw is None:
+        return None
+    try:
+        seconds = float(str(raw).strip())
+    except ValueError:
+        _LOGGER.debug("Brunata sent an unreadable Retry-After: %r", raw)
+        return None
+    return seconds if seconds > 0 else None
+
+
 def _payload(response: httpx.Response) -> Any:
     """Decode a JSON response, raising on anything that isn't usable."""
     status = response.status_code
 
     if status == 429:
-        raise BrunataApiError(f"Brunata rate limit reached ({status})", status)
+        raise BrunataApiError(
+            f"Brunata rate limit reached ({status})",
+            status,
+            _retry_after_seconds(response),
+        )
     if status >= 500:
         raise BrunataApiError(f"Brunata server error ({status})", status)
     if status == 404:
@@ -813,20 +941,15 @@ def _parse_meters(
             _LOGGER.debug("Item %s skipped: meterId is null", index)
             continue
 
-        # Before anything else is read from the item: is this a kind of meter
-        # we are willing to surface at all? See SUPPORTED_METER_TYPES — this
-        # keeps leak and smoke detectors out of Home Assistant entirely,
-        # because an hourly cloud poll must never look like an alarm.
-        type_code = _meter_type_code(item.get("meterType"))
-        if type_code not in SUPPORTED_METER_TYPES:
-            _log_unsupported_meter(str(raw_id), repr(item.get("meterType")))
-            continue
-
-        # A dismounted meter is one Brunata has physically removed. Its final
-        # reading never changes again, so carrying it would leave a device in
-        # Home Assistant frozen forever. Dropping it here makes the entity go
-        # unavailable instead, which is what a removed meter should look like.
-        dismounted = _parse_timestamp(item.get("dismountedDate"))
+        # A dismounted meter is one Brunata has physically removed; its final
+        # reading never changes again. Dropping it makes the entity go
+        # unavailable, which is what a removed meter should look like.
+        #
+        # Checked before the allowlist. Both drop the item, so the order cannot
+        # change which meters reach Home Assistant — but the allowlist writes a
+        # log line asking the user to report the meter's type, and a meter
+        # Brunata has taken off the wall is not one anybody needs identified.
+        dismounted = parse_timestamp(item.get("dismountedDate"))
         if dismounted is not None:
             _LOGGER.debug(
                 "Item %s (meter %s) skipped: dismounted on %s",
@@ -834,6 +957,31 @@ def _parse_meters(
                 raw_id,
                 dismounted.date(),
             )
+            continue
+
+        # Before anything else is read: is this a kind of meter we are willing
+        # to surface at all? See SUPPORTED_METER_TYPES.
+        type_code = _meter_type_code(item.get("meterType"))
+        if type_code not in SUPPORTED_METER_TYPES:
+            _log_unsupported_meter(str(raw_id), repr(item.get("meterType")))
+            continue
+
+        # And is its unit something we can name? A code that does not resolve,
+        # one Brunata left as "undefined", or none at all all say the same
+        # thing: nobody knows what this meter measures in.
+        #
+        # Skipped rather than filled in. Home Assistant treats a changed unit
+        # on an existing sensor as a different measurement and discards the
+        # statistics behind it, permanently — so "8" in place of "m³" is a
+        # permanent loss, while skipping is a pause the meter recovers from on
+        # the next poll that resolves. Same rule as the allowlist above,
+        # applied to the field where getting it wrong is the more expensive of
+        # the two. The meter type keeps its fallback; see _lookup().
+        unit = _resolve(
+            measurement_units or [], item.get("unit"), "measurement unit"
+        )
+        if unit is None or unit.lower() == UNDEFINED_UNIT:
+            _log_unresolved_unit(str(raw_id), repr(item.get("unit")))
             continue
 
         value = _parse_value(item.get("latestReadingValue"))
@@ -857,14 +1005,23 @@ def _parse_meters(
             meter_id=str(raw_id),
             meter_no=item.get("meterNo"),
             meter_type=_lookup(meter_types or [], item.get("meterType"), "meter type"),
-            unit=_lookup(
-                measurement_units or [], item.get("unit"), "measurement unit"
-            ),
+            # The code the allowlist check above was made on, not a second
+            # reading of the field: the two must never be able to disagree.
+            meter_type_code=type_code,
+            unit=unit,
             value=value,
-            reading_date=_parse_reading_date(item.get("latestReadingDate")),
+            reading_date=parse_reading_date(item.get("latestReadingDate")),
             placement=placement if isinstance(placement, str) and placement else None,
-            mounting_date=_parse_timestamp(item.get("mountingDate")),
-            decimals=int(decimals) if isinstance(decimals, int) else None,
+            mounting_date=parse_timestamp(item.get("mountingDate")),
+            # `not isinstance(decimals, bool)` because bool subclasses int, so
+            # `true` would otherwise become a display precision of 1.
+            # _meter_type_code() guards the same way: the two fields read the
+            # same kind of input and have to treat it the same way.
+            decimals=(
+                int(decimals)
+                if isinstance(decimals, int) and not isinstance(decimals, bool)
+                else None
+            ),
             transmitting=transmitting if isinstance(transmitting, bool) else None,
         )
 
