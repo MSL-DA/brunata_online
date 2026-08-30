@@ -28,23 +28,23 @@ _LOGGER = logging.getLogger(__name__)
 def _normalise_email(email: str) -> str:
     """Return the email in the canonical form the integration stores it in.
 
-    Applied to the whole of user_input before anything is done with it, not
-    just to the unique_id. Storing the raw string meant a value pasted from a
-    password manager as "  bruger@example.com " was sent to Keycloak with the
-    whitespace attached: the login failed, the user saw invalid_auth, and
-    nothing in the UI hinted at why. It also put the padding in the entry
-    title, and offered it back as the default on the reauth form.
+    Applied to the whole of user_input, not just the unique_id. Storing the raw
+    string meant a value pasted from a password manager as
+    "  bruger@example.com " was sent to Keycloak with the whitespace attached:
+    the login failed, the user saw invalid_auth, and nothing in the UI hinted
+    at why. It also put the padding in the entry title and offered it back as
+    the reauth form's default.
 
-    Lowercasing as well as stripping keeps the stored address and the
-    unique_id derived from it in one form, so the two can never disagree.
+    Lowercasing as well as stripping keeps the stored address and the unique_id
+    derived from it in one form, so the two can never disagree.
     """
     return email.strip().lower()
 
 
-# A bare `str` in the schema renders as an ordinary text box, so the password
-# was shown in cleartext while being typed and password managers had nothing to
-# latch onto. TextSelector gives the frontend the field type it needs: a masked
-# input for the password and an email keyboard on mobile for the address.
+# A bare `str` renders as an ordinary text box, so the password was shown in
+# cleartext while being typed and password managers had nothing to latch onto.
+# TextSelector gives the frontend the field type it needs: a masked input for
+# the password, an email keyboard on mobile for the address.
 EMAIL_SELECTOR = selector.TextSelector(
     selector.TextSelectorConfig(
         type=selector.TextSelectorType.EMAIL,
@@ -95,24 +95,21 @@ class BrunataConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Handle the initial step."""
-        # Never log user_input itself: it contains the password, and debug logs
-        # are routinely attached to bug reports. The email address is left out
-        # of the success lines below for the same reason — it identifies the
-        # account to anyone reading the report, and entry_id does the job.
+        # Never log user_input: it contains the password, and debug logs get
+        # attached to bug reports. The email is left out of the success lines
+        # for the same reason — it identifies the account, and entry_id does
+        # the job.
         _LOGGER.debug("async_step_user called (form submitted: %s)", user_input is not None)
         errors = {}
         if user_input is not None:
             # Normalised once, here, so the unique_id, the credentials sent to
-            # Brunata and the data written to the entry are all the same
-            # string. Doing it only for the unique_id left the raw value —
-            # whitespace and all — to be logged in with and stored.
+            # Brunata and the data written to the entry are the same string.
             user_input = {
                 **user_input,
                 CONF_EMAIL: _normalise_email(user_input[CONF_EMAIL]),
             }
             # Without this, "Bruger@example.com" and "bruger@example.com" are
-            # treated as two separate accounts and the duplicate check never
-            # fires.
+            # two separate accounts and the duplicate check never fires.
             await self.async_set_unique_id(user_input[CONF_EMAIL])
             self._abort_if_unique_id_configured()
             try:
@@ -157,12 +154,11 @@ class BrunataConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 **user_input,
                 CONF_EMAIL: _normalise_email(user_input[CONF_EMAIL]),
             }
-            # The account check first, the login second. Both orders end in
-            # the same wrong_account abort, but this one decides it locally:
-            # entering a different address is a mistake the unique_id already
-            # knows about, and a full Keycloak round trip against a
-            # bot-protected endpoint to reach the same answer costs the user
-            # seconds and Brunata a request for nothing.
+            # The account check first, the login second. Both orders end in the
+            # same wrong_account abort, but this one decides it locally: a full
+            # Keycloak round trip against a bot-protected endpoint to reach an
+            # answer the unique_id already knows costs the user seconds and
+            # Brunata a request for nothing.
             #
             # It also puts _abort_if_unique_id_mismatch()'s AbortFlow outside
             # the try below, where it belongs: it has to reach the flow manager
@@ -200,7 +196,6 @@ class BrunataConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             errors=errors,
         )
 
-
     async def async_step_reconfigure(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
@@ -209,8 +204,7 @@ class BrunataConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         Without this the only way to hand Home Assistant a password changed in
         Brunata Online is to wait for the integration to fail on the old one.
         Polling is hourly, so that is up to an hour of a broken integration and
-        a "could not authenticate" notification for something the user already
-        knew about and had fixed.
+        a "could not authenticate" notification for something already fixed.
 
         The address is not on the form. It is the entry's unique_id, so
         changing it here would either orphan every entity and device behind it
@@ -221,14 +215,11 @@ class BrunataConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         entry = self._get_reconfigure_entry()
         # Normalised on the way out of the entry, not assumed to have been
         # normalised on the way in. async_step_user only started doing that in
-        # 1.4.0; an entry created before then can hold "  Bruger@Example.COM "
-        # verbatim, because only the unique_id derived from it was cleaned up.
-        # Logging in with that string is the exact failure normalisation was
-        # added to prevent — Keycloak rejects it, the user is told the password
-        # is wrong, and nothing in the UI hints at why.
-        #
-        # Writing it back below is what makes such an entry correct itself the
-        # first time its owner changes their password.
+        # 1.4.0; an older entry can hold "  Bruger@Example.COM " verbatim,
+        # because only the unique_id derived from it was cleaned up. Logging in
+        # with that string is the exact failure normalisation was added to
+        # prevent. Writing it back below is what makes such an entry correct
+        # itself the first time its owner changes their password.
         email = _normalise_email(entry.data[CONF_EMAIL])
         errors = {}
 
