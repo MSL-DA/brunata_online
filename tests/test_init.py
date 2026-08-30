@@ -18,6 +18,7 @@ from pytest_homeassistant_custom_component.common import (
 
 from custom_components.brunata import (
     BrunataDataUpdateCoordinator,
+    _jittered_poll_time,
     async_remove_config_entry_device,
     async_setup_entry,
 )
@@ -249,14 +250,17 @@ async def test_polling_is_driven_by_the_wall_clock(
 ):
     """The coordinator has no update_interval on purpose.
 
-    async_track_time_change(minute=59, second=30) ties polling to the wall
-    clock, so it lands 30 seconds before each new hour no matter when Home
-    Assistant last started or the integration was last reloaded. An
-    update_interval would drift with the restart time instead, and nothing in
-    the suite noticed the difference until this test.
+    async_track_time_change ties polling to the wall clock at a per-entry
+    jittered (minute, second) close to the new hour, so it lands roughly
+    30-90 seconds before each new hour no matter when Home Assistant last
+    started or the integration was last reloaded, while different installs
+    land at different seconds. An update_interval would drift with the
+    restart time instead, and nothing in the suite noticed the difference
+    until this test.
     """
     freezer.move_to("2026-08-27 10:00:00+00:00")
     entry = _entry(hass)
+    jitter_minute, jitter_second = _jittered_poll_time(entry.entry_id)
 
     assert await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done()
@@ -266,14 +270,22 @@ async def test_polling_is_driven_by_the_wall_clock(
 
     calls_after_setup = mock_brunata_client.async_get_meters.call_count
 
-    # 10:30 is not on the schedule.
-    freezer.move_to("2026-08-27 10:30:00+00:00")
+    # A different minute within the same hour is not on the schedule. Using
+    # a different minute (rather than one second earlier) avoids a flaky
+    # collision on the rare entry_id whose jittered second is 0.
+    off_schedule = dt_util.utcnow().replace(
+        hour=10, minute=jitter_minute - 1, second=jitter_second, microsecond=0
+    )
+    freezer.move_to(off_schedule)
     async_fire_time_changed(hass, dt_util.utcnow())
     await hass.async_block_till_done()
     assert mock_brunata_client.async_get_meters.call_count == calls_after_setup
 
-    # 10:59:30 is.
-    freezer.move_to("2026-08-27 10:59:30+00:00")
+    # This entry's jittered (minute, second) is on the schedule.
+    on_schedule = dt_util.utcnow().replace(
+        hour=10, minute=jitter_minute, second=jitter_second, microsecond=0
+    )
+    freezer.move_to(on_schedule)
     async_fire_time_changed(hass, dt_util.utcnow())
     await hass.async_block_till_done()
     assert mock_brunata_client.async_get_meters.call_count == calls_after_setup + 1
@@ -287,6 +299,7 @@ async def test_unloading_stops_the_schedule(
     calling into a coordinator nobody is listening to."""
     freezer.move_to("2026-08-27 10:00:00+00:00")
     entry = _entry(hass)
+    jitter_minute, jitter_second = _jittered_poll_time(entry.entry_id)
 
     assert await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done()
@@ -296,7 +309,10 @@ async def test_unloading_stops_the_schedule(
 
     calls_after_unload = mock_brunata_client.async_get_meters.call_count
 
-    freezer.move_to("2026-08-27 10:59:30+00:00")
+    on_schedule = dt_util.utcnow().replace(
+        hour=10, minute=jitter_minute, second=jitter_second, microsecond=0
+    )
+    freezer.move_to(on_schedule)
     async_fire_time_changed(hass, dt_util.utcnow())
     await hass.async_block_till_done()
 
