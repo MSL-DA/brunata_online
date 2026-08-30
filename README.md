@@ -23,8 +23,7 @@ Built for [Brunata Online](https://online.brunata.com) accounts. If Brunata Onli
 - Devices are named after the placement you set in Brunata Online, so a meter shows up as `Water - Bathroom (Cold)` rather than an unrecognisable serial number.
 - Groups sensors under devices for easy management.
 - Standard Home Assistant device classes and state classes, with full Long Term Statistics support.
-- Polls Brunata Online once an hour at xx:59:30 — how often a *new* reading actually appears depends on the meter's own reporting interval, not on this schedule.
-
+- Polls Brunata Online once an hour at a fixed time between xx:58:30 and xx:59:30. This time is automatically chosen when the integration is installed and remains the same afterwards. How often a *new* reading actually appears depends on the meter's own reporting interval, not on this schedule.
 ---
 
 ## 📦 Installation
@@ -63,9 +62,3 @@ https://github.com/MSL-DA/brunata_online
 ## 📖 Documentation
 
 See the [wiki](https://github.com/MSL-DA/brunata_online/wiki) for details on using the sensors — including which meters work in the Energy dashboard and why consumption graphs show 0 right after setup.
-
----
-
-## 🔗 Credits
-
-Special thanks to the [brunata-api](https://pypi.org/project/brunata-api/) project, which this integration was originally built on. The client now lives in `custom_components/brunata/api.py`, so the integration has no external Python dependencies.
