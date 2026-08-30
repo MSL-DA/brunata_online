@@ -9,6 +9,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_EMAIL, CONF_PASSWORD, Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.event import async_track_time_change
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
@@ -19,7 +20,7 @@ from .api import (
     BrunataConnectionError,
     BrunataMeter,
 )
-from .const import DOMAIN
+from .const import DEVICE_ID_PREFIX, DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -29,11 +30,9 @@ type BrunataConfigEntry = ConfigEntry[BrunataDataUpdateCoordinator]
 
 # Nothing in this module touches the log level, and nothing should. An options
 # flow used to set it from a stored flag, duplicating Home Assistant's own
-# "Enable debug logging" button under the three-dot menu. The button does the
-# same job and adds a downloadable log for the session, so the option was
-# removed rather than kept alongside it. Point users at the button, or at a
-# logger: block in configuration.yaml when the setting has to survive a
-# restart.
+# "Enable debug logging" button, which does the same job and adds a
+# downloadable log for the session. Point users at that button, or at a
+# `logger:` block in configuration.yaml when it has to survive a restart.
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: BrunataConfigEntry) -> bool:
@@ -44,14 +43,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: BrunataConfigEntry) -> b
     coordinator = BrunataDataUpdateCoordinator(hass, entry, client)
 
     # async_config_entry_first_refresh() converts a failed first refresh into
-    # ConfigEntryAuthFailed (if raised) or ConfigEntryNotReady (otherwise) —
-    # including while the network is still coming up, where HA retries with its
-    # own backoff. Both are simply allowed to bubble up.
+    # ConfigEntryAuthFailed or ConfigEntryNotReady, and HA retries the latter
+    # with its own backoff. Both are allowed to bubble up.
     try:
         await coordinator.async_config_entry_first_refresh()
-    except Exception:
+    except BaseException:
         # Setup is being abandoned, so async_unload_entry will never run for
         # this attempt — close the client here or every retry leaks one.
+        #
+        # BaseException, not Exception: asyncio.CancelledError is a
+        # BaseException, and cancellation is exactly what HA does to a setup
+        # still retrying when it shuts down. That path used to slip past this
+        # handler and leak the httpx client it had just built.
         await client.async_close()
         raise
 
@@ -88,6 +91,76 @@ async def async_unload_entry(hass: HomeAssistant, entry: BrunataConfigEntry) -> 
     return unload_ok
 
 
+async def async_remove_config_entry_device(
+    hass: HomeAssistant,
+    entry: BrunataConfigEntry,
+    device: dr.DeviceEntry,
+) -> bool:
+    """Allow deleting a device whose meter Brunata no longer reports.
+
+    Home Assistant only offers the delete button when this function exists.
+    Without it a dismounted meter stays in the device registry forever: the
+    entity goes unavailable — correct — but the device cannot be removed short
+    of deleting the whole config entry and setting it up again. Meters are
+    replaced every eight to ten years, so that is not hypothetical.
+
+    A device is removable exactly when its meter is absent from the latest
+    data. Identifiers are matched against what the coordinator holds rather
+    than against the entity registry, because the payload is what decides
+    whether the meter still exists.
+
+    A failed update is not a reason to allow anything: the coordinator keeps
+    the previous data, but if that were ever empty at the same time, this would
+    happily agree to delete every device the integration owns.
+
+    runtime_data is read defensively for the same reason as in
+    async_unload_entry. Home Assistant's remove handler checks that the device
+    and entry exist, that removal is supported and that the integration
+    imports — but *not* that the entry is loaded, so this can run for an entry
+    that never set up, where a direct read raises AttributeError instead of
+    refusing cleanly.
+
+    Agreeing to a removal also forgets the meter id, so the sensor platform can
+    build the entity again if Brunata ever reports that meter again — see
+    known_meter_ids. Only ids we have just agreed to delete are forgotten. An
+    id whose entity is merely unavailable must stay, because that entity is
+    still registered and a second one with the same unique_id would be
+    rejected by the platform.
+    """
+    coordinator: BrunataDataUpdateCoordinator | None = getattr(
+        entry, "runtime_data", None
+    )
+    if coordinator is None:
+        _LOGGER.debug(
+            "Refusing to remove device %s: the config entry is not loaded, so "
+            "there is no meter list to check it against",
+            device.id,
+        )
+        return False
+
+    if not coordinator.last_update_success:
+        _LOGGER.debug(
+            "Refusing to remove device %s: the last update failed, so the "
+            "meter list cannot be trusted to be complete",
+            device.id,
+        )
+        return False
+
+    live = {
+        (DOMAIN, f"{DEVICE_ID_PREFIX}{meter_id}")
+        for meter_id in (coordinator.data or {})
+    }
+    if device.identifiers & live:
+        return False
+
+    for domain, identifier in device.identifiers:
+        if domain == DOMAIN and identifier.startswith(DEVICE_ID_PREFIX):
+            coordinator.known_meter_ids.discard(
+                identifier.removeprefix(DEVICE_ID_PREFIX)
+            )
+    return True
+
+
 class BrunataDataUpdateCoordinator(DataUpdateCoordinator[dict[str, BrunataMeter]]):
     """Fetch meter data from Brunata on a schedule."""
 
@@ -99,10 +172,15 @@ class BrunataDataUpdateCoordinator(DataUpdateCoordinator[dict[str, BrunataMeter]
     ) -> None:
         """Initialize."""
         self.client = client
+        # Meter ids the sensor platform has already built an entity for. Here
+        # rather than in a closure inside sensor.py, because
+        # async_remove_config_entry_device() has to take an id back out when
+        # the device and its entity are gone.
+        self.known_meter_ids: set[str] = set()
         super().__init__(
             hass,
             _LOGGER,
-            # Passed explicitly rather than picked up from the ContextVar. It
+            # Passed explicitly rather than picked up from the ContextVar: it
             # is what lets the coordinator start the reauth flow when
             # ConfigEntryAuthFailed is raised.
             config_entry=entry,
