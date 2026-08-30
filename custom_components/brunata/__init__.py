@@ -4,15 +4,16 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_EMAIL, CONF_PASSWORD, Platform
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.event import async_track_time_change
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.util import dt as dt_util
 
 from .api import (
     BrunataApiClient,
@@ -29,11 +30,38 @@ PLATFORMS: list[Platform] = [Platform.SENSOR]
 
 type BrunataConfigEntry = ConfigEntry[BrunataDataUpdateCoordinator]
 
-# Window: 60 seconds wide, ending at 59:30 (not starting there) so every
-# install still has ~30s of margin to retry before the hour rolls over.
+# The poll lands in a 60-second window ending at 59:30, so every install has at
+# least 30 seconds left before the hour rolls over. That margin is for the
+# request itself to finish, not for a retry — there is none. Measured round
+# trips are 0.2-1.6 s, so 30 s is generous; it is cheap and it means a slow
+# response still lands its reading in the hour it was taken.
 _POLL_WINDOW_BASE_MINUTE = 58
 _POLL_WINDOW_BASE_SECOND = 30
 _POLL_WINDOW_SPREAD_SECONDS = 60
+
+# Brunata's meters report rarely: a heat cost allocator can go weeks between
+# readings, and even the water meters change at most a few times a day. An
+# hourly poll is therefore already far more often than the data changes, and
+# most polls return a payload byte-identical to the last one.
+#
+# So after this many consecutive polls where no meter's reading or date moved,
+# the schedule drops to one poll every _IDLE_POLL_EVERY_HOURS hours. Any change
+# at all puts it straight back on the hour.
+#
+# The cost, stated plainly: a reading that arrives during a skipped hour is
+# recorded up to four hours late, and Home Assistant attributes consumption to
+# the hour it was *polled*, not the hour Brunata dated it. The alignment was
+# already coarse — a reading dated three days ago is recorded today either way
+# — so this trades a little more coarseness for roughly a quarter of the
+# requests during quiet periods. Six unchanged polls before backing off means
+# a normally-reporting water meter never reaches the idle state at all.
+_IDLE_AFTER_UNCHANGED_POLLS = 6
+_IDLE_POLL_EVERY_HOURS = 4
+
+# How long to stay away after an HTTP 429 with no usable Retry-After. One hour
+# is the next scheduled poll anyway, so this only bites when Brunata asks for
+# longer than that.
+_RATE_LIMIT_DEFAULT_BACKOFF = timedelta(hours=1)
 
 
 def _entry_jitter_seconds(entry_id: str, spread: int = _POLL_WINDOW_SPREAD_SECONDS) -> int:
@@ -89,6 +117,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: BrunataConfigEntry) -> b
 
     async def _handle_scheduled_refresh(now: datetime) -> None:
         """Refresh on the wall clock rather than on a rolling interval."""
+        if not coordinator.async_should_poll(now):
+            return
         await coordinator.async_refresh()
 
     # Poll close to the new hour, jittered per config entry so installs don't
@@ -211,6 +241,13 @@ class BrunataDataUpdateCoordinator(DataUpdateCoordinator[dict[str, BrunataMeter]
         # async_remove_config_entry_device() has to take an id back out when
         # the device and its entity are gone.
         self.known_meter_ids: set[str] = set()
+        # What the last successful poll returned, reduced to the fields that
+        # decide whether a poll was worth making. See async_should_poll().
+        self._readings_fingerprint: tuple | None = None
+        self._unchanged_polls = 0
+        self._skipped_ticks = 0
+        # Set when Brunata answers 429. See async_should_poll().
+        self._rate_limited_until: datetime | None = None
         super().__init__(
             hass,
             _LOGGER,
@@ -223,10 +260,73 @@ class BrunataDataUpdateCoordinator(DataUpdateCoordinator[dict[str, BrunataMeter]
             # registered in async_setup_entry.
         )
 
+    @callback
+    def async_should_poll(self, now: datetime) -> bool:
+        """Decide whether this scheduled tick is worth a request.
+
+        Two reasons to stay quiet, in order:
+
+        1. Brunata answered 429 and asked us to wait. That is the one status
+           where retrying quickly is actively harmful — the server has just
+           said we are asking too much — so it is honoured to the second.
+        2. Nothing has changed for a while. See _IDLE_AFTER_UNCHANGED_POLLS.
+
+        Deliberately not "skip if the newest reading is old": that would guess
+        when Brunata publishes. This only counts what actually happened.
+        """
+        if self._rate_limited_until is not None:
+            if now < self._rate_limited_until:
+                _LOGGER.debug(
+                    "Skipping this poll: Brunata rate-limited us until %s",
+                    self._rate_limited_until,
+                )
+                return False
+            self._rate_limited_until = None
+
+        if self._unchanged_polls < _IDLE_AFTER_UNCHANGED_POLLS:
+            return True
+
+        self._skipped_ticks += 1
+        if self._skipped_ticks < _IDLE_POLL_EVERY_HOURS:
+            _LOGGER.debug(
+                "Skipping this poll: %s consecutive polls returned unchanged "
+                "readings, so polling every %s hours until something moves",
+                self._unchanged_polls,
+                _IDLE_POLL_EVERY_HOURS,
+            )
+            return False
+
+        self._skipped_ticks = 0
+        return True
+
+    def _note_readings(self, meters: dict[str, BrunataMeter]) -> None:
+        """Record whether this payload said anything new.
+
+        Only the reading and its date are compared. Placement, transmitting and
+        the rest can change without any new measurement existing, and it is the
+        measurement that decides whether polling this often is earning its
+        requests.
+        """
+        fingerprint = tuple(
+            sorted(
+                (meter.meter_id, meter.reading_date, meter.value)
+                for meter in meters.values()
+            )
+        )
+        if fingerprint == self._readings_fingerprint:
+            self._unchanged_polls += 1
+            return
+
+        if self._unchanged_polls >= _IDLE_AFTER_UNCHANGED_POLLS:
+            _LOGGER.debug("Readings moved — back to polling every hour")
+        self._readings_fingerprint = fingerprint
+        self._unchanged_polls = 0
+        self._skipped_ticks = 0
+
     async def _async_update_data(self) -> dict[str, BrunataMeter]:
         """Fetch data from the API."""
         try:
-            return await self.client.async_get_meters()
+            meters = await self.client.async_get_meters()
         except BrunataAuthError as err:
             # Propagates so Home Assistant starts the re-authentication flow.
             raise ConfigEntryAuthFailed(str(err)) from err
@@ -239,4 +339,19 @@ class BrunataDataUpdateCoordinator(DataUpdateCoordinator[dict[str, BrunataMeter]
                 return self.data
             raise UpdateFailed(str(err)) from err
         except BrunataApiError as err:
+            if err.status == 429:
+                wait = (
+                    timedelta(seconds=err.retry_after)
+                    if err.retry_after is not None
+                    else _RATE_LIMIT_DEFAULT_BACKOFF
+                )
+                self._rate_limited_until = dt_util.utcnow() + wait
+                _LOGGER.warning(
+                    "Brunata rate-limited this integration; not polling again "
+                    "until %s",
+                    self._rate_limited_until,
+                )
             raise UpdateFailed(str(err)) from err
+
+        self._note_readings(meters)
+        return meters
