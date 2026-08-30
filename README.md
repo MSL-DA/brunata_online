@@ -23,7 +23,7 @@ Built for [Brunata Online](https://online.brunata.com) accounts. If Brunata Onli
 - Devices are named after the placement you set in Brunata Online, so a meter shows up as `Water - Bathroom (Cold)` rather than an unrecognisable serial number.
 - Groups sensors under devices for easy management.
 - Standard Home Assistant device classes and state classes, with full Long Term Statistics support.
-- Polls Brunata once an hour via `DataUpdateCoordinator`, at xx:59:30 — how often a *new* reading actually appears depends on the meter's own reporting interval, not on this schedule.
+- Polls Brunata Online once an hour at xx:59:30 — how often a *new* reading actually appears depends on the meter's own reporting interval, not on this schedule.
 
 ---
 
