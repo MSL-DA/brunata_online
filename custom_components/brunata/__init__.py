@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from datetime import datetime
 
@@ -26,6 +27,32 @@ _LOGGER = logging.getLogger(__name__)
 PLATFORMS: list[Platform] = [Platform.SENSOR]
 
 type BrunataConfigEntry = ConfigEntry[BrunataDataUpdateCoordinator]
+
+# Window: 60 seconds wide, ending at 59:30 (not starting there) so every
+# install still has ~30s of margin to retry before the hour rolls over.
+_POLL_WINDOW_BASE_MINUTE = 58
+_POLL_WINDOW_BASE_SECOND = 30
+_POLL_WINDOW_SPREAD_SECONDS = 60
+
+
+def _entry_jitter_seconds(entry_id: str, spread: int = _POLL_WINDOW_SPREAD_SECONDS) -> int:
+    """Derive a stable 0..(spread-1) second offset from the entry_id.
+
+    Deterministic per config entry (stable across HA restarts and reloads),
+    so a given install always polls at the same wall-clock second — but
+    different installs land at different seconds, avoiding every instance
+    hitting Brunata's endpoint in the same one-second window.
+    """
+    digest = hashlib.sha256(entry_id.encode()).hexdigest()
+    return int(digest, 16) % spread
+
+
+def _jittered_poll_time(entry_id: str) -> tuple[int, int]:
+    """Return (minute, second) somewhere in the 58:30-59:29 window."""
+    total_second = _POLL_WINDOW_BASE_SECOND + _entry_jitter_seconds(entry_id)
+    minute = _POLL_WINDOW_BASE_MINUTE + total_second // 60
+    second = total_second % 60
+    return minute, second
 
 # Nothing in this module touches the log level, and nothing should. An options
 # flow used to set it from a stored flag, duplicating Home Assistant's own
@@ -61,12 +88,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: BrunataConfigEntry) -> b
         """Refresh on the wall clock rather than on a rolling interval."""
         await coordinator.async_refresh()
 
-    # Poll 30 seconds before every new hour. DataUpdateCoordinator's
-    # update_interval would drift with whenever HA last started or the
-    # integration was last reloaded.
+    # Poll close to the new hour, jittered per config entry so installs don't
+    # all hit Brunata's endpoint in the same one-second window. Deterministic
+    # per entry_id (stable across restarts) rather than random per restart,
+    # so a given install's poll time stays predictable for debugging.
+    # DataUpdateCoordinator's update_interval would instead drift with
+    # whenever HA last started or the integration was last reloaded.
+    jitter_minute, jitter_second = _jittered_poll_time(entry.entry_id)
     entry.async_on_unload(
         async_track_time_change(
-            hass, _handle_scheduled_refresh, minute=59, second=30
+            hass,
+            _handle_scheduled_refresh,
+            minute=jitter_minute,
+            second=jitter_second,
         )
     )
 
