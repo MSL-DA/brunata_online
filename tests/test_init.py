@@ -2,6 +2,8 @@
 
 import asyncio
 import logging
+from dataclasses import replace
+from datetime import timedelta
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -251,12 +253,13 @@ async def test_polling_is_driven_by_the_wall_clock(
     """The coordinator has no update_interval on purpose.
 
     async_track_time_change ties polling to the wall clock at a per-entry
-    jittered (minute, second) close to the new hour, so it lands roughly
-    30-90 seconds before each new hour no matter when Home Assistant last
-    started or the integration was last reloaded, while different installs
-    land at different seconds. An update_interval would drift with the
-    restart time instead, and nothing in the suite noticed the difference
-    until this test.
+    jittered (minute, second) in the 58:30-59:29 window, so it lands 30-90
+    seconds before each new hour no matter when Home Assistant last started or
+    the integration was last reloaded, while different installs land at
+    different seconds. The margin is for the request itself to finish inside
+    the hour — measured round trips are 0.2-1.6 s — not for a retry, of which
+    there is none. An update_interval would drift with the restart time
+    instead, and nothing in the suite noticed the difference until this test.
     """
     freezer.move_to("2026-08-27 10:00:00+00:00")
     entry = _entry(hass)
@@ -317,6 +320,123 @@ async def test_unloading_stops_the_schedule(
     await hass.async_block_till_done()
 
     assert mock_brunata_client.async_get_meters.call_count == calls_after_unload
+
+
+# --- not polling more often than the data changes ---------------------------
+
+
+async def test_unchanged_readings_back_the_schedule_off(
+    hass: HomeAssistant, mock_brunata_client, mock_meter
+):
+    """Brunata's meters report rarely, so most polls return the same payload.
+
+    After six consecutive unchanged polls the schedule drops to one poll every
+    four hours. The counting is on the readings only — reading date and value —
+    because a changed placement is not a reason to keep asking hourly.
+    """
+    entry, _ = await _setup_with_meter(hass, mock_brunata_client, mock_meter)
+    coordinator = entry.runtime_data
+    now = dt_util.utcnow()
+
+    # The first refresh happened during setup. Five more identical ones reach
+    # the threshold without crossing it.
+    for _ in range(5):
+        assert coordinator.async_should_poll(now) is True
+        await coordinator.async_refresh()
+    assert coordinator._unchanged_polls == 5
+
+    assert coordinator.async_should_poll(now) is True
+    await coordinator.async_refresh()
+    assert coordinator._unchanged_polls == 6
+
+    # Now three ticks are skipped and the fourth polls.
+    assert coordinator.async_should_poll(now) is False
+    assert coordinator.async_should_poll(now) is False
+    assert coordinator.async_should_poll(now) is False
+    assert coordinator.async_should_poll(now) is True
+
+
+async def test_a_new_reading_puts_the_schedule_back_on_the_hour(
+    hass: HomeAssistant, mock_brunata_client, mock_meter
+):
+    """Backing off must not delay the next real reading by more than one cycle.
+
+    A payload that differs in reading date or value resets the counter, so the
+    following hour is polled again.
+    """
+    entry, _ = await _setup_with_meter(hass, mock_brunata_client, mock_meter)
+    coordinator = entry.runtime_data
+    now = dt_util.utcnow()
+
+    for _ in range(6):
+        await coordinator.async_refresh()
+    assert coordinator.async_should_poll(now) is False
+
+    mock_brunata_client.async_get_meters = AsyncMock(
+        return_value={"12345": replace(mock_meter, value=999.0)}
+    )
+    await coordinator.async_refresh()
+
+    assert coordinator._unchanged_polls == 0
+    assert coordinator.async_should_poll(now) is True
+
+
+async def test_a_rate_limit_is_honoured_to_the_second(
+    hass: HomeAssistant, mock_brunata_client, mock_meter
+):
+    """429 is the one status where retrying quickly is actively harmful.
+
+    Brunata has just said we are asking too much, so Retry-After is obeyed
+    rather than treated as one more failed update. With an hourly schedule
+    this only bites when Brunata asks for longer than an hour — which is
+    exactly the case worth getting right.
+    """
+    entry, _ = await _setup_with_meter(hass, mock_brunata_client, mock_meter)
+    coordinator = entry.runtime_data
+
+    mock_brunata_client.async_get_meters = AsyncMock(
+        side_effect=BrunataApiError("Brunata rate limit reached (429)", 429, 7200)
+    )
+    await coordinator.async_refresh()
+    assert coordinator.last_update_success is False
+
+    now = dt_util.utcnow()
+    assert coordinator.async_should_poll(now + timedelta(hours=1)) is False
+    assert coordinator.async_should_poll(now + timedelta(hours=3)) is True
+
+
+async def test_a_rate_limit_without_retry_after_waits_an_hour(
+    hass: HomeAssistant, mock_brunata_client, mock_meter
+):
+    """No usable header means a fixed hour, which is the next poll anyway —
+    the point is that a header asking for longer is never shortened."""
+    entry, _ = await _setup_with_meter(hass, mock_brunata_client, mock_meter)
+    coordinator = entry.runtime_data
+
+    mock_brunata_client.async_get_meters = AsyncMock(
+        side_effect=BrunataApiError("Brunata rate limit reached (429)", 429)
+    )
+    await coordinator.async_refresh()
+
+    now = dt_util.utcnow()
+    assert coordinator.async_should_poll(now + timedelta(minutes=30)) is False
+    assert coordinator.async_should_poll(now + timedelta(minutes=61)) is True
+
+
+async def test_other_errors_do_not_hold_the_schedule(
+    hass: HomeAssistant, mock_brunata_client, mock_meter
+):
+    """Only 429 is a request to stay away. A 500 is Brunata having a bad day,
+    and the next hourly poll is the right response to that."""
+    entry, _ = await _setup_with_meter(hass, mock_brunata_client, mock_meter)
+    coordinator = entry.runtime_data
+
+    mock_brunata_client.async_get_meters = AsyncMock(
+        side_effect=BrunataApiError("Brunata server error (503)", 503)
+    )
+    await coordinator.async_refresh()
+
+    assert coordinator.async_should_poll(dt_util.utcnow()) is True
 
 
 # --- the log level is not ours to set --------------------------------------
