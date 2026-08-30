@@ -16,7 +16,7 @@ from homeassistant.core import HomeAssistant, State
 from homeassistant.helpers import device_registry as dr
 from pytest_homeassistant_custom_component.common import MockConfigEntry, mock_restore_cache
 
-from custom_components.brunata.api import SUPPORTED_METER_TYPES
+from custom_components.brunata.api import BASE_URL, SUPPORTED_METER_TYPES
 from custom_components.brunata.const import DOMAIN
 from custom_components.brunata.sensor import (
     ANNUAL_RESET_METER_TYPES,
@@ -958,6 +958,23 @@ async def test_sensor_device_name_falls_back_without_placement(mock_meter):
     entity = _make_entity(coordinator, mock_meter)
 
     assert entity._attr_device_info["name"] == "Water (12345)"
+
+
+async def test_sensor_device_carries_the_serial_and_a_link_to_the_portal(mock_meter):
+    """The device page shows the meter number and links to Brunata Online.
+
+    The serial is redacted in diagnostics.py, and that is not a contradiction:
+    the redaction is about publishing the number in a public issue, not about
+    showing an owner their own meter. The link points at the account root
+    rather than the readings page, because REFERER_URL is a request header and
+    reusing it here would overload what that constant means.
+    """
+    coordinator = MagicMock()
+    coordinator.data = {"12345": mock_meter}
+    entity = _make_entity(coordinator, mock_meter)
+
+    assert entity._attr_device_info["serial_number"] == mock_meter.meter_no
+    assert entity._attr_device_info["configuration_url"] == BASE_URL
 
 
 async def test_sensor_extra_state_attributes_include_placement_when_set(mock_meter):
