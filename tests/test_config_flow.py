@@ -1,5 +1,6 @@
 """Test Brunata config flow."""
 from unittest.mock import patch
+
 from homeassistant import config_entries, data_entry_flow
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import selector
@@ -8,6 +9,7 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 from custom_components.brunata.config_flow import CannotConnect, InvalidAuth
 from custom_components.brunata.const import DOMAIN
 
+
 async def test_flow_user_init(hass: HomeAssistant):
     """Test the initialization of the form in the config flow."""
     result = await hass.config_entries.flow.async_init(
@@ -15,6 +17,7 @@ async def test_flow_user_init(hass: HomeAssistant):
     )
     assert result["type"] == data_entry_flow.FlowResultType.FORM
     assert result["step_id"] == "user"
+
 
 async def test_flow_user_success(hass: HomeAssistant, mock_brunata_client):
     """Test a successful user login."""
@@ -42,6 +45,7 @@ async def test_flow_user_success(hass: HomeAssistant, mock_brunata_client):
         "password": "password123",
     }
 
+
 async def test_flow_user_invalid_auth(hass: HomeAssistant, mock_brunata_client):
     """Test invalid authentication handling."""
     result = await hass.config_entries.flow.async_init(
@@ -63,6 +67,7 @@ async def test_flow_user_invalid_auth(hass: HomeAssistant, mock_brunata_client):
 
     assert result2["type"] == data_entry_flow.FlowResultType.FORM
     assert result2["errors"] == {"base": "invalid_auth"}
+
 
 async def test_flow_reauth(hass: HomeAssistant, mock_brunata_client):
     """Test a successful re-authentication updates and reloads the entry."""
@@ -103,6 +108,7 @@ async def test_flow_reauth(hass: HomeAssistant, mock_brunata_client):
     assert result2["reason"] == "reauth_successful"
     assert entry.data["password"] == "new_password123"
 
+
 async def test_flow_reauth_invalid_auth(hass: HomeAssistant, mock_brunata_client):
     """Test that invalid credentials during reauth show an error and keep the old data."""
     entry = MockConfigEntry(
@@ -138,6 +144,7 @@ async def test_flow_reauth_invalid_auth(hass: HomeAssistant, mock_brunata_client
     assert result2["errors"] == {"base": "invalid_auth"}
     assert entry.data["password"] == "old_password"
 
+
 async def test_flow_reauth_cannot_connect(hass: HomeAssistant, mock_brunata_client):
     """Test that a connection error during reauth is shown as cannot_connect, not unknown."""
     entry = MockConfigEntry(
@@ -170,6 +177,7 @@ async def test_flow_reauth_cannot_connect(hass: HomeAssistant, mock_brunata_clie
 
     assert result2["type"] == data_entry_flow.FlowResultType.FORM
     assert result2["errors"] == {"base": "cannot_connect"}
+
 
 async def test_flow_reauth_wrong_account(hass: HomeAssistant, mock_brunata_client):
     """Test that reauthenticating with a different email aborts instead of
@@ -243,6 +251,7 @@ async def test_reauth_rejects_the_wrong_account_without_logging_in(
 
     assert result2["reason"] == "wrong_account"
     assert validate.call_count == 0
+
 
 async def test_credential_fields_use_selectors(hass: HomeAssistant, mock_brunata_client):
     """The password field must render masked, in both the initial and the
