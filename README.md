@@ -7,7 +7,7 @@
 
 # Brunata Online for Home Assistant
 
-The **Brunata Integration** for Home Assistant allows you to monitor your Brunata meters (water and heat cost allocator) directly in your dashboard. Meters are automatically discovered and grouped under devices for easy management.
+The **Brunata Integration** for Home Assistant allows you to monitor your Brunata meters (water, heat cost allocator and electricity) directly in your dashboard. Meters are automatically discovered and grouped under devices for easy management.
 
 Built for [Brunata Online](https://online.brunata.com) accounts. If Brunata Online is available in your country, this integration is expected to work.
 
@@ -19,11 +19,13 @@ Built for [Brunata Online](https://online.brunata.com) accounts. If Brunata Onli
 ## ✨ Features
 
 - Automatic discovery of all supported meters on your Brunata Online account.
-- Supports water (`m³`) and heat cost allocator (`units`) meters — the two meter types verified against live data. Energy meters (`kWh`) aren't supported yet; [issue #39](https://github.com/MSL-DA/brunata_online/issues/39) explains why and how you can help
+- Supports water (`m³`), heat cost allocator (`units`) and electricity (`kWh`) meters. If you have a meter that isn't supported, please [open an issue](https://github.com/MSL-DA/brunata_online/issues) — the log line it produces contains what's needed to add it.
 - Devices are named after the placement you set in Brunata Online, so a meter shows up as `Water - Bathroom (Cold)` rather than an unrecognisable serial number.
 - Groups sensors under devices for easy management.
 - Standard Home Assistant device classes and state classes, with full Long Term Statistics support.
 - Polls Brunata Online once an hour at a fixed time between xx:58:30 and xx:59:30. This time is automatically chosen when the integration is installed and remains the same afterwards. How often a *new* reading actually appears depends on the meter's own reporting interval, not on this schedule.
+- When nothing has changed for several hours in a row, polling drops to once every four hours until a reading moves. Brunata's meters report rarely, and this keeps the integration from asking for the same numbers 24 times a day.
+
 ---
 
 ## 📦 Installation
