@@ -1,4 +1,5 @@
 """Test Brunata sensor."""
+
 import logging
 from dataclasses import replace
 from datetime import UTC, date, datetime
