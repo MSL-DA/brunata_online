@@ -2,7 +2,6 @@
 
 import asyncio
 import logging
-from dataclasses import replace
 from datetime import timedelta
 from unittest.mock import AsyncMock, patch
 
@@ -322,63 +321,28 @@ async def test_unloading_stops_the_schedule(
     assert mock_brunata_client.async_get_meters.call_count == calls_after_unload
 
 
-# --- not polling more often than the data changes ---------------------------
+# --- staying away only when Brunata asks -----------------------------------
 
 
-async def test_unchanged_readings_back_the_schedule_off(
+async def test_unchanged_readings_do_not_slow_the_schedule(
     hass: HomeAssistant, mock_brunata_client, mock_meter
 ):
-    """Brunata's meters report rarely, so most polls return the same payload.
+    """The schedule is unconditional: every hour, whatever the payload said.
 
-    After six consecutive unchanged polls the schedule drops to one poll every
-    four hours. The counting is on the readings only — reading date and value —
-    because a changed placement is not a reason to keep asking hourly.
+    An adaptive backoff after a run of unchanged readings was tried and rolled
+    back — see async_should_poll(). It is cheap to reintroduce by accident, and
+    the cost is invisible in normal use: readings would still arrive, just
+    attributed to a later hour than the one they belong to. This test is what
+    makes that regression fail loudly instead of silently.
     """
     entry, _ = await _setup_with_meter(hass, mock_brunata_client, mock_meter)
     coordinator = entry.runtime_data
     now = dt_util.utcnow()
 
-    # The first refresh happened during setup. Five more identical ones reach
-    # the threshold without crossing it.
-    for _ in range(5):
+    # Well past any threshold a backoff would plausibly use.
+    for _ in range(12):
+        await coordinator.async_refresh()
         assert coordinator.async_should_poll(now) is True
-        await coordinator.async_refresh()
-    assert coordinator._unchanged_polls == 5
-
-    assert coordinator.async_should_poll(now) is True
-    await coordinator.async_refresh()
-    assert coordinator._unchanged_polls == 6
-
-    # Now three ticks are skipped and the fourth polls.
-    assert coordinator.async_should_poll(now) is False
-    assert coordinator.async_should_poll(now) is False
-    assert coordinator.async_should_poll(now) is False
-    assert coordinator.async_should_poll(now) is True
-
-
-async def test_a_new_reading_puts_the_schedule_back_on_the_hour(
-    hass: HomeAssistant, mock_brunata_client, mock_meter
-):
-    """Backing off must not delay the next real reading by more than one cycle.
-
-    A payload that differs in reading date or value resets the counter, so the
-    following hour is polled again.
-    """
-    entry, _ = await _setup_with_meter(hass, mock_brunata_client, mock_meter)
-    coordinator = entry.runtime_data
-    now = dt_util.utcnow()
-
-    for _ in range(6):
-        await coordinator.async_refresh()
-    assert coordinator.async_should_poll(now) is False
-
-    mock_brunata_client.async_get_meters = AsyncMock(
-        return_value={"12345": replace(mock_meter, value=999.0)}
-    )
-    await coordinator.async_refresh()
-
-    assert coordinator._unchanged_polls == 0
-    assert coordinator.async_should_poll(now) is True
 
 
 async def test_a_rate_limit_is_honoured_to_the_second(

@@ -24,7 +24,6 @@ Built for [Brunata Online](https://online.brunata.com) accounts. If Brunata Onli
 - Groups sensors under devices for easy management.
 - Standard Home Assistant device classes and state classes, with full Long Term Statistics support.
 - Polls Brunata Online once an hour at a fixed time between xx:58:30 and xx:59:30. This time is automatically chosen when the integration is installed and remains the same afterwards. How often a *new* reading actually appears depends on the meter's own reporting interval, not on this schedule.
-- When nothing has changed for several hours in a row, polling drops to once every four hours until a reading moves. Brunata's meters report rarely, and this keeps the integration from asking for the same numbers 24 times a day.
 
 ---
 
