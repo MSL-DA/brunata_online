@@ -13,4 +13,4 @@
 # ruff.toml selects rules explicitly, so a Ruff release that changes the
 # default rule set does not change what runs here. A bump can still surface new
 # findings within the selected rules; take them one release at a time.
-ruff==0.14.2
+ruff==0.16.5
