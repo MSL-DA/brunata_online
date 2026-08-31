@@ -32,12 +32,17 @@ LOGIN_FORM_HTML = (
     '<input name="username"><input name="password"></form></body></html>'
 )
 
+# What Brunata's token endpoint reports as the access token's lifetime. Measured
+# rather than assumed: a debug log from 30 August 2026 shows the client renewing
+# via the refresh token on every second hourly poll and skipping it on the
+# others, which puts the real lifetime between 46 and 104 minutes.
+TOKEN_LIFETIME_SECONDS = 3600
+
 TOKEN_RESPONSE = {
     "access_token": "new-access-token",
     "refresh_token": "new-refresh-token",
     "token_type": "Bearer",
-    "expires_in": 300,
-    "refresh_expires_in": 1800,
+    "expires_in": TOKEN_LIFETIME_SECONDS,
 }
 
 
@@ -323,7 +328,7 @@ async def test_expiry_is_derived_from_expires_in_only():
     http = FakeHttpClient()
     client = make_client(http)
 
-    client._store_tokens({"access_token": "A", "expires_in": 300})
+    client._store_tokens({"access_token": "A", "expires_in": TOKEN_LIFETIME_SECONDS})
     assert client._token_is_usable is True
 
     client._store_tokens({"access_token": "B"})
