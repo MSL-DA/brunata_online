@@ -369,22 +369,56 @@ async def test_a_rate_limit_is_honoured_to_the_second(
     assert coordinator.async_should_poll(now + timedelta(hours=3)) is True
 
 
-async def test_a_rate_limit_without_retry_after_waits_an_hour(
+async def test_a_rate_limit_without_retry_after_lets_the_next_tick_through(
     hass: HomeAssistant, mock_brunata_client, mock_meter
 ):
-    """No usable header means a fixed hour, which is the next poll anyway —
-    the point is that a header asking for longer is never shortened."""
+    """The default backoff must clear the next scheduled poll, not land past it.
+
+    The baseline is taken *before* the refresh on purpose. _rate_limited_until
+    is set after the request has failed, so the next tick — exactly one hour
+    after the tick that failed — is what has to be tested against. An earlier
+    version of this test anchored on dt_util.utcnow() after the refresh and
+    checked 30 and 61 minutes, which cannot see the boundary at all: with a
+    one-hour default the tick an hour later fell a fraction of a second short
+    and was skipped, so two hours passed between polls and a reading was
+    booked an hour late.
+    """
     entry, _ = await _setup_with_meter(hass, mock_brunata_client, mock_meter)
     coordinator = entry.runtime_data
 
+    tick = dt_util.utcnow()
     mock_brunata_client.async_get_meters = AsyncMock(
         side_effect=BrunataApiError("Brunata rate limit reached (429)", 429)
     )
     await coordinator.async_refresh()
 
+    # Well inside the backoff.
+    assert coordinator.async_should_poll(tick + timedelta(minutes=30)) is False
+    # The next hourly tick, measured from the one that failed.
+    assert coordinator.async_should_poll(tick + timedelta(hours=1)) is True
+
+
+async def test_a_rate_limit_longer_than_a_day_is_capped(
+    hass: HomeAssistant, mock_brunata_client, mock_meter
+):
+    """Retry-After is a number from the network.
+
+    Without a ceiling, a header of 1e12 stops this integration polling for
+    thirty thousand years, and the only trace is one warning naming a date in
+    the year 33000. A day is longer than any real rate limit and recovers on
+    its own.
+    """
+    entry, _ = await _setup_with_meter(hass, mock_brunata_client, mock_meter)
+    coordinator = entry.runtime_data
+
+    mock_brunata_client.async_get_meters = AsyncMock(
+        side_effect=BrunataApiError("Brunata rate limit reached (429)", 429, 1e12)
+    )
+    await coordinator.async_refresh()
+
     now = dt_util.utcnow()
-    assert coordinator.async_should_poll(now + timedelta(minutes=30)) is False
-    assert coordinator.async_should_poll(now + timedelta(minutes=61)) is True
+    assert coordinator.async_should_poll(now + timedelta(hours=23)) is False
+    assert coordinator.async_should_poll(now + timedelta(hours=25)) is True
 
 
 async def test_other_errors_do_not_hold_the_schedule(
