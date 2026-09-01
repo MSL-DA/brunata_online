@@ -56,6 +56,9 @@ _RATE_LIMIT_DEFAULT_BACKOFF = timedelta(minutes=55)
 # thirty thousand years, and the only trace is one warning naming a date in the
 # year 33000. A day is far longer than any real rate limit and still recovers
 # on its own.
+#
+# Applied to the seconds, not to a finished timedelta — see the comment at the
+# call site in _async_update_data() for why that distinction is load-bearing.
 _RATE_LIMIT_MAX_BACKOFF = timedelta(hours=24)
 
 
@@ -296,10 +299,22 @@ class BrunataDataUpdateCoordinator(DataUpdateCoordinator[dict[str, BrunataMeter]
             raise UpdateFailed(str(err)) from err
         except BrunataApiError as err:
             if err.status == 429:
+                # Capped in seconds, not by min()-ing two timedeltas. That
+                # version built the timedelta before it compared, so the cap
+                # never got a chance to apply: timedelta tops out at 999999999
+                # days, and any Retry-After at or above 8.64e13 seconds raised
+                # OverflowError right here — inside the very except block that
+                # exists to translate this error, so it escaped as an
+                # unexpected exception. api.py already rejects inf and nan; a
+                # finite number too large for a timedelta is the other half of
+                # the same guard, and it belongs here because how long we are
+                # willing to stay away is this module's decision.
                 wait = (
-                    min(
-                        timedelta(seconds=err.retry_after),
-                        _RATE_LIMIT_MAX_BACKOFF,
+                    timedelta(
+                        seconds=min(
+                            err.retry_after,
+                            _RATE_LIMIT_MAX_BACKOFF.total_seconds(),
+                        )
                     )
                     if err.retry_after is not None
                     else _RATE_LIMIT_DEFAULT_BACKOFF
