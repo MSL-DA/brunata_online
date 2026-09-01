@@ -30,23 +30,37 @@ PLATFORMS: list[Platform] = [Platform.SENSOR]
 
 type BrunataConfigEntry = ConfigEntry[BrunataDataUpdateCoordinator]
 
-# The poll lands in a 60-second window ending at 59:30, so every install has at
-# least 30 seconds left before the hour rolls over. That margin is for the
-# request itself to finish, not for a retry — there is none. Measured round
-# trips are 0.2-1.6 s, so 30 s is generous; it is cheap and it means a slow
-# response still lands its reading in the hour it was taken.
+# The poll lands somewhere in 58:30-59:29, so every install has at least 31
+# seconds left before the hour rolls over. That margin is for the request
+# itself to finish, not for a retry — there is none. Measured round trips are
+# 0.2-1.6 s, so it is generous; it is cheap and it means a slow response still
+# lands its reading in the hour it was taken.
 _POLL_WINDOW_BASE_MINUTE = 58
 _POLL_WINDOW_BASE_SECOND = 30
 _POLL_WINDOW_SPREAD_SECONDS = 60
 
-# How long to stay away after an HTTP 429 with no usable Retry-After. One hour
-# is the next scheduled poll anyway, so this only bites when Brunata asks for
-# longer than that.
-_RATE_LIMIT_DEFAULT_BACKOFF = timedelta(hours=1)
+# How long to stay away after an HTTP 429 with no usable Retry-After.
+#
+# Deliberately under an hour rather than exactly one. _rate_limited_until is
+# set *after* the request has failed, so a full hour lands a fraction of a
+# second past the next scheduled tick — which is then skipped, and two hours
+# pass between polls instead of one. Home Assistant attributes consumption to
+# the hour it polled, so that silently books a reading an hour late: the exact
+# cost async_should_poll() explains the adaptive backoff was rolled back over.
+# Five minutes of slack is far more than the round trip needs and lets the
+# next tick through.
+_RATE_LIMIT_DEFAULT_BACKOFF = timedelta(minutes=55)
+
+# And a ceiling on what Brunata can ask for. Retry-After is a number from the
+# network: without a cap, a header of 1e12 stops this integration polling for
+# thirty thousand years, and the only trace is one warning naming a date in the
+# year 33000. A day is far longer than any real rate limit and still recovers
+# on its own.
+_RATE_LIMIT_MAX_BACKOFF = timedelta(hours=24)
 
 
-def _entry_jitter_seconds(entry_id: str, spread: int = _POLL_WINDOW_SPREAD_SECONDS) -> int:
-    """Derive a stable 0..(spread-1) second offset from the entry_id.
+def _entry_jitter_seconds(entry_id: str) -> int:
+    """Derive a stable 0..59 second offset from the entry_id.
 
     Deterministic per config entry (stable across HA restarts and reloads),
     so a given install always polls at the same wall-clock second — but
@@ -54,7 +68,7 @@ def _entry_jitter_seconds(entry_id: str, spread: int = _POLL_WINDOW_SPREAD_SECON
     hitting Brunata's endpoint in the same one-second window.
     """
     digest = hashlib.sha256(entry_id.encode()).hexdigest()
-    return int(digest, 16) % spread
+    return int(digest, 16) % _POLL_WINDOW_SPREAD_SECONDS
 
 
 def _jittered_poll_time(entry_id: str) -> tuple[int, int]:
@@ -283,7 +297,10 @@ class BrunataDataUpdateCoordinator(DataUpdateCoordinator[dict[str, BrunataMeter]
         except BrunataApiError as err:
             if err.status == 429:
                 wait = (
-                    timedelta(seconds=err.retry_after)
+                    min(
+                        timedelta(seconds=err.retry_after),
+                        _RATE_LIMIT_MAX_BACKOFF,
+                    )
                     if err.retry_after is not None
                     else _RATE_LIMIT_DEFAULT_BACKOFF
                 )
