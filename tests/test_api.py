@@ -106,6 +106,17 @@ def test_error_statuses_raise_api_error(status, match):
         ({"Retry-After": "Wed, 21 Oct 2026 07:28:00 GMT"}, None),
         ({"Retry-After": "0"}, None),
         ({"Retry-After": "-5"}, None),
+        # float() accepts all three of these, and inf is greater than zero, so
+        # they used to pass straight through to timedelta(seconds=...) in the
+        # coordinator — which raises OverflowError from inside the very except
+        # block that exists to translate this error. See the docstring on
+        # _retry_after_seconds().
+        ({"Retry-After": "inf"}, None),
+        ({"Retry-After": "Infinity"}, None),
+        ({"Retry-After": "1e400"}, None),
+        ({"Retry-After": "nan"}, None),
+        # Enormous but real. The parser passes it on; the coordinator caps it.
+        ({"Retry-After": "1e12"}, 1e12),
     ],
 )
 def test_retry_after_is_read_from_a_rate_limit(headers, expected):
@@ -219,6 +230,33 @@ def test_unparseable_reading_value_costs_one_meter_not_all_of_them(raw_value):
     error type api.py defines, and reach DataUpdateCoordinator as an unexpected
     exception — so one bad row would cost every meter that update. Every other
     field in the payload already degrades to None; this one has to as well."""
+    item = _meter_item("abc")
+    item["latestReadingValue"] = raw_value
+
+    meters = _parse([item, _meter_item("good")])
+
+    assert set(meters) == {"abc", "good"}
+    assert meters["abc"].value is None
+    assert meters["good"].value == 42.0
+
+
+@pytest.mark.parametrize(
+    "raw_value", ["NaN", "nan", "Infinity", "inf", "-inf", "1e400", float("nan")]
+)
+def test_a_non_finite_reading_value_is_dropped(raw_value):
+    """float() accepts every one of these, and none of them is a reading.
+
+    nan is the one that matters. Every comparison against it is false, so
+    `previous is None or value >= previous` takes it whenever there is no
+    previous value — the first poll after setup, or after a restart with
+    nothing to restore — and nan becomes the sensor's state. With a previous
+    value it goes the other way and is logged as a decrease that is neither a
+    replacement nor an annual reset, which is a warning about something that
+    never happened.
+
+    The other meter in the payload must survive either way, same as every
+    other bad-row test here.
+    """
     item = _meter_item("abc")
     item["latestReadingValue"] = raw_value
 
@@ -358,9 +396,10 @@ def test_one_unusable_unit_does_not_cost_the_other_meters():
 
 @pytest.mark.parametrize("code", [1, 2, 5])
 def test_supported_meter_types_are_parsed(code):
-    """The two codes read off live account data: 1 = heat cost allocator
-    (radiator), 2 = water. Nothing else is on the list, because nothing else
-    has been read off a real account — see SUPPORTED_METER_TYPES."""
+    """The three codes on the allowlist: 1 = heat cost allocator (radiator),
+    2 = water, 5 = electricity. All three are read off Brunata's own meterType
+    table rather than guessed, and all three have produced a working entity —
+    see SUPPORTED_METER_TYPES."""
     item = _meter_item("abc")
     item["meterType"] = code
 
@@ -461,10 +500,11 @@ def test_unsupported_meter_types_never_become_entities(code):
     has to be dropped here. If this test ever needs relaxing, that is the
     moment to think very hard about why.
 
-    3 is in this list on purpose. It is widely assumed to be an energy meter,
-    but that has never been read off a real account, and an assumption does
-    not belong on a safety boundary. It moves to the supported list when
-    somebody posts the log line that proves it."""
+    Everything in this list is a code the table names or leaves empty, and
+    none of it is a guess: 3 is temperature, 4 is gas, 6 is energy, 12 and 13
+    are the detectors, and 20-26 are unfilled slots. Knowing what a code means
+    and choosing to surface it are separate decisions — 6 is the clearest
+    case, and it stays out until somebody actually has such a meter."""
     item = _meter_item("abc")
     item["meterType"] = code
 
@@ -511,7 +551,7 @@ def test_a_supported_meter_survives_alongside_an_unsupported_one():
     water = _meter_item("water")
     water["meterType"] = 2
     detector = _meter_item("detector")
-    detector["meterType"] = 26
+    detector["meterType"] = 13
 
     assert sorted(_parse([water, detector])) == ["water"]
 
