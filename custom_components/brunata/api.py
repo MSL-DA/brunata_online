@@ -20,6 +20,7 @@ import base64
 import hashlib
 import html
 import logging
+import math
 import re
 import secrets
 import time
@@ -88,11 +89,10 @@ ISSUE_TRACKER_URL = "https://github.com/MSL-DA/brunata_online/issues"
 # person it gets tested against. Adding it is one number and one line in the
 # README. Leaving it out costs nothing until then.
 #
-# Note what is still untested even for 5: no electricity meter has passed
-# through this code, so which unit such a meter reports is unconfirmed. Every
-# energy unit in the live measurementUnit table is already in sensor.py's
-# UNIT_MAP, so it should resolve — but "should" is the operative word, and a
-# unit that does not resolve now skips the meter rather than mislabelling it.
+# An electricity meter has since been through this code and resolved to kWh,
+# which sensor.py's UNIT_MAP turns into UnitOfEnergy.KILO_WATT_HOUR with
+# device class ENERGY. So 5 is not just a code read off a table any more; it
+# is a type that has produced a working entity.
 #
 # The old reasoning is still wrong and worth keeping wrong: the presence of
 # GJ/Gcal in UNIT_MAP never said anything about meterType. That is the
@@ -404,6 +404,37 @@ def parse_timestamp(raw: Any) -> datetime | None:
     return None
 
 
+def _expires_in_seconds(raw: Any) -> float | None:
+    """Read a token lifetime, or None when it cannot be read.
+
+    _store_tokens() used to call float() on this directly. A string that is not
+    a number raised ValueError and a list raised TypeError, and both callers
+    catch only BrunataApiError around that call — so either one went straight
+    out of _async_login(), out of async_get_meters() and into the coordinator
+    as an unexpected exception rather than as a clean retry or reauth.
+
+    None means "no usable expiry", which _store_tokens() already treats as an
+    immediately unusable token: the next request logs in again. Failing that
+    way costs one login; failing the other way costs the update.
+
+    Bools are refused for the same reason _meter_type_code() refuses them.
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, bool):
+        _LOGGER.debug("Brunata sent an unreadable expires_in: %r", raw)
+        return None
+    try:
+        seconds = float(raw)
+    except (TypeError, ValueError):
+        _LOGGER.debug("Brunata sent an unreadable expires_in: %r", raw)
+        return None
+    if not math.isfinite(seconds):
+        _LOGGER.debug("Brunata sent a non-finite expires_in: %r", raw)
+        return None
+    return seconds
+
+
 def _parse_value(raw: Any) -> float | None:
     """Parse a meter reading, tolerating anything that is not a number.
 
@@ -411,14 +442,24 @@ def _parse_value(raw: Any) -> float | None:
     costs one meter. A bare float() would break that: the ValueError escapes
     _parse_meters() untranslated and reaches the coordinator as an unexpected
     exception, costing every meter that update.
+
+    float() is not the whole guard, though. It also accepts "NaN", "Infinity"
+    and "1e400", and none of those is a meter reading. nan is the worse of the
+    two: every comparison against it is false, so _accept_reading() takes it
+    whenever there is no previous value — first poll after setup, or after a
+    restart with nothing to restore — and it becomes the sensor's state.
     """
     if raw is None:
         return None
     try:
-        return float(raw)
+        value = float(raw)
     except (TypeError, ValueError):
         _LOGGER.debug("Could not parse reading value %r", raw)
         return None
+    if not math.isfinite(value):
+        _LOGGER.debug("Ignoring non-finite reading value %r", raw)
+        return None
+    return value
 
 
 def parse_reading_date(raw: Any) -> date | None:
@@ -433,6 +474,29 @@ def parse_reading_date(raw: Any) -> date | None:
         except ValueError:
             _LOGGER.debug("Could not parse reading date %r", raw)
     return None
+
+
+def format_date(value: Any) -> Any:
+    """Render a date or datetime as an ISO string, leaving anything else alone.
+
+    The counterpart to the two parsers above, and public for the same reason:
+    sensor.py needs it for the reading_date attribute and diagnostics.py for
+    the downloaded report. It lived in both of those files as a private copy
+    with the same body and the same docstring note — the 1.3.1 round put date
+    *parsing* in one place on the argument that there should be one spelling of
+    a Brunata date and one module that knows it, and this is the other half of
+    that argument.
+
+    Passing non-dates through unchanged is what both callers want. A reading
+    date restored from the state machine is already the ISO string we wrote,
+    and every other field in a diagnostics report is already JSON.
+
+    ``date`` alone covers both cases: datetime subclasses it, and both spell
+    isoformat().
+    """
+    if isinstance(value, date):
+        return value.isoformat()
+    return value
 
 
 class BrunataApiClient:
@@ -671,9 +735,9 @@ class BrunataApiClient:
         self._token_type = payload.get("token_type") or "Bearer"
         self._refresh_token = payload.get("refresh_token")
 
-        expires_in = payload.get("expires_in")
+        expires_in = _expires_in_seconds(payload.get("expires_in"))
         self._expires_at = (
-            time.time() + float(expires_in) - _EXPIRY_MARGIN_SECONDS
+            time.time() + expires_in - _EXPIRY_MARGIN_SECONDS
             if expires_in is not None
             else 0.0
         )
@@ -862,7 +926,18 @@ def _retry_after_seconds(response: httpx.Response) -> float | None:
     RFC 9110 also allows an HTTP-date. That form is not read here: it needs the
     server's clock to agree with ours to be worth anything, and getting it
     wrong means waiting either far too long or not at all. Falling back to a
-    fixed hour is the safer failure, and the coordinator does that.
+    fixed default is the safer failure, and the coordinator does that.
+
+    The finiteness check is not decoration. float() accepts "inf", "Infinity"
+    and "1e400", and inf is greater than zero, so such a header used to pass
+    straight through to timedelta(seconds=...) in the coordinator — which
+    raises OverflowError from inside the very except block that exists to
+    translate this error, so it escaped as an unexpected exception. A header
+    that is not a real number is no header at all, same as the date form.
+
+    A number that is merely enormous is left to the caller: the coordinator
+    caps it, because how long we are willing to stay away is its decision, not
+    the parser's.
     """
     raw = response.headers.get("Retry-After")
     if raw is None:
@@ -871,6 +946,9 @@ def _retry_after_seconds(response: httpx.Response) -> float | None:
         seconds = float(str(raw).strip())
     except ValueError:
         _LOGGER.debug("Brunata sent an unreadable Retry-After: %r", raw)
+        return None
+    if not math.isfinite(seconds):
+        _LOGGER.debug("Brunata sent a non-finite Retry-After: %r", raw)
         return None
     return seconds if seconds > 0 else None
 
