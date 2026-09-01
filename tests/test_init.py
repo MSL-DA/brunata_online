@@ -398,8 +398,9 @@ async def test_a_rate_limit_without_retry_after_lets_the_next_tick_through(
     assert coordinator.async_should_poll(tick + timedelta(hours=1)) is True
 
 
+@pytest.mark.parametrize("retry_after", [1e12, 8.64e13, 1e15, 1e300])
 async def test_a_rate_limit_longer_than_a_day_is_capped(
-    hass: HomeAssistant, mock_brunata_client, mock_meter
+    hass: HomeAssistant, mock_brunata_client, mock_meter, retry_after
 ):
     """Retry-After is a number from the network.
 
@@ -407,12 +408,25 @@ async def test_a_rate_limit_longer_than_a_day_is_capped(
     thirty thousand years, and the only trace is one warning naming a date in
     the year 33000. A day is longer than any real rate limit and recovers on
     its own.
+
+    The values above 8.64e13 are the ones that matter, and the reason the cap
+    is applied to the seconds rather than to a finished timedelta. timedelta
+    tops out at 999999999 days, so an earlier version — which built
+    timedelta(seconds=err.retry_after) and only then compared it against the
+    ceiling — raised OverflowError inside the except block that exists to
+    translate this error, and it escaped as an unexpected exception. api.py's
+    guard does not catch these: every one of them is finite.
+
+    1e12 is kept because it is the one that fits in a timedelta, so it would
+    pass either way. Alone, it could not tell the two versions apart.
     """
     entry, _ = await _setup_with_meter(hass, mock_brunata_client, mock_meter)
     coordinator = entry.runtime_data
 
     mock_brunata_client.async_get_meters = AsyncMock(
-        side_effect=BrunataApiError("Brunata rate limit reached (429)", 429, 1e12)
+        side_effect=BrunataApiError(
+            "Brunata rate limit reached (429)", 429, retry_after
+        )
     )
     await coordinator.async_refresh()
 
