@@ -30,7 +30,6 @@ body:
     attributes:
       label: Integration version
       description: HACS shows this on the Brunata card.
-      placeholder: "1.4.0"
     validations:
       required: true
 
