@@ -15,13 +15,18 @@ from homeassistant.components.sensor import (
 from homeassistant.const import UnitOfEnergy, UnitOfVolume
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import device_registry as dr
-from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.restore_state import ExtraStoredData, RestoreEntity
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from . import BrunataConfigEntry, BrunataDataUpdateCoordinator
-from .api import BASE_URL, BrunataMeter, parse_reading_date, parse_timestamp
+from .api import (
+    BASE_URL,
+    BrunataMeter,
+    format_date,
+    parse_reading_date,
+    parse_timestamp,
+)
 from .const import DEVICE_ID_PREFIX, DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
@@ -140,23 +145,6 @@ def _device_name(meter_type: str, placement: str | None, meter_id: str) -> str:
     return f"{meter_type} ({meter_id})"
 
 
-def _as_iso(value: date | datetime | str | None) -> str | None:
-    """Return a reading date as an ISO string.
-
-    The API hands us date objects; a state restored after a restart yields the
-    string it was serialised as. Normalising keeps the reading_date attribute
-    one type across restarts, so templates reading it don't break on reload.
-
-    `date` alone covers both: datetime subclasses date, and both spell
-    isoformat(). That is also why _as_date() below checks datetime *first* —
-    there the subclassing is load-bearing, and a `(date, datetime)` tuple here
-    would suggest to the next reader that it is not.
-    """
-    if isinstance(value, date):
-        return value.isoformat()
-    return value
-
-
 def _as_date(value: date | datetime | str | None) -> date | None:
     """Return a reading date as a date object, or None if it can't be parsed.
 
@@ -167,7 +155,12 @@ def _as_date(value: date | datetime | str | None) -> date | None:
 
     The string case is api.py's parser, not a second copy of it: the restore
     store holds what we serialised from the API's own values, so there is one
-    spelling of a Brunata date and one place that knows it.
+    spelling of a Brunata date and one place that knows it. api.format_date()
+    is the other direction of the same rule.
+
+    datetime is checked *first* here, and that order is load-bearing: datetime
+    subclasses date, so the two branches would otherwise collapse into one and
+    a datetime would be returned where a date was promised.
     """
     if isinstance(value, datetime):
         return value.date()
@@ -352,7 +345,7 @@ class BrunataSensor(
         self._device_name = _device_name(
             meter.meter_type, meter.placement, self._meter_id
         )
-        self._attr_device_info = DeviceInfo(
+        self._attr_device_info = dr.DeviceInfo(
             identifiers={(DOMAIN, f"{DEVICE_ID_PREFIX}{self._meter_id}")},
             name=self._device_name,
             manufacturer="Brunata",
@@ -419,7 +412,7 @@ class BrunataSensor(
             else:
                 self._attr_native_value = restored
                 restored_date = last_state.attributes.get("reading_date")
-                self._last_reading_date = _as_iso(restored_date)
+                self._last_reading_date = format_date(restored_date)
                 self._last_reading_day = _as_date(restored_date)
 
         # Apply whatever the coordinator already holds, now that the restored
@@ -513,7 +506,7 @@ class BrunataSensor(
         # dated rather than the value now shown — the smaller of the two, since
         # an attribute that lags is visible and a widened guard is not.
         if meter.reading_date is not None:
-            self._last_reading_date = _as_iso(meter.reading_date)
+            self._last_reading_date = format_date(meter.reading_date)
             self._last_reading_day = meter.reading_date
 
     @callback
@@ -583,18 +576,27 @@ class BrunataSensor(
             # reading. Only accumulating meters get a guard at all.
             return True
 
-        if (
-            meter.mounting_date != self._mounting_date
-            or meter.meter_no != self._meter_no
-        ):
+        number_changed = meter.meter_no != self._meter_no
+        mounting_changed = meter.mounting_date != self._mounting_date
+        if number_changed or mounting_changed:
+            # The meter numbers themselves are deliberately not in this line.
+            # They identify a physical device at an address, which is why
+            # diagnostics.py redacts the field and why bug_report.yml tells
+            # users the numbers have been removed before the file is written —
+            # and a debug log is the other attachment that template asks for.
+            # What makes the line worth reading is *which* signal fired, and
+            # that survives without printing either number.
+            signals = []
+            if number_changed:
+                signals.append("meter number changed")
+            if mounting_changed:
+                signals.append(
+                    f"mounting date {self._mounting_date} -> {meter.mounting_date}"
+                )
             _LOGGER.info(
-                "Meter %s was replaced (meter number %s -> %s, mounted %s -> "
-                "%s): accepting the reset from %s to %s",
+                "Meter %s was replaced (%s): accepting the reset from %s to %s",
                 self._meter_id,
-                self._meter_no,
-                meter.meter_no,
-                self._mounting_date,
-                meter.mounting_date,
+                ", ".join(signals),
                 previous,
                 value,
             )
