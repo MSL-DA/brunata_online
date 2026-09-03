@@ -11,6 +11,7 @@ from datetime import date
 
 import time
 
+import httpx
 import pytest
 
 from custom_components.brunata.api import (
@@ -19,6 +20,7 @@ from custom_components.brunata.api import (
     BrunataApiClient,
     BrunataApiError,
     BrunataAuthError,
+    BrunataConnectionError,
     _parse_meters,
     _payload,
 )
@@ -58,9 +60,17 @@ MEASUREMENT_UNITS = ["", "units", "", "", "", "", "", "", "m3"]
 
 
 def _parse(payload):
+    """The meters half of a parse. _report() below is the other half."""
     return _parse_meters(
         payload, meter_types=METER_TYPES, measurement_units=MEASUREMENT_UNITS
-    )
+    ).meters
+
+
+def _report(payload):
+    """The ParseReport half — what the parse saw beyond the meters."""
+    return _parse_meters(
+        payload, meter_types=METER_TYPES, measurement_units=MEASUREMENT_UNITS
+    ).report
 
 
 def _meter_item(meter_id="12345", *, dismounted=None, reading=True, value=42.0):
@@ -336,7 +346,7 @@ def test_a_null_meter_type_entry_falls_back_to_the_raw_code():
 
     meter = _parse_meters(
         [item], meter_types=types, measurement_units=units
-    )["abc"]
+    ).meters["abc"]
     assert meter.meter_type == "1"
     assert meter.meter_type_code == 1
     assert meter.unit == "units"
@@ -366,7 +376,7 @@ def test_a_meter_whose_unit_cannot_be_resolved_is_skipped(code):
 
     assert _parse_meters(
         [item], meter_types=METER_TYPES, measurement_units=units
-    ) == {}
+    ).meters == {}
 
 
 def test_a_meter_brunata_calls_undefined_is_skipped():
@@ -381,7 +391,7 @@ def test_a_meter_brunata_calls_undefined_is_skipped():
 
     assert _parse_meters(
         [item], meter_types=METER_TYPES, measurement_units=["undefined", "units"]
-    ) == {}
+    ).meters == {}
 
 
 def test_one_unusable_unit_does_not_cost_the_other_meters():
@@ -432,7 +442,7 @@ def test_the_numeric_meter_type_survives_an_unresolvable_name():
 
     meter = _parse_meters(
         [item], meter_types=[], measurement_units=MEASUREMENT_UNITS
-    )["abc"]
+    ).meters["abc"]
 
     assert meter.meter_type == "1"
     assert meter.meter_type_code == 1
@@ -564,7 +574,7 @@ def test_trailing_whitespace_in_table_entries_is_stripped():
 
     meter = _parse_meters(
         [item], meter_types=["", "Radiator "], measurement_units=MEASUREMENT_UNITS
-    )["abc"]
+    ).meters["abc"]
     assert meter.meter_type == "Radiator"
 
 
@@ -587,7 +597,7 @@ def test_a_negative_unit_code_does_not_wrap_round_the_table():
         [item],
         meter_types=METER_TYPES,
         measurement_units=["undefined", "units", "m3", "THE-LAST-ENTRY"],
-    ) == {}
+    ).meters == {}
 
 
 def test_an_unknown_meter_type_code_still_falls_back():
@@ -607,7 +617,7 @@ def test_an_unknown_meter_type_code_still_falls_back():
     meter = _parse_meters(
         [item], meter_types=["Collector", "Radiator"],
         measurement_units=MEASUREMENT_UNITS,
-    )["abc"]
+    ).meters["abc"]
     assert meter.meter_type == "2"
     assert meter.meter_type_code == 2
     # And the unit, which did resolve, is untouched by the type's trouble.
@@ -622,7 +632,185 @@ def test_without_lookup_tables_no_meter_is_created():
     Every unit is unresolvable without the table, so every meter is skipped.
     That is the safe end: the sensors keep the values and the history they
     already have, and the next poll that loads the tables brings them back."""
-    assert _parse_meters([_meter_item("abc")]) == {}
+    assert _parse_meters([_meter_item("abc")]).meters == {}
+
+
+def test_a_skipped_unit_is_reported_rather_than_silently_dropped():
+    """The meter is skipped, but it is not gone, and the difference matters.
+
+    Absence from the meters dictionary is ambiguous: dismounted, unsupported,
+    or — as here — still on the wall with a unit we could not name this poll.
+    Only the first means the meter is gone. Without the report, the sensor
+    would go unavailable and the device would become removable, both wrong for
+    a meter Brunata is still listing.
+    """
+    units = ["undefined", "units"] + [None] * 94
+
+    bad = _meter_item("bad")
+    bad["unit"] = 99
+    good = _meter_item("good")
+
+    parsed = _parse_meters(
+        [bad, good], meter_types=METER_TYPES, measurement_units=units
+    )
+
+    assert set(parsed.meters) == {"good"}
+    assert parsed.report.unresolved_unit_meter_ids == frozenset({"bad"})
+
+
+def test_an_unsupported_meter_type_is_not_reported_as_unresolved():
+    """The two skips are not the same thing.
+
+    An unsupported meterType never becomes an entity in the first place, so
+    there is nothing to keep available and nothing to protect from deletion.
+    Only the unit skip concerns a meter that already has one.
+    """
+    detector = _meter_item("detector")
+    detector["meterType"] = 13
+
+    assert _report([detector]).unresolved_unit_meter_ids == frozenset()
+
+
+def test_a_dismounted_meter_is_not_reported_as_unresolved():
+    """A dismounted meter really is gone, and must stay removable."""
+    item = _meter_item("gone", dismounted="2026-03-01T09:00:00+01:00")
+
+    assert _report([item]).unresolved_unit_meter_ids == frozenset()
+
+
+@pytest.mark.parametrize(("payload", "expected"), [([], 0), ([_meter_item("a")], 1)])
+def test_the_raw_item_count_is_what_brunata_sent(payload, expected):
+    """Counted before any filtering.
+
+    Zero is the value that matters: it means Brunata reported nothing at all,
+    which is a different fault from "Brunata says you have no meters" and is
+    not evidence that any particular meter is gone.
+    """
+    assert _report(payload).raw_item_count == expected
+
+
+def test_an_empty_payload_parses_to_a_successful_update_with_no_meters():
+    """The premise behind async_remove_config_entry_device()'s raw count check.
+
+    Nothing here raises, so the coordinator records a successful update with
+    an empty data dictionary. last_update_success is therefore not enough to
+    tell "every meter is gone" from "Brunata told us nothing".
+    """
+    parsed = _parse_meters([], meter_types=METER_TYPES, measurement_units=[""])
+
+    assert parsed.meters == {}
+    assert parsed.report.raw_item_count == 0
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        httpx.ConnectError("refused"),
+        httpx.ReadTimeout("too slow"),
+        httpx.RemoteProtocolError("garbled"),
+        # The two RequestError adds over TransportError. Caught as
+        # TransportError only, these escaped api.py untranslated and reached
+        # the coordinator as unexpected exceptions with a traceback instead of
+        # as a clean retry.
+        httpx.TooManyRedirects("redirect loop"),
+        httpx.DecodingError("bad content-encoding"),
+    ],
+)
+async def test_request_failures_become_a_connection_error(error):
+    """Everything under httpx.RequestError means the same thing here.
+
+    The request produced no usable response, so the coordinator should keep
+    the last known values and try again next hour.
+    """
+
+    class FakeHttp:
+        async def request(self, method, url, **kwargs):
+            raise error
+
+    client = BrunataApiClient("user@example.com", "s3cret", FakeHttp())
+
+    with pytest.raises(BrunataConnectionError):
+        await client._async_request("GET", "https://example.invalid")
+
+
+async def test_a_url_we_built_wrong_is_not_disguised_as_a_network_problem():
+    """httpx.InvalidURL sits outside RequestError, and that is why the handler
+    is RequestError rather than HTTPError.
+
+    A malformed URL is this integration's own mistake. Translating it into
+    BrunataConnectionError would turn it into an hourly "cannot reach Brunata"
+    that no amount of waiting fixes.
+    """
+
+    class FakeHttp:
+        async def request(self, method, url, **kwargs):
+            raise httpx.InvalidURL("not a url")
+
+    client = BrunataApiClient("user@example.com", "s3cret", FakeHttp())
+
+    with pytest.raises(httpx.InvalidURL):
+        await client._async_request("GET", "not a url")
+
+
+async def test_the_lookup_tables_are_loaded_before_the_meters_are_parsed():
+    """Order, not just outcome.
+
+    async_get_meters() fetches the locale resource first and then parses the
+    meter payload against it. Reversed, the tables would be empty at parse
+    time, every unit would fail to resolve, every meter would be skipped — and
+    the update would *succeed* with nothing in it. Nothing else in the suite
+    notices, because the other endpoint test presets the tables itself.
+    """
+    calls: list[str] = []
+
+    class FakeHttp:
+        async def request(self, method, url, **kwargs):
+            calls.append(url)
+            if url.endswith("/locales/en/common"):
+                return FakeResponse(
+                    200,
+                    json_data={
+                        "mappers": {
+                            "meterType": METER_TYPES,
+                            "measurementUnit": MEASUREMENT_UNITS,
+                        }
+                    },
+                )
+            return FakeResponse(200, json_data=[_meter_item("abc")])
+
+    client = BrunataApiClient("user@example.com", "s3cret", FakeHttp())
+    client._access_token = "T"
+    client._expires_at = time.time() + 300
+
+    meters = await client.async_get_meters()
+
+    assert calls[0].endswith("/locales/en/common")
+    assert calls[1].endswith("/consumer/metersforconsumer")
+    assert set(meters) == {"abc"}
+
+
+async def test_the_parse_report_describes_the_call_it_came_from():
+    """The coordinator reads the report immediately after the meters, and the
+    two have to describe the same poll."""
+
+    class FakeHttp:
+        async def request(self, method, url, **kwargs):
+            return FakeResponse(200, json_data=[_meter_item("abc")])
+
+    client = BrunataApiClient("user@example.com", "s3cret", FakeHttp())
+    client._access_token = "T"
+    client._expires_at = time.time() + 300
+    client._meter_types = METER_TYPES
+    client._measurement_units = MEASUREMENT_UNITS
+    client._lookup_tables_loaded = True
+
+    # Before any call: nothing has been reported, so nothing may be concluded.
+    assert client.last_parse_report().raw_item_count == 0
+
+    await client.async_get_meters()
+
+    assert client.last_parse_report().raw_item_count == 1
+    assert client.last_parse_report().unresolved_unit_meter_ids == frozenset()
 
 
 def test_non_list_payload_raises_api_error():
