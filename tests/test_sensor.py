@@ -17,7 +17,7 @@ from homeassistant.core import HomeAssistant, State
 from homeassistant.helpers import device_registry as dr
 from pytest_homeassistant_custom_component.common import MockConfigEntry, mock_restore_cache
 
-from custom_components.brunata.api import BASE_URL, SUPPORTED_METER_TYPES
+from custom_components.brunata.api import BASE_URL, SUPPORTED_METER_TYPES, ParseReport
 from custom_components.brunata.const import DOMAIN
 from custom_components.brunata.sensor import (
     ANNUAL_RESET_METER_TYPES,
@@ -1127,6 +1127,59 @@ async def test_a_meter_that_disappears_from_the_payload_goes_unavailable(mock_me
     assert entity.available is True
 
     coordinator.data = {}
+    assert entity.available is False
+
+
+async def test_a_meter_skipped_for_an_unusable_unit_stays_available(mock_meter):
+    """Missing from the payload is not the same as gone.
+
+    api.py drops a meter whose unit code did not resolve, so it cannot become
+    an entity carrying "8" where the user had "m³" — Home Assistant would treat
+    that as a different measurement and discard the statistics behind the old
+    one, permanently. But the meter is still on the wall.
+
+    Going unavailable for it would punch exactly the hole in Long Term
+    Statistics that test_a_failed_update_does_not_make_the_sensor_unavailable
+    refuses to punch, for the same kind of transient cause. The value stands,
+    the sensor stays available, and it resumes on the next poll that resolves.
+
+    If this test ever has to be loosened, that is the moment to think hard.
+    """
+    coordinator = MagicMock()
+    coordinator.data = {"12345": mock_meter}
+    coordinator.last_update_success = True
+    coordinator.last_parse = ParseReport(frozenset(), 1)
+
+    entity = _make_entity(coordinator, mock_meter)
+    entity._apply_latest_reading()
+    assert entity.available is True
+
+    # The unit stopped resolving: the meter is gone from the payload, but
+    # api.py says it is only skipped.
+    coordinator.data = {}
+    coordinator.last_parse = ParseReport(frozenset({"12345"}), 1)
+
+    assert entity.available is True
+    assert entity.native_value == mock_meter.value
+
+
+async def test_a_dismounted_meter_still_goes_unavailable(mock_meter):
+    """The other half. Relaxing the rule for a skipped meter must not relax it
+    for one Brunata has actually taken off the wall — that device showing a
+    final reading forever is indistinguishable from a working one."""
+    coordinator = MagicMock()
+    coordinator.data = {"12345": mock_meter}
+    coordinator.last_update_success = True
+    coordinator.last_parse = ParseReport(frozenset(), 1)
+
+    entity = _make_entity(coordinator, mock_meter)
+    entity._apply_latest_reading()
+    assert entity.available is True
+
+    # Gone from the payload, and not among the skipped ids.
+    coordinator.data = {}
+    coordinator.last_parse = ParseReport(frozenset(), 1)
+
     assert entity.available is False
 
 
