@@ -21,6 +21,7 @@ from .api import (
     BrunataAuthError,
     BrunataConnectionError,
     BrunataMeter,
+    ParseReport,
 )
 from .const import DEVICE_ID_PREFIX, DOMAIN
 
@@ -158,22 +159,48 @@ async def async_remove_config_entry_device(
     entry: BrunataConfigEntry,
     device: dr.DeviceEntry,
 ) -> bool:
-    """Allow deleting a device whose meter Brunata no longer reports.
+    """Decide whether a meter's device may be deleted.
 
-    Home Assistant only offers the delete button when this function exists.
-    Without it a dismounted meter stays in the device registry forever: the
-    entity goes unavailable — correct — but the device cannot be removed short
-    of deleting the whole config entry and setting it up again. Meters are
-    replaced every eight to ten years, so that is not hypothetical.
+    Note what this does *not* control. The delete button on a device page is
+    shown as soon as an integration defines this function at all — it is a
+    property of the integration, not of the data. This function decides what
+    happens when the button is pressed: False makes Home Assistant refuse with
+    "Failed to remove device entry, rejected by integration", True deletes the
+    device and its entity. So every answer here is a decision about a click
+    somebody has already made.
 
-    A device is removable exactly when its meter is absent from the latest
-    data. Identifiers are matched against what the coordinator holds rather
-    than against the entity registry, because the payload is what decides
-    whether the meter still exists.
+    Without the function at all, a dismounted meter would stay in the device
+    registry forever — the entity goes unavailable, correctly, but the device
+    could not be removed short of deleting the whole config entry and setting
+    it up again. Meters are replaced every eight to ten years, so that is not
+    hypothetical.
 
-    A failed update is not a reason to allow anything: the coordinator keeps
-    the previous data, but if that were ever empty at the same time, this would
-    happily agree to delete every device the integration owns.
+    **The rule: agree only when the meter is provably gone.** Absence from the
+    latest data is not proof on its own, because a meter can be missing from it
+    for three different reasons — see ParseReport. Two of them are answered
+    here:
+
+    * *Brunata reported nothing at all.* A payload with zero entries parses to
+      an empty dictionary and a perfectly successful update, at which point
+      every device this integration owns looks dismounted at once. This used to
+      be guarded with last_update_success alone, on the reasoning that a failed
+      update was the only way `data` could be empty. It is not: an empty
+      payload succeeds. raw_item_count is what distinguishes "Brunata listed
+      meters and this one was not among them" from "Brunata listed nothing".
+    * *The unit did not resolve.* api.py drops such a meter so it cannot become
+      an entity carrying a raw code as its unit, but the meter is still on the
+      wall. It is counted as present here.
+
+    The cost of the first check is that an account whose meters have *all* been
+    dismounted at once, and which Brunata answers for with an empty list rather
+    than with dismounted entries, cannot delete them individually. That user
+    can still delete the config entry. Refusing a legitimate deletion is
+    recoverable; agreeing to a wrong one takes the entity and its long term
+    statistics with it, and that cannot be undone.
+
+    A failed update is likewise not a reason to allow anything: the coordinator
+    keeps the previous data, and it describes a poll that is no longer the
+    latest one.
 
     runtime_data is read defensively for the same reason as in
     async_unload_entry. Home Assistant's remove handler checks that the device
@@ -208,10 +235,20 @@ async def async_remove_config_entry_device(
         )
         return False
 
-    live = {
-        (DOMAIN, f"{DEVICE_ID_PREFIX}{meter_id}")
-        for meter_id in (coordinator.data or {})
-    }
+    if not coordinator.last_parse.raw_item_count:
+        _LOGGER.debug(
+            "Refusing to remove device %s: the last poll returned no meters at "
+            "all, which says nothing about this one",
+            device.id,
+        )
+        return False
+
+    # Meters Brunata still reports: the ones that parsed, plus the ones only
+    # skipped because their unit did not resolve this poll.
+    present = set(coordinator.data or {}) | (
+        coordinator.last_parse.unresolved_unit_meter_ids
+    )
+    live = {(DOMAIN, f"{DEVICE_ID_PREFIX}{meter_id}") for meter_id in present}
     if device.identifiers & live:
         return False
 
@@ -239,6 +276,15 @@ class BrunataDataUpdateCoordinator(DataUpdateCoordinator[dict[str, BrunataMeter]
         # async_remove_config_entry_device() has to take an id back out when
         # the device and its entity are gone.
         self.known_meter_ids: set[str] = set()
+        # What the last successful poll's parse saw, beyond the meters it
+        # produced. A meter absent from `data` is not necessarily gone, and an
+        # empty `data` is not necessarily an empty account — see ParseReport,
+        # BrunataSensor.available and async_remove_config_entry_device().
+        #
+        # Starts empty with a raw count of zero, which is the honest state
+        # before the first poll: nothing has been reported, so nothing can be
+        # concluded.
+        self.last_parse = ParseReport(frozenset(), 0)
         # Set when Brunata answers 429. See async_should_poll().
         self._rate_limited_until: datetime | None = None
         super().__init__(
@@ -285,7 +331,7 @@ class BrunataDataUpdateCoordinator(DataUpdateCoordinator[dict[str, BrunataMeter]
     async def _async_update_data(self) -> dict[str, BrunataMeter]:
         """Fetch data from the API."""
         try:
-            return await self.client.async_get_meters()
+            meters = await self.client.async_get_meters()
         except BrunataAuthError as err:
             # Propagates so Home Assistant starts the re-authentication flow.
             raise ConfigEntryAuthFailed(str(err)) from err
@@ -326,3 +372,9 @@ class BrunataDataUpdateCoordinator(DataUpdateCoordinator[dict[str, BrunataMeter]
                     self._rate_limited_until,
                 )
             raise UpdateFailed(str(err)) from err
+
+        # Only on the success path. A failed update leaves the previous report
+        # in place, the same way it leaves the previous data in place: the two
+        # are read together and must describe the same poll.
+        self.last_parse = self.client.last_parse_report()
+        return meters
