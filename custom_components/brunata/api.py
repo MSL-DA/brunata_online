@@ -27,7 +27,7 @@ import time
 from dataclasses import dataclass
 from datetime import date, datetime
 from functools import lru_cache, partial
-from typing import Any
+from typing import Any, NamedTuple
 from urllib.parse import parse_qs, urlparse
 
 import httpx
@@ -300,6 +300,37 @@ class BrunataMeter:
     transmitting: bool | None = None
 
 
+class ParseReport(NamedTuple):
+    """What the last parse saw, beyond the meters it produced.
+
+    The meters dictionary alone cannot answer "is this meter gone?". A meter
+    can be absent from it for three reasons that mean different things:
+
+    * Brunata dismounted it — it really is gone.
+    * Its meterType is not one we surface — it never had an entity.
+    * Its unit could not be resolved this poll — it is still on the wall, and
+      we simply could not name what it measures.
+
+    The third case must not be mistaken for the first, and neither must "the
+    payload was empty, so we learned nothing at all". This record carries the
+    two facts needed to tell them apart.
+    """
+
+    # Meter ids skipped because their unit code did not resolve. Absent from
+    # the meters dictionary, but still reported by Brunata.
+    unresolved_unit_meter_ids: frozenset[str]
+    # How many entries the payload held before any filtering. Zero means
+    # Brunata reported nothing, which is not evidence about any single meter.
+    raw_item_count: int
+
+
+class ParsedMeters(NamedTuple):
+    """What _parse_meters() returns: the meters, and what it saw getting them."""
+
+    meters: dict[str, BrunataMeter]
+    report: ParseReport
+
+
 def _as_text(raw: Any) -> str:
     """Coerce a lookup code to text.
 
@@ -514,6 +545,9 @@ class BrunataApiClient:
         # as the tables being non-empty. See _async_ensure_lookup_tables().
         self._lookup_tables_loaded = False
 
+        # What the most recent parse saw. See last_parse_report().
+        self._last_parse_report = ParseReport(frozenset(), 0)
+
         self._access_token: str | None = None
         self._token_type: str = "Bearer"
         self._refresh_token: str | None = None
@@ -564,6 +598,21 @@ class BrunataApiClient:
             "has_refresh_token": self._refresh_token is not None,
         }
 
+    def last_parse_report(self) -> ParseReport:
+        """Return what the most recent async_get_meters() call saw.
+
+        A method rather than a bare attribute for the same reason as
+        diagnostics(): what the rest of the integration may read off this
+        client is decided here, next to the field.
+
+        The coordinator is the only caller and its updates are serialised, so
+        there is nothing to race. Callers must read it immediately after the
+        call it belongs to.
+
+        See ParseReport for why the meters dictionary alone is not enough.
+        """
+        return self._last_parse_report
+
     async def async_close(self) -> None:
         """Close the underlying HTTP client.
 
@@ -595,11 +644,13 @@ class BrunataApiClient:
             f"{API_URL}/consumer/metersforconsumer"
         )
 
-        return _parse_meters(
+        parsed = _parse_meters(
             _payload(response),
             meter_types=self._meter_types,
             measurement_units=self._measurement_units,
         )
+        self._last_parse_report = parsed.report
+        return parsed.meters
 
     async def _async_ensure_lookup_tables(self) -> None:
         """Fetch the locale resource once per client, or fail the update.
@@ -708,10 +759,36 @@ class BrunataApiClient:
         )
 
     async def _async_request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
-        """Perform a request, mapping transport failures to our own error."""
+        """Perform a request, mapping transport failures to our own error.
+
+        httpx.RequestError, not httpx.TransportError. Read off httpx's own
+        exception hierarchy rather than inferred from the names:
+
+            RequestError
+              + TransportError
+                - TimeoutException, NetworkError, ProtocolError,
+                  ProxyError, UnsupportedProtocol
+              + DecodingError
+              + TooManyRedirects
+            HTTPStatusError
+            InvalidURL          <- outside RequestError
+
+        RequestError adds exactly two cases over TransportError, and both mean
+        the same thing as the rest: the request produced no usable response.
+        TooManyRedirects can only reach us from _async_authorize(), the one
+        call made with follow_redirects=True, and DecodingError from a broken
+        content-encoding somewhere in the path. Caught as TransportError only,
+        both escaped this module untranslated and reached the coordinator as
+        unexpected exceptions with a traceback, instead of as the clean retry
+        that keeps the last known values.
+
+        Not httpx.HTTPError: InvalidURL sits outside RequestError, so a URL
+        this integration built wrong keeps failing loudly instead of being
+        disguised as a network problem.
+        """
         try:
             return await self._client.request(method, url, **kwargs)
-        except httpx.TransportError as err:
+        except httpx.RequestError as err:
             raise BrunataConnectionError(f"Cannot reach Brunata: {err}") from err
 
     # --- Authentication -----------------------------------------------------
@@ -993,11 +1070,17 @@ def _parse_meters(
     *,
     meter_types: list[str] | None = None,
     measurement_units: list[str] | None = None,
-) -> dict[str, BrunataMeter]:
+) -> ParsedMeters:
     """Turn a /consumer/metersforconsumer payload into meters keyed by ID.
 
     Each entry is flat — meter, latest reading and metadata side by side — so
     there is no wrapper object to guard against.
+
+    Returns the meters *and* a ParseReport. The report exists because an
+    absent meter is ambiguous: dismounted, unsupported, or merely skipped for
+    a unit we could not name this poll. Only the first of those means the
+    meter is gone, and the rest of the integration cannot tell without being
+    told. See ParseReport.
     """
     if not isinstance(payload, list):
         raise BrunataApiError(
@@ -1007,6 +1090,7 @@ def _parse_meters(
     _LOGGER.debug("Brunata returned %s raw item(s)", len(payload))
 
     meters: dict[str, BrunataMeter] = {}
+    unresolved_units: set[str] = set()
     for index, item in enumerate(payload):
         if not isinstance(item, dict):
             _LOGGER.debug(
@@ -1060,6 +1144,11 @@ def _parse_meters(
         )
         if unit is None or unit.lower() == UNDEFINED_UNIT:
             _log_unresolved_unit(str(raw_id), repr(item.get("unit")))
+            # Recorded, not just dropped. Brunata still reports this meter, so
+            # its sensor must keep its value and stay available, and its
+            # device must not become removable — see BrunataSensor.available
+            # and async_remove_config_entry_device().
+            unresolved_units.add(str(raw_id))
             continue
 
         value = _parse_value(item.get("latestReadingValue"))
@@ -1104,4 +1193,6 @@ def _parse_meters(
         )
 
     _LOGGER.debug("Parsed %s meters from Brunata", len(meters))
-    return meters
+    return ParsedMeters(
+        meters, ParseReport(frozenset(unresolved_units), len(payload))
+    )
