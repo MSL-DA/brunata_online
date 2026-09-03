@@ -1040,6 +1040,28 @@ async def test_sensor_placement_updates_even_when_the_reading_is_rejected(mock_m
     assert entity.extra_state_attributes["placement"] == "Kitchen"
 
 
+def _device_for_meter(hass: HomeAssistant, entry: MockConfigEntry, meter_id: str):
+    """Find a meter's device without device_registry.async_get_device().
+
+    That method is deprecated from Home Assistant 2026.9 and *raises* when it
+    is called from test code, which has no integration frame; the same call
+    from inside the integration only logs a warning. So this is a test-side
+    problem with a test-side fix — sensor.py is unaffected until 2027.8.
+
+    async_get_device_by_identifier(), which the deprecation message suggests,
+    is not the replacement to reach for here: it arrived in 2026.8, and
+    hacs.json declares a floor of 2025.3. async_entries_for_config_entry() is
+    not deprecated and has been in Home Assistant far longer, so it works on
+    both sides of that line and the floor stays where it is.
+    """
+    registry = dr.async_get(hass)
+    identifier = (DOMAIN, f"brunata_{meter_id}")
+    for device in dr.async_entries_for_config_entry(registry, entry.entry_id):
+        if identifier in device.identifiers:
+            return device
+    return None
+
+
 async def test_device_name_follows_a_relabelled_meter(
     hass: HomeAssistant, mock_brunata_client, mock_meter
 ):
@@ -1060,11 +1082,7 @@ async def test_device_name_follows_a_relabelled_meter(
     await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done()
 
-    device_registry = dr.async_get(hass)
-    identifiers = {(DOMAIN, "brunata_12345")}
-    assert device_registry.async_get_device(identifiers=identifiers).name == (
-        "Water - Living room"
-    )
+    assert _device_for_meter(hass, entry, "12345").name == "Water - Living room"
 
     mock_brunata_client.async_get_meters = AsyncMock(
         return_value={"12345": replace(meter, placement="Kitchen", value=200.0)}
@@ -1072,9 +1090,7 @@ async def test_device_name_follows_a_relabelled_meter(
     await entry.runtime_data.async_refresh()
     await hass.async_block_till_done()
 
-    assert device_registry.async_get_device(identifiers=identifiers).name == (
-        "Water - Kitchen"
-    )
+    assert _device_for_meter(hass, entry, "12345").name == "Water - Kitchen"
 
 
 async def test_sensor_placement_is_cleared_when_it_disappears(mock_meter):
