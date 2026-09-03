@@ -649,6 +649,10 @@ def test_a_skipped_unit_is_reported_rather_than_silently_dropped():
     bad = _meter_item("bad")
     bad["unit"] = 99
     good = _meter_item("good")
+    # Index 1, not the item default of "8": index 8 is one of the reserved
+    # null slots in the table above, so leaving it would skip this meter too
+    # and the test would assert nothing.
+    good["unit"] = 1
 
     parsed = _parse_meters(
         [bad, good], meter_types=METER_TYPES, measurement_units=units
