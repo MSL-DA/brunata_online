@@ -27,6 +27,7 @@ from custom_components.brunata.api import (
     BrunataApiError,
     BrunataAuthError,
     BrunataConnectionError,
+    ParseReport,
 )
 from custom_components.brunata.const import DOMAIN
 
@@ -212,6 +213,86 @@ async def test_a_meter_that_is_merely_gone_is_not_forgotten(
     await hass.async_block_till_done()
 
     assert coordinator.known_meter_ids == {"12345"}
+
+
+async def test_nothing_is_removable_when_brunata_reported_no_meters_at_all(
+    hass: HomeAssistant, mock_brunata_client, mock_meter
+):
+    """A payload with zero entries is a *successful* update with empty data.
+
+    Nothing in _parse_meters() raises for an empty list, so last_update_success
+    stays True and every device this integration owns looks dismounted at the
+    same moment. Guarding on last_update_success alone did not cover this,
+    which is what the raw item count is for.
+
+    The cost is stated in the hook's docstring and is deliberate: an account
+    whose meters are all gone at once, and which Brunata answers for with an
+    empty list, cannot delete them individually. Refusing a legitimate
+    deletion is recoverable; agreeing to a wrong one is not.
+    """
+    entry, device = await _setup_with_meter(hass, mock_brunata_client, mock_meter)
+
+    mock_brunata_client.async_get_meters = AsyncMock(return_value={})
+    mock_brunata_client.last_parse_report.return_value = ParseReport(frozenset(), 0)
+    await entry.runtime_data.async_refresh()
+    await hass.async_block_till_done()
+
+    # The premise, asserted rather than assumed: this is a *successful* update.
+    assert entry.runtime_data.last_update_success is True
+    assert entry.runtime_data.data == {}
+
+    assert await async_remove_config_entry_device(hass, entry, device) is False
+
+
+async def test_a_meter_skipped_for_an_unusable_unit_is_not_removable(
+    hass: HomeAssistant, mock_brunata_client, mock_meter
+):
+    """It is missing from the payload, but it is not gone.
+
+    api.py drops a meter whose unit did not resolve so it cannot become an
+    entity carrying a raw code as its unit — but the meter is still on the
+    wall, and Brunata is still listing it. Offering to delete it would take
+    the entity and its long term statistics with it for a fault that clears
+    itself on the next poll.
+    """
+    entry, device = await _setup_with_meter(hass, mock_brunata_client, mock_meter)
+
+    mock_brunata_client.async_get_meters = AsyncMock(return_value={})
+    mock_brunata_client.last_parse_report.return_value = ParseReport(
+        frozenset({"12345"}), 1
+    )
+    await entry.runtime_data.async_refresh()
+    await hass.async_block_till_done()
+
+    assert entry.runtime_data.last_update_success is True
+    assert await async_remove_config_entry_device(hass, entry, device) is False
+
+    # And its id is not forgotten, so the entity is not rebuilt as a duplicate
+    # when the unit resolves again.
+    assert entry.runtime_data.known_meter_ids == {"12345"}
+
+
+async def test_a_failed_update_leaves_the_previous_parse_report_alone(
+    hass: HomeAssistant, mock_brunata_client, mock_meter
+):
+    """The report and the data are read together and must describe one poll.
+
+    On a failed update the coordinator keeps its previous data, so the report
+    it is compared against has to stay with it. Updating one and not the other
+    would let a stale meter list be judged against a fresh report.
+    """
+    entry, _ = await _setup_with_meter(hass, mock_brunata_client, mock_meter)
+    coordinator = entry.runtime_data
+    before = coordinator.last_parse
+
+    mock_brunata_client.async_get_meters = AsyncMock(
+        side_effect=BrunataApiError("Brunata server error (503)", 503)
+    )
+    mock_brunata_client.last_parse_report.return_value = ParseReport(frozenset(), 0)
+    await coordinator.async_refresh()
+
+    assert coordinator.last_update_success is False
+    assert coordinator.last_parse == before
 
 
 async def test_nothing_is_removable_while_the_last_update_failed(
