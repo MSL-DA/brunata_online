@@ -129,6 +129,19 @@ async def async_get_config_entry_diagnostics(
             # failure had no HTTP status of its own.
             "last_exception_status": _api_status(coordinator.last_exception),
             "meter_count": len(meters),
+            # How many entries the last payload held before any filtering.
+            # Together with meter_count it says how much was dropped, and a
+            # zero here is the one value that means "Brunata told us nothing",
+            # which is a different fault from "Brunata says you have no
+            # meters".
+            "raw_item_count": coordinator.last_parse.raw_item_count,
+            # Meters Brunata still reports but whose unit did not resolve. They
+            # are absent from "meters" below while their sensors stay available
+            # on their last value, so this is the field that explains a sensor
+            # that stopped updating without going unavailable.
+            "unresolved_unit_meter_ids": sorted(
+                coordinator.last_parse.unresolved_unit_meter_ids
+            ),
         },
         # Every meter type and unit is an index into the lookup tables. If they
         # failed to load, every meter is named and united by a bare number, and
