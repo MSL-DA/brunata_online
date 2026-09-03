@@ -680,11 +680,22 @@ class BrunataSensor(
         coordinator keeps the previous data, so the meter is still present and
         the sensor keeps its value. reading_date is what tells you how fresh
         that value is.
+
+        Absence from the payload is not the same as being gone, though. api.py
+        also drops a meter whose unit it could not name this poll — rightly,
+        because an entity carrying a raw code as its unit loses its statistics
+        permanently — but that meter is still on the wall. Going unavailable
+        for it would punch exactly the hole in Long Term Statistics that the
+        paragraph above refuses to punch for a failed update, and for the same
+        kind of transient cause. Those ids are carried in
+        coordinator.last_parse; see ParseReport.
         """
         if self._attr_native_value is None:
             return False
         data = self.coordinator.data
-        return data is None or self._meter_id in data
+        if data is None or self._meter_id in data:
+            return True
+        return self._meter_id in self.coordinator.last_parse.unresolved_unit_meter_ids
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
