@@ -9,12 +9,15 @@ review and nothing exercised it.
 
 from datetime import date
 
+import logging
+import re
 import time
 
 import httpx
 import pytest
 
 from custom_components.brunata.api import (
+    DEFAULT_HEADERS,
     REFERER_URL,
     SUPPORTED_METER_TYPES,
     BrunataApiClient,
@@ -39,24 +42,73 @@ class FakeResponse:
         return self._json_data
 
 
-# Brunata's own meterType table, as printed by a debug log from a live
-# account. Indices 1 and 2 are the two types whose meters can be checked
-# against real entities, which is what makes the rest of the table credible —
-# see SUPPORTED_METER_TYPES. Index 3 used to say "Energy" here as a stand-in,
-# and that guess was wrong: energy is 6.
+# Brunata's two lookup tables, transcribed in full from a debug log of a live
+# account on 3 September 2026. The payload carries indices into these; the
+# names and units the user ends up seeing come from here.
+#
+# They are reproduced whole, and with their oddities intact, because a fixture
+# that says "this is what Brunata sends" gets read as a reading months later.
+# An earlier version had eight invented entries with "Energy" at index 3. That
+# was a guess, and it was wrong — energy is 6.
+#
+# Reserved slots are None, exactly as Brunata sends them: 7 of the 28 meter
+# types and 34 of the 96 units are unused.
 METER_TYPES = [
-    "Collector",
-    "Radiator",
-    "Water",
-    "Temperature",
-    "Gas",
-    "Electricity",
-    "Energy",
-    "Humidity",
+    "Collector",             # 0
+    "Radiator",              # 1  heat cost allocator
+    "Water",                 # 2
+    "Temperature",           # 3
+    "Gas",                   # 4
+    "Electricity ",          # 5  trailing space is Brunata's, not a typo
+    "Energy",                # 6
+    "Humidity",              # 7
+    "Fictive",               # 8
+    "Hour counter",          # 9
+    "Oxygen",                # 10
+    "Meter visualization",   # 11
+    "Smoke detector",        # 12
+    "Leakage detector",      # 13
+    "Climate sensor",        # 14
+    "Carbon dioxide ",       # 15 trailing space is Brunata's
+    "Acceleration Sensor",   # 16
+    "Vibration Sensor",      # 17
+    "Pressure sensor",       # 18
+    "Smart Sensors",         # 19
+    None,                    # 20
+    None,                    # 21
+    None,                    # 22
+    None,                    # 23
+    None,                    # 24
+    None,                    # 25
+    None,                    # 26
+    "RME95",                 # 27
 ]
-# Index 8 is what live water meters report; the gaps stand in for units this
-# account does not use.
-MEASUREMENT_UNITS = ["", "units", "", "", "", "", "", "", "m3"]
+
+# Written as index -> name so the 34 reserved slots do not have to be counted
+# out by hand. Index 8 is m³, which is what live water meters report, and
+# index 1 is units, which is what heat cost allocators report. kWh and units
+# each appear twice (7/16 and 1/12); that is Brunata's table, not a mistake
+# here, and it makes no difference because lookups go by index.
+_MEASUREMENT_UNIT_NAMES = {
+    0: "undefined", 1: "units", 2: "Wh", 3: "MWh", 4: "GJ", 5: "GCal",
+    6: "Btu", 7: "kWh", 8: "m³", 9: "liter", 10: "°C", 11: "hours",
+    12: "units", 13: "m³ per hour", 14: "RH %", 15: "J", 16: "kWh",
+    17: "day", 18: "Dal", 19: "MJ", 20: "kJ",
+    # 21-50 reserved
+    51: "EM units", 52: "RME82 units", 53: "RMK units",
+    # 54-55 reserved
+    56: "CLK units", 57: "VVM units", 58: "Clorius units",
+    # 59-60 reserved
+    61: "Doprimo units", 62: "RME80 units", 63: "Clorius C9 units",
+    64: "K&L units", 65: "Kundo units", 66: "L&S units", 67: "Zenner units",
+    68: "Minometer units", 69: "VVME80 units", 70: "VVM88 units",
+    71: "VVME87 units", 72: "Geysir units", 73: "W", 74: "dismounts",
+    75: "functionality test", 76: "Kcal", 77: "Mcal", 78: "state", 79: "ppm",
+    80: "m³/s", 81: "m³/min", 82: "lx", 83: "counts", 84: "%", 85: "hPa",
+    86: "level", 87: "Hz", 88: "g", 89: "m/s²", 90: "m²", 91: "‰",
+    92: "shares", 93: "kPa", 94: "m", 95: "µS/cm",
+}
+MEASUREMENT_UNITS = [_MEASUREMENT_UNIT_NAMES.get(i) for i in range(96)]
 
 
 def _parse(payload):
@@ -190,7 +242,7 @@ def test_parses_meter_and_reading():
     assert meter.meter_id == "abc"
     assert meter.meter_no == "Mabc"
     assert meter.meter_type == "Water"
-    assert meter.unit == "m3"
+    assert meter.unit == "m³"
     assert meter.value == 13.5
     assert meter.reading_date == date(2026, 8, 23)
 
@@ -304,7 +356,7 @@ def test_timestamp_reading_date_is_accepted():
 
 @pytest.mark.parametrize(
     ("type_code", "unit_code", "expected_type", "expected_unit"),
-    [(1, 1, "Radiator", "units"), (2, 8, "Water", "m3")],
+    [(1, 1, "Radiator", "units"), (2, 8, "Water", "m³")],
 )
 def test_codes_are_resolved_through_the_lookup_tables(
     type_code, unit_code, expected_type, expected_unit
@@ -487,9 +539,19 @@ def test_the_allowlist_is_what_the_table_says_it_is():
     assert SUPPORTED_METER_TYPES == frozenset({1, 2, 5})
     assert METER_TYPES[1] == "Radiator"
     assert METER_TYPES[2] == "Water"
-    assert METER_TYPES[5] == "Electricity"
+    # Brunata's own entry has a trailing space. The fixture keeps it so the
+    # stripping below is exercised against the real string rather than an
+    # invented one.
+    assert METER_TYPES[5] == "Electricity "
     assert METER_TYPES[6] == "Energy"
     assert 6 not in SUPPORTED_METER_TYPES
+
+    electricity = _meter_item("abc")
+    electricity["meterType"] = 5
+    electricity["unit"] = 7
+    meter = _parse([electricity])["abc"]
+    assert meter.meter_type == "Electricity"
+    assert meter.unit == "kWh"
 
 
 # 12 and 13 are the smoke and leakage detectors, named explicitly because
@@ -621,7 +683,7 @@ def test_an_unknown_meter_type_code_still_falls_back():
     assert meter.meter_type == "2"
     assert meter.meter_type_code == 2
     # And the unit, which did resolve, is untouched by the type's trouble.
-    assert meter.unit == "m3"
+    assert meter.unit == "m³"
 
 
 def test_without_lookup_tables_no_meter_is_created():
@@ -633,6 +695,45 @@ def test_without_lookup_tables_no_meter_is_created():
     That is the safe end: the sensors keep the values and the history they
     already have, and the next poll that loads the tables brings them back."""
     assert _parse_meters([_meter_item("abc")]).meters == {}
+
+
+def test_a_skipped_meter_type_is_logged_once_per_run(caplog):
+    """A skipped meter must not fill the log with the same line every hour.
+
+    The integration polls once an hour, so a meter that stays unsupported
+    would write 24 identical lines a day forever. The log line is therefore
+    cached per meter and per code, and fires once for the lifetime of the
+    Home Assistant process — long enough to be found in a bug report, short of
+    being noise.
+
+    Nothing held that in place before: removing the cache left every test
+    green. The meter id here is unique to this test so the cache is guaranteed
+    to be cold, whatever ran before it.
+    """
+    item = _meter_item("logged-once-type")
+    item["meterType"] = 13
+
+    with caplog.at_level(logging.INFO, logger="custom_components.brunata.api"):
+        _parse([item])
+        _parse([item])
+        _parse([item])
+
+    lines = [r for r in caplog.records if "logged-once-type" in r.getMessage()]
+    assert len(lines) == 1
+
+
+def test_a_skipped_unit_is_logged_once_per_run(caplog):
+    """The same rule for the other skip. See the test above."""
+    item = _meter_item("logged-once-unit")
+    item["unit"] = 99
+
+    with caplog.at_level(logging.WARNING, logger="custom_components.brunata.api"):
+        _parse([item])
+        _parse([item])
+        _parse([item])
+
+    lines = [r for r in caplog.records if "logged-once-unit" in r.getMessage()]
+    assert len(lines) == 1
 
 
 def test_a_skipped_unit_is_reported_rather_than_silently_dropped():
@@ -754,6 +855,46 @@ async def test_a_url_we_built_wrong_is_not_disguised_as_a_network_problem():
 
     with pytest.raises(httpx.InvalidURL):
         await client._async_request("GET", "not a url")
+
+
+async def test_the_browser_headers_reach_the_http_client(hass):
+    """The headers are the whole defence against Brunata's bot protection.
+
+    They are set in one place — when async_create() builds the HTTP client —
+    and every other test in this file goes around it with a fake client. Delete
+    the headers and the entire suite stays green, while logins start failing
+    for users with no explanation in the log.
+
+    This is the one test that builds the real client.
+    """
+    client = await BrunataApiClient.async_create(hass, "user@example.com", "s3cret")
+    try:
+        for name, value in DEFAULT_HEADERS.items():
+            assert client._client.headers[name] == value
+    finally:
+        await client.async_close()
+
+
+def test_the_browser_version_is_the_same_in_all_four_places():
+    """Bumping the Edge version means editing four strings, and missing one
+    produces headers no real browser would send — which is worse than being a
+    version behind, because it is exactly the inconsistency bot protection
+    looks for.
+
+    Nothing can tell whether the version is current; that stays a manual job.
+    This only holds the four to each other.
+    """
+    user_agent = DEFAULT_HEADERS["User-Agent"]
+    client_hints = DEFAULT_HEADERS["Sec-Ch-Ua"]
+
+    versions = {
+        re.search(r"Chrome/(\d+)", user_agent).group(1),
+        re.search(r"Edg/(\d+)", user_agent).group(1),
+        re.search(r'"Chromium";v="(\d+)"', client_hints).group(1),
+        re.search(r'"Microsoft Edge";v="(\d+)"', client_hints).group(1),
+    }
+
+    assert len(versions) == 1, f"Edge version differs between the headers: {versions}"
 
 
 async def test_the_lookup_tables_are_loaded_before_the_meters_are_parsed():
