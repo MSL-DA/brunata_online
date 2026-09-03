@@ -197,6 +197,24 @@ async def test_diagnostics_includes_what_faults_have_needed(
     assert meter["value"] == mock_meter.value
 
 
+async def test_diagnostics_reports_what_the_parse_dropped(
+    hass: HomeAssistant, mock_brunata_client, mock_meter
+):
+    """A sensor that stopped updating without going unavailable has exactly one
+    explanation, and this is where a bug report carries it.
+
+    raw_item_count next to meter_count says how much of the payload was
+    dropped; a zero raw count is the separate fault of Brunata reporting
+    nothing at all.
+    """
+    entry = await _setup(hass, mock_brunata_client, mock_meter)
+
+    result = await async_get_config_entry_diagnostics(hass, entry)
+
+    assert result["coordinator"]["raw_item_count"] == 1
+    assert result["coordinator"]["unresolved_unit_meter_ids"] == []
+
+
 async def test_diagnostics_serialises_dates_as_strings(
     hass: HomeAssistant, mock_brunata_client, mock_meter
 ):
