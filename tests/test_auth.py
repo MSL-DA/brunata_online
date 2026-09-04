@@ -320,6 +320,72 @@ async def test_token_endpoint_without_access_token_clears_state():
     assert client._refresh_token is None
 
 
+@pytest.mark.parametrize("payload", [[], "an error page", 42, None])
+async def test_a_token_response_that_is_not_an_object_is_refused(payload):
+    """_payload() lets a body through that is not a JSON object.
+
+    It reads the status and looks for an error body, but a list, a string or a
+    bare null passes it untouched — and .get() on one of those raises
+    AttributeError, which is not a type either caller of _store_tokens()
+    catches. It escaped _async_login(), escaped async_get_meters() and reached
+    the coordinator as an unexpected exception with a traceback.
+
+    Not far-fetched: a gateway, a captive portal or a bot-protection page can
+    answer 200 with perfectly valid JSON that is not the token object.
+    _async_ensure_lookup_tables() already makes this check on the locale
+    resource; the two tests below are what the type of error buys.
+    """
+    http = FakeHttpClient()
+    client = make_client(http)
+
+    with pytest.raises(BrunataApiError, match="not an object"):
+        client._store_tokens(payload)
+
+
+async def test_a_refresh_answered_with_the_wrong_shape_falls_back_to_a_full_login():
+    """The half that mattered.
+
+    The AttributeError escaped from inside _async_try_refresh() *before* the
+    return that gives up on the refresh token, so the browser login below never
+    ran. The same rejected token was replayed every hour, and only reloading
+    the entry broke out of it. BrunataApiError is caught there and means
+    "fall back", which is what the four requests below are.
+    """
+    http = FakeHttpClient(
+        authorize=_authorize_with_form(),
+        form_post=_successful_form_post(),
+        token_posts=[FakeResponse(json_data=[]), _token_ok()],
+    )
+    client = make_client(http, refresh_token="old-refresh")
+
+    await client._async_login()
+
+    assert http.request_methods() == [
+        "POST token",  # refresh attempt, answered with a list
+        "GET other",   # authorize
+        "POST other",  # credentials
+        "POST token",  # code exchange
+    ]
+    assert client._access_token == "new-access-token"
+
+
+async def test_a_token_exchange_answered_with_the_wrong_shape_clears_state():
+    """The other caller. There is nothing left to fall back to here, so the
+    same shape has to end as an auth error with no half-stored token behind
+    it — exactly what a response carrying no access token already does."""
+    http = FakeHttpClient(
+        authorize=_authorize_with_form(),
+        form_post=_successful_form_post(),
+        token_posts=[FakeResponse(json_data=["not", "an", "object"])],
+    )
+    client = make_client(http, access_token="stale")
+
+    with pytest.raises(BrunataAuthError):
+        await client._async_login()
+    assert client._access_token is None
+    assert client._refresh_token is None
+
+
 async def test_expiry_is_derived_from_expires_in_only():
     """expires_at is ours to compute. A response carrying no expires_in must
     leave the token immediately unusable rather than inheriting the previous
