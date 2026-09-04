@@ -21,6 +21,7 @@ from .api import (
     BrunataAuthError,
     BrunataConnectionError,
     BrunataMeter,
+    ParseReport,
 )
 from .const import DEVICE_ID_PREFIX, DOMAIN
 
@@ -30,23 +31,46 @@ PLATFORMS: list[Platform] = [Platform.SENSOR]
 
 type BrunataConfigEntry = ConfigEntry[BrunataDataUpdateCoordinator]
 
-# The poll lands in a 60-second window ending at 59:30, so every install has at
-# least 30 seconds left before the hour rolls over. That margin is for the
-# request itself to finish, not for a retry — there is none. Measured round
-# trips are 0.2-1.6 s, so 30 s is generous; it is cheap and it means a slow
-# response still lands its reading in the hour it was taken.
+# The poll lands somewhere in 58:30-59:29, so every install has at least 31
+# seconds left before the hour rolls over. That margin is for the request
+# itself to finish, not for a retry — there is none. Measured round trips are
+# 0.2-1.6 s, so it is generous; it is cheap and it means a slow response still
+# lands its reading in the hour it was taken.
+#
+# The spread must not push the last possible poll past 59:59.
+# _jittered_poll_time() carries seconds into minutes, so a spread of 120 would
+# hand async_track_time_change() a minute of 60, which is not a clock time and
+# fails at registration — the integration would load and then never poll.
+# test_the_poll_window_stays_inside_the_hour holds the three constants to that.
 _POLL_WINDOW_BASE_MINUTE = 58
 _POLL_WINDOW_BASE_SECOND = 30
 _POLL_WINDOW_SPREAD_SECONDS = 60
 
-# How long to stay away after an HTTP 429 with no usable Retry-After. One hour
-# is the next scheduled poll anyway, so this only bites when Brunata asks for
-# longer than that.
-_RATE_LIMIT_DEFAULT_BACKOFF = timedelta(hours=1)
+# How long to stay away after an HTTP 429 with no usable Retry-After.
+#
+# Deliberately under an hour rather than exactly one. _rate_limited_until is
+# set *after* the request has failed, so a full hour lands a fraction of a
+# second past the next scheduled tick — which is then skipped, and two hours
+# pass between polls instead of one. Home Assistant attributes consumption to
+# the hour it polled, so that silently books a reading an hour late: the exact
+# cost async_should_poll() explains the adaptive backoff was rolled back over.
+# Five minutes of slack is far more than the round trip needs and lets the
+# next tick through.
+_RATE_LIMIT_DEFAULT_BACKOFF = timedelta(minutes=55)
+
+# And a ceiling on what Brunata can ask for. Retry-After is a number from the
+# network: without a cap, a header of 1e12 stops this integration polling for
+# thirty thousand years, and the only trace is one warning naming a date in the
+# year 33000. A day is far longer than any real rate limit and still recovers
+# on its own.
+#
+# Applied to the seconds, not to a finished timedelta — see the comment at the
+# call site in _async_update_data() for why that distinction is load-bearing.
+_RATE_LIMIT_MAX_BACKOFF = timedelta(hours=24)
 
 
-def _entry_jitter_seconds(entry_id: str, spread: int = _POLL_WINDOW_SPREAD_SECONDS) -> int:
-    """Derive a stable 0..(spread-1) second offset from the entry_id.
+def _entry_jitter_seconds(entry_id: str) -> int:
+    """Derive a stable 0..59 second offset from the entry_id.
 
     Deterministic per config entry (stable across HA restarts and reloads),
     so a given install always polls at the same wall-clock second — but
@@ -54,7 +78,7 @@ def _entry_jitter_seconds(entry_id: str, spread: int = _POLL_WINDOW_SPREAD_SECON
     hitting Brunata's endpoint in the same one-second window.
     """
     digest = hashlib.sha256(entry_id.encode()).hexdigest()
-    return int(digest, 16) % spread
+    return int(digest, 16) % _POLL_WINDOW_SPREAD_SECONDS
 
 
 def _jittered_poll_time(entry_id: str) -> tuple[int, int]:
@@ -141,22 +165,48 @@ async def async_remove_config_entry_device(
     entry: BrunataConfigEntry,
     device: dr.DeviceEntry,
 ) -> bool:
-    """Allow deleting a device whose meter Brunata no longer reports.
+    """Decide whether a meter's device may be deleted.
 
-    Home Assistant only offers the delete button when this function exists.
-    Without it a dismounted meter stays in the device registry forever: the
-    entity goes unavailable — correct — but the device cannot be removed short
-    of deleting the whole config entry and setting it up again. Meters are
-    replaced every eight to ten years, so that is not hypothetical.
+    Note what this does *not* control. The delete button on a device page is
+    shown as soon as an integration defines this function at all — it is a
+    property of the integration, not of the data. This function decides what
+    happens when the button is pressed: False makes Home Assistant refuse with
+    "Failed to remove device entry, rejected by integration", True deletes the
+    device and its entity. So every answer here is a decision about a click
+    somebody has already made.
 
-    A device is removable exactly when its meter is absent from the latest
-    data. Identifiers are matched against what the coordinator holds rather
-    than against the entity registry, because the payload is what decides
-    whether the meter still exists.
+    Without the function at all, a dismounted meter would stay in the device
+    registry forever — the entity goes unavailable, correctly, but the device
+    could not be removed short of deleting the whole config entry and setting
+    it up again. Meters are replaced every eight to ten years, so that is not
+    hypothetical.
 
-    A failed update is not a reason to allow anything: the coordinator keeps
-    the previous data, but if that were ever empty at the same time, this would
-    happily agree to delete every device the integration owns.
+    **The rule: agree only when the meter is provably gone.** Absence from the
+    latest data is not proof on its own, because a meter can be missing from it
+    for three different reasons — see ParseReport. Two of them are answered
+    here:
+
+    * *Brunata reported nothing at all.* A payload with zero entries parses to
+      an empty dictionary and a perfectly successful update, at which point
+      every device this integration owns looks dismounted at once. This used to
+      be guarded with last_update_success alone, on the reasoning that a failed
+      update was the only way `data` could be empty. It is not: an empty
+      payload succeeds. raw_item_count is what distinguishes "Brunata listed
+      meters and this one was not among them" from "Brunata listed nothing".
+    * *The unit did not resolve.* api.py drops such a meter so it cannot become
+      an entity carrying a raw code as its unit, but the meter is still on the
+      wall. It is counted as present here.
+
+    The cost of the first check is that an account whose meters have *all* been
+    dismounted at once, and which Brunata answers for with an empty list rather
+    than with dismounted entries, cannot delete them individually. That user
+    can still delete the config entry. Refusing a legitimate deletion is
+    recoverable; agreeing to a wrong one takes the entity and its long term
+    statistics with it, and that cannot be undone.
+
+    A failed update is likewise not a reason to allow anything: the coordinator
+    keeps the previous data, and it describes a poll that is no longer the
+    latest one.
 
     runtime_data is read defensively for the same reason as in
     async_unload_entry. Home Assistant's remove handler checks that the device
@@ -191,10 +241,20 @@ async def async_remove_config_entry_device(
         )
         return False
 
-    live = {
-        (DOMAIN, f"{DEVICE_ID_PREFIX}{meter_id}")
-        for meter_id in (coordinator.data or {})
-    }
+    if not coordinator.last_parse.raw_item_count:
+        _LOGGER.debug(
+            "Refusing to remove device %s: the last poll returned no meters at "
+            "all, which says nothing about this one",
+            device.id,
+        )
+        return False
+
+    # Meters Brunata still reports: the ones that parsed, plus the ones only
+    # skipped because their unit did not resolve this poll.
+    present = set(coordinator.data or {}) | (
+        coordinator.last_parse.unresolved_unit_meter_ids
+    )
+    live = {(DOMAIN, f"{DEVICE_ID_PREFIX}{meter_id}") for meter_id in present}
     if device.identifiers & live:
         return False
 
@@ -222,6 +282,15 @@ class BrunataDataUpdateCoordinator(DataUpdateCoordinator[dict[str, BrunataMeter]
         # async_remove_config_entry_device() has to take an id back out when
         # the device and its entity are gone.
         self.known_meter_ids: set[str] = set()
+        # What the last successful poll's parse saw, beyond the meters it
+        # produced. A meter absent from `data` is not necessarily gone, and an
+        # empty `data` is not necessarily an empty account — see ParseReport,
+        # BrunataSensor.available and async_remove_config_entry_device().
+        #
+        # Starts empty with a raw count of zero, which is the honest state
+        # before the first poll: nothing has been reported, so nothing can be
+        # concluded.
+        self.last_parse = ParseReport(frozenset(), 0)
         # Set when Brunata answers 429. See async_should_poll().
         self._rate_limited_until: datetime | None = None
         super().__init__(
@@ -261,6 +330,10 @@ class BrunataDataUpdateCoordinator(DataUpdateCoordinator[dict[str, BrunataMeter]
                     self._rate_limited_until,
                 )
                 return False
+            # Cleared here, and only here. This is the one place the deadline
+            # is read, so it expires where it is used rather than being reset
+            # by a successful update somewhere else — a second place would have
+            # to be kept in step with this one for no gain.
             self._rate_limited_until = None
 
         return True
@@ -268,7 +341,7 @@ class BrunataDataUpdateCoordinator(DataUpdateCoordinator[dict[str, BrunataMeter]
     async def _async_update_data(self) -> dict[str, BrunataMeter]:
         """Fetch data from the API."""
         try:
-            return await self.client.async_get_meters()
+            meters = await self.client.async_get_meters()
         except BrunataAuthError as err:
             # Propagates so Home Assistant starts the re-authentication flow.
             raise ConfigEntryAuthFailed(str(err)) from err
@@ -282,8 +355,23 @@ class BrunataDataUpdateCoordinator(DataUpdateCoordinator[dict[str, BrunataMeter]
             raise UpdateFailed(str(err)) from err
         except BrunataApiError as err:
             if err.status == 429:
+                # Capped in seconds, not by min()-ing two timedeltas. That
+                # version built the timedelta before it compared, so the cap
+                # never got a chance to apply: timedelta tops out at 999999999
+                # days, and any Retry-After at or above 8.64e13 seconds raised
+                # OverflowError right here — inside the very except block that
+                # exists to translate this error, so it escaped as an
+                # unexpected exception. api.py already rejects inf and nan; a
+                # finite number too large for a timedelta is the other half of
+                # the same guard, and it belongs here because how long we are
+                # willing to stay away is this module's decision.
                 wait = (
-                    timedelta(seconds=err.retry_after)
+                    timedelta(
+                        seconds=min(
+                            err.retry_after,
+                            _RATE_LIMIT_MAX_BACKOFF.total_seconds(),
+                        )
+                    )
                     if err.retry_after is not None
                     else _RATE_LIMIT_DEFAULT_BACKOFF
                 )
@@ -294,3 +382,9 @@ class BrunataDataUpdateCoordinator(DataUpdateCoordinator[dict[str, BrunataMeter]
                     self._rate_limited_until,
                 )
             raise UpdateFailed(str(err)) from err
+
+        # Only on the success path. A failed update leaves the previous report
+        # in place, the same way it leaves the previous data in place: the two
+        # are read together and must describe the same poll.
+        self.last_parse = self.client.last_parse_report()
+        return meters

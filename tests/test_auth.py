@@ -335,6 +335,32 @@ async def test_expiry_is_derived_from_expires_in_only():
     assert client._token_is_usable is False
 
 
+@pytest.mark.parametrize("expires_in", ["one hour", "", [], {}, True, False, float("inf")])
+async def test_an_unreadable_expires_in_does_not_escape_the_login(expires_in):
+    """_store_tokens() used to call float() on this directly.
+
+    A string that is not a number raised ValueError and a list raised
+    TypeError. Both callers catch only BrunataApiError around that call, so
+    either one went straight out of _async_login(), out of async_get_meters()
+    and into the coordinator as an unexpected exception rather than as a clean
+    retry or reauth.
+
+    The right answer is the one an absent expires_in already gets: no usable
+    expiry, so the token is not reused and the next request logs in again.
+    That costs one login. The other way costs the update.
+
+    True and False are in the list because bool subclasses int, so `true`
+    would otherwise be read as a one-second lifetime.
+    """
+    http = FakeHttpClient()
+    client = make_client(http)
+
+    client._store_tokens({"access_token": "A", "expires_in": expires_in})
+
+    assert client._access_token == "A"
+    assert client._token_is_usable is False
+
+
 async def test_expiry_has_a_safety_margin():
     """A token expiring in a second must not be sent on a request that takes
     longer than that to complete."""

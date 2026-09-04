@@ -43,6 +43,34 @@ async def _setup(hass: HomeAssistant, mock_brunata_client, mock_meter):
     return entry
 
 
+async def test_diagnostics_for_an_entry_that_never_loaded(
+    hass: HomeAssistant, mock_brunata_client
+):
+    """A report is needed most when the integration did not come up.
+
+    Without the defensive read of runtime_data, this is an AttributeError on
+    the download — a stack trace at the exact moment the user is trying to
+    tell us what went wrong. The `loaded` key is named rather than left out so
+    a reader can tell "the entry never set up" from "the report is missing a
+    section".
+    """
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={"email": "test@example.com", "password": "password123"},
+    )
+    entry.add_to_hass(hass)
+
+    # The premise, asserted rather than assumed: nothing has set runtime_data.
+    assert not hasattr(entry, "runtime_data")
+
+    result = await async_get_config_entry_diagnostics(hass, entry)
+
+    assert result["loaded"] is False
+    assert result["entry"]["data"]["password"] == "**REDACTED**"
+    assert "coordinator" not in result
+    assert "meters" not in result
+
+
 async def test_diagnostics_redacts_the_credentials(
     hass: HomeAssistant, mock_brunata_client, mock_meter
 ):
@@ -167,6 +195,24 @@ async def test_diagnostics_includes_what_faults_have_needed(
     assert meter["meter_type"] == mock_meter.meter_type
     assert meter["unit"] == mock_meter.unit
     assert meter["value"] == mock_meter.value
+
+
+async def test_diagnostics_reports_what_the_parse_dropped(
+    hass: HomeAssistant, mock_brunata_client, mock_meter
+):
+    """A sensor that stopped updating without going unavailable has exactly one
+    explanation, and this is where a bug report carries it.
+
+    raw_item_count next to meter_count says how much of the payload was
+    dropped; a zero raw count is the separate fault of Brunata reporting
+    nothing at all.
+    """
+    entry = await _setup(hass, mock_brunata_client, mock_meter)
+
+    result = await async_get_config_entry_diagnostics(hass, entry)
+
+    assert result["coordinator"]["raw_item_count"] == 1
+    assert result["coordinator"]["unresolved_unit_meter_ids"] == []
 
 
 async def test_diagnostics_serialises_dates_as_strings(

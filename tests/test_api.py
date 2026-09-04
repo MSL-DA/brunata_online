@@ -9,16 +9,21 @@ review and nothing exercised it.
 
 from datetime import date
 
+import logging
+import re
 import time
 
+import httpx
 import pytest
 
 from custom_components.brunata.api import (
+    DEFAULT_HEADERS,
     REFERER_URL,
     SUPPORTED_METER_TYPES,
     BrunataApiClient,
     BrunataApiError,
     BrunataAuthError,
+    BrunataConnectionError,
     _parse_meters,
     _payload,
 )
@@ -37,30 +42,87 @@ class FakeResponse:
         return self._json_data
 
 
-# Brunata's own meterType table, as printed by a debug log from a live
-# account. Indices 1 and 2 are the two types whose meters can be checked
-# against real entities, which is what makes the rest of the table credible —
-# see SUPPORTED_METER_TYPES. Index 3 used to say "Energy" here as a stand-in,
-# and that guess was wrong: energy is 6.
+# Brunata's two lookup tables, transcribed in full from a debug log of a live
+# account on 3 September 2026. The payload carries indices into these; the
+# names and units the user ends up seeing come from here.
+#
+# They are reproduced whole, and with their oddities intact, because a fixture
+# that says "this is what Brunata sends" gets read as a reading months later.
+# An earlier version had eight invented entries with "Energy" at index 3. That
+# was a guess, and it was wrong — energy is 6.
+#
+# Reserved slots are None, exactly as Brunata sends them: 7 of the 28 meter
+# types and 34 of the 96 units are unused.
 METER_TYPES = [
-    "Collector",
-    "Radiator",
-    "Water",
-    "Temperature",
-    "Gas",
-    "Electricity",
-    "Energy",
-    "Humidity",
+    "Collector",             # 0
+    "Radiator",              # 1  heat cost allocator
+    "Water",                 # 2
+    "Temperature",           # 3
+    "Gas",                   # 4
+    "Electricity ",          # 5  trailing space is Brunata's, not a typo
+    "Energy",                # 6
+    "Humidity",              # 7
+    "Fictive",               # 8
+    "Hour counter",          # 9
+    "Oxygen",                # 10
+    "Meter visualization",   # 11
+    "Smoke detector",        # 12
+    "Leakage detector",      # 13
+    "Climate sensor",        # 14
+    "Carbon dioxide ",       # 15 trailing space is Brunata's
+    "Acceleration Sensor",   # 16
+    "Vibration Sensor",      # 17
+    "Pressure sensor",       # 18
+    "Smart Sensors",         # 19
+    None,                    # 20
+    None,                    # 21
+    None,                    # 22
+    None,                    # 23
+    None,                    # 24
+    None,                    # 25
+    None,                    # 26
+    "RME95",                 # 27
 ]
-# Index 8 is what live water meters report; the gaps stand in for units this
-# account does not use.
-MEASUREMENT_UNITS = ["", "units", "", "", "", "", "", "", "m3"]
+
+# Written as index -> name so the 34 reserved slots do not have to be counted
+# out by hand. Index 8 is m³, which is what live water meters report, and
+# index 1 is units, which is what heat cost allocators report. kWh and units
+# each appear twice (7/16 and 1/12); that is Brunata's table, not a mistake
+# here, and it makes no difference because lookups go by index.
+_MEASUREMENT_UNIT_NAMES = {
+    0: "undefined", 1: "units", 2: "Wh", 3: "MWh", 4: "GJ", 5: "GCal",
+    6: "Btu", 7: "kWh", 8: "m³", 9: "liter", 10: "°C", 11: "hours",
+    12: "units", 13: "m³ per hour", 14: "RH %", 15: "J", 16: "kWh",
+    17: "day", 18: "Dal", 19: "MJ", 20: "kJ",
+    # 21-50 reserved
+    51: "EM units", 52: "RME82 units", 53: "RMK units",
+    # 54-55 reserved
+    56: "CLK units", 57: "VVM units", 58: "Clorius units",
+    # 59-60 reserved
+    61: "Doprimo units", 62: "RME80 units", 63: "Clorius C9 units",
+    64: "K&L units", 65: "Kundo units", 66: "L&S units", 67: "Zenner units",
+    68: "Minometer units", 69: "VVME80 units", 70: "VVM88 units",
+    71: "VVME87 units", 72: "Geysir units", 73: "W", 74: "dismounts",
+    75: "functionality test", 76: "Kcal", 77: "Mcal", 78: "state", 79: "ppm",
+    80: "m³/s", 81: "m³/min", 82: "lx", 83: "counts", 84: "%", 85: "hPa",
+    86: "level", 87: "Hz", 88: "g", 89: "m/s²", 90: "m²", 91: "‰",
+    92: "shares", 93: "kPa", 94: "m", 95: "µS/cm",
+}
+MEASUREMENT_UNITS = [_MEASUREMENT_UNIT_NAMES.get(i) for i in range(96)]
 
 
 def _parse(payload):
+    """The meters half of a parse. _report() below is the other half."""
     return _parse_meters(
         payload, meter_types=METER_TYPES, measurement_units=MEASUREMENT_UNITS
-    )
+    ).meters
+
+
+def _report(payload):
+    """The ParseReport half — what the parse saw beyond the meters."""
+    return _parse_meters(
+        payload, meter_types=METER_TYPES, measurement_units=MEASUREMENT_UNITS
+    ).report
 
 
 def _meter_item(meter_id="12345", *, dismounted=None, reading=True, value=42.0):
@@ -106,6 +168,17 @@ def test_error_statuses_raise_api_error(status, match):
         ({"Retry-After": "Wed, 21 Oct 2026 07:28:00 GMT"}, None),
         ({"Retry-After": "0"}, None),
         ({"Retry-After": "-5"}, None),
+        # float() accepts all three of these, and inf is greater than zero, so
+        # they used to pass straight through to timedelta(seconds=...) in the
+        # coordinator — which raises OverflowError from inside the very except
+        # block that exists to translate this error. See the docstring on
+        # _retry_after_seconds().
+        ({"Retry-After": "inf"}, None),
+        ({"Retry-After": "Infinity"}, None),
+        ({"Retry-After": "1e400"}, None),
+        ({"Retry-After": "nan"}, None),
+        # Enormous but real. The parser passes it on; the coordinator caps it.
+        ({"Retry-After": "1e12"}, 1e12),
     ],
 )
 def test_retry_after_is_read_from_a_rate_limit(headers, expected):
@@ -169,7 +242,7 @@ def test_parses_meter_and_reading():
     assert meter.meter_id == "abc"
     assert meter.meter_no == "Mabc"
     assert meter.meter_type == "Water"
-    assert meter.unit == "m3"
+    assert meter.unit == "m³"
     assert meter.value == 13.5
     assert meter.reading_date == date(2026, 8, 23)
 
@@ -229,6 +302,33 @@ def test_unparseable_reading_value_costs_one_meter_not_all_of_them(raw_value):
     assert meters["good"].value == 42.0
 
 
+@pytest.mark.parametrize(
+    "raw_value", ["NaN", "nan", "Infinity", "inf", "-inf", "1e400", float("nan")]
+)
+def test_a_non_finite_reading_value_is_dropped(raw_value):
+    """float() accepts every one of these, and none of them is a reading.
+
+    nan is the one that matters. Every comparison against it is false, so
+    `previous is None or value >= previous` takes it whenever there is no
+    previous value — the first poll after setup, or after a restart with
+    nothing to restore — and nan becomes the sensor's state. With a previous
+    value it goes the other way and is logged as a decrease that is neither a
+    replacement nor an annual reset, which is a warning about something that
+    never happened.
+
+    The other meter in the payload must survive either way, same as every
+    other bad-row test here.
+    """
+    item = _meter_item("abc")
+    item["latestReadingValue"] = raw_value
+
+    meters = _parse([item, _meter_item("good")])
+
+    assert set(meters) == {"abc", "good"}
+    assert meters["abc"].value is None
+    assert meters["good"].value == 42.0
+
+
 def test_reading_value_as_a_numeric_string_is_accepted():
     """The unit field already arrives as a string in this payload where it was
     an integer in the old one, so a value doing the same is not far-fetched."""
@@ -256,7 +356,7 @@ def test_timestamp_reading_date_is_accepted():
 
 @pytest.mark.parametrize(
     ("type_code", "unit_code", "expected_type", "expected_unit"),
-    [(1, 1, "Radiator", "units"), (2, 8, "Water", "m3")],
+    [(1, 1, "Radiator", "units"), (2, 8, "Water", "m³")],
 )
 def test_codes_are_resolved_through_the_lookup_tables(
     type_code, unit_code, expected_type, expected_unit
@@ -298,7 +398,7 @@ def test_a_null_meter_type_entry_falls_back_to_the_raw_code():
 
     meter = _parse_meters(
         [item], meter_types=types, measurement_units=units
-    )["abc"]
+    ).meters["abc"]
     assert meter.meter_type == "1"
     assert meter.meter_type_code == 1
     assert meter.unit == "units"
@@ -328,7 +428,7 @@ def test_a_meter_whose_unit_cannot_be_resolved_is_skipped(code):
 
     assert _parse_meters(
         [item], meter_types=METER_TYPES, measurement_units=units
-    ) == {}
+    ).meters == {}
 
 
 def test_a_meter_brunata_calls_undefined_is_skipped():
@@ -343,7 +443,7 @@ def test_a_meter_brunata_calls_undefined_is_skipped():
 
     assert _parse_meters(
         [item], meter_types=METER_TYPES, measurement_units=["undefined", "units"]
-    ) == {}
+    ).meters == {}
 
 
 def test_one_unusable_unit_does_not_cost_the_other_meters():
@@ -358,9 +458,10 @@ def test_one_unusable_unit_does_not_cost_the_other_meters():
 
 @pytest.mark.parametrize("code", [1, 2, 5])
 def test_supported_meter_types_are_parsed(code):
-    """The two codes read off live account data: 1 = heat cost allocator
-    (radiator), 2 = water. Nothing else is on the list, because nothing else
-    has been read off a real account — see SUPPORTED_METER_TYPES."""
+    """The three codes on the allowlist: 1 = heat cost allocator (radiator),
+    2 = water, 5 = electricity. All three are read off Brunata's own meterType
+    table rather than guessed, and all three have produced a working entity —
+    see SUPPORTED_METER_TYPES."""
     item = _meter_item("abc")
     item["meterType"] = code
 
@@ -393,7 +494,7 @@ def test_the_numeric_meter_type_survives_an_unresolvable_name():
 
     meter = _parse_meters(
         [item], meter_types=[], measurement_units=MEASUREMENT_UNITS
-    )["abc"]
+    ).meters["abc"]
 
     assert meter.meter_type == "1"
     assert meter.meter_type_code == 1
@@ -438,9 +539,19 @@ def test_the_allowlist_is_what_the_table_says_it_is():
     assert SUPPORTED_METER_TYPES == frozenset({1, 2, 5})
     assert METER_TYPES[1] == "Radiator"
     assert METER_TYPES[2] == "Water"
-    assert METER_TYPES[5] == "Electricity"
+    # Brunata's own entry has a trailing space. The fixture keeps it so the
+    # stripping below is exercised against the real string rather than an
+    # invented one.
+    assert METER_TYPES[5] == "Electricity "
     assert METER_TYPES[6] == "Energy"
     assert 6 not in SUPPORTED_METER_TYPES
+
+    electricity = _meter_item("abc")
+    electricity["meterType"] = 5
+    electricity["unit"] = 7
+    meter = _parse([electricity])["abc"]
+    assert meter.meter_type == "Electricity"
+    assert meter.unit == "kWh"
 
 
 # 12 and 13 are the smoke and leakage detectors, named explicitly because
@@ -461,10 +572,11 @@ def test_unsupported_meter_types_never_become_entities(code):
     has to be dropped here. If this test ever needs relaxing, that is the
     moment to think very hard about why.
 
-    3 is in this list on purpose. It is widely assumed to be an energy meter,
-    but that has never been read off a real account, and an assumption does
-    not belong on a safety boundary. It moves to the supported list when
-    somebody posts the log line that proves it."""
+    Everything in this list is a code the table names or leaves empty, and
+    none of it is a guess: 3 is temperature, 4 is gas, 6 is energy, 12 and 13
+    are the detectors, and 20-26 are unfilled slots. Knowing what a code means
+    and choosing to surface it are separate decisions — 6 is the clearest
+    case, and it stays out until somebody actually has such a meter."""
     item = _meter_item("abc")
     item["meterType"] = code
 
@@ -511,7 +623,7 @@ def test_a_supported_meter_survives_alongside_an_unsupported_one():
     water = _meter_item("water")
     water["meterType"] = 2
     detector = _meter_item("detector")
-    detector["meterType"] = 26
+    detector["meterType"] = 13
 
     assert sorted(_parse([water, detector])) == ["water"]
 
@@ -524,7 +636,7 @@ def test_trailing_whitespace_in_table_entries_is_stripped():
 
     meter = _parse_meters(
         [item], meter_types=["", "Radiator "], measurement_units=MEASUREMENT_UNITS
-    )["abc"]
+    ).meters["abc"]
     assert meter.meter_type == "Radiator"
 
 
@@ -547,7 +659,7 @@ def test_a_negative_unit_code_does_not_wrap_round_the_table():
         [item],
         meter_types=METER_TYPES,
         measurement_units=["undefined", "units", "m3", "THE-LAST-ENTRY"],
-    ) == {}
+    ).meters == {}
 
 
 def test_an_unknown_meter_type_code_still_falls_back():
@@ -567,11 +679,11 @@ def test_an_unknown_meter_type_code_still_falls_back():
     meter = _parse_meters(
         [item], meter_types=["Collector", "Radiator"],
         measurement_units=MEASUREMENT_UNITS,
-    )["abc"]
+    ).meters["abc"]
     assert meter.meter_type == "2"
     assert meter.meter_type_code == 2
     # And the unit, which did resolve, is untouched by the type's trouble.
-    assert meter.unit == "m3"
+    assert meter.unit == "m³"
 
 
 def test_without_lookup_tables_no_meter_is_created():
@@ -582,7 +694,268 @@ def test_without_lookup_tables_no_meter_is_created():
     Every unit is unresolvable without the table, so every meter is skipped.
     That is the safe end: the sensors keep the values and the history they
     already have, and the next poll that loads the tables brings them back."""
-    assert _parse_meters([_meter_item("abc")]) == {}
+    assert _parse_meters([_meter_item("abc")]).meters == {}
+
+
+def test_a_skipped_meter_type_is_logged_once_per_run(caplog):
+    """A skipped meter must not fill the log with the same line every hour.
+
+    The integration polls once an hour, so a meter that stays unsupported
+    would write 24 identical lines a day forever. The log line is therefore
+    cached per meter and per code, and fires once for the lifetime of the
+    Home Assistant process — long enough to be found in a bug report, short of
+    being noise.
+
+    Nothing held that in place before: removing the cache left every test
+    green. The meter id here is unique to this test so the cache is guaranteed
+    to be cold, whatever ran before it.
+    """
+    item = _meter_item("logged-once-type")
+    item["meterType"] = 13
+
+    with caplog.at_level(logging.INFO, logger="custom_components.brunata.api"):
+        _parse([item])
+        _parse([item])
+        _parse([item])
+
+    lines = [r for r in caplog.records if "logged-once-type" in r.getMessage()]
+    assert len(lines) == 1
+
+
+def test_a_skipped_unit_is_logged_once_per_run(caplog):
+    """The same rule for the other skip. See the test above."""
+    item = _meter_item("logged-once-unit")
+    item["unit"] = 99
+
+    with caplog.at_level(logging.WARNING, logger="custom_components.brunata.api"):
+        _parse([item])
+        _parse([item])
+        _parse([item])
+
+    lines = [r for r in caplog.records if "logged-once-unit" in r.getMessage()]
+    assert len(lines) == 1
+
+
+def test_a_skipped_unit_is_reported_rather_than_silently_dropped():
+    """The meter is skipped, but it is not gone, and the difference matters.
+
+    Absence from the meters dictionary is ambiguous: dismounted, unsupported,
+    or — as here — still on the wall with a unit we could not name this poll.
+    Only the first means the meter is gone. Without the report, the sensor
+    would go unavailable and the device would become removable, both wrong for
+    a meter Brunata is still listing.
+    """
+    units = ["undefined", "units"] + [None] * 94
+
+    bad = _meter_item("bad")
+    bad["unit"] = 99
+    good = _meter_item("good")
+    # Index 1, not the item default of "8": index 8 is one of the reserved
+    # null slots in the table above, so leaving it would skip this meter too
+    # and the test would assert nothing.
+    good["unit"] = 1
+
+    parsed = _parse_meters(
+        [bad, good], meter_types=METER_TYPES, measurement_units=units
+    )
+
+    assert set(parsed.meters) == {"good"}
+    assert parsed.report.unresolved_unit_meter_ids == frozenset({"bad"})
+
+
+def test_an_unsupported_meter_type_is_not_reported_as_unresolved():
+    """The two skips are not the same thing.
+
+    An unsupported meterType never becomes an entity in the first place, so
+    there is nothing to keep available and nothing to protect from deletion.
+    Only the unit skip concerns a meter that already has one.
+    """
+    detector = _meter_item("detector")
+    detector["meterType"] = 13
+
+    assert _report([detector]).unresolved_unit_meter_ids == frozenset()
+
+
+def test_a_dismounted_meter_is_not_reported_as_unresolved():
+    """A dismounted meter really is gone, and must stay removable."""
+    item = _meter_item("gone", dismounted="2026-03-01T09:00:00+01:00")
+
+    assert _report([item]).unresolved_unit_meter_ids == frozenset()
+
+
+@pytest.mark.parametrize(("payload", "expected"), [([], 0), ([_meter_item("a")], 1)])
+def test_the_raw_item_count_is_what_brunata_sent(payload, expected):
+    """Counted before any filtering.
+
+    Zero is the value that matters: it means Brunata reported nothing at all,
+    which is a different fault from "Brunata says you have no meters" and is
+    not evidence that any particular meter is gone.
+    """
+    assert _report(payload).raw_item_count == expected
+
+
+def test_an_empty_payload_parses_to_a_successful_update_with_no_meters():
+    """The premise behind async_remove_config_entry_device()'s raw count check.
+
+    Nothing here raises, so the coordinator records a successful update with
+    an empty data dictionary. last_update_success is therefore not enough to
+    tell "every meter is gone" from "Brunata told us nothing".
+    """
+    parsed = _parse_meters([], meter_types=METER_TYPES, measurement_units=[""])
+
+    assert parsed.meters == {}
+    assert parsed.report.raw_item_count == 0
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        httpx.ConnectError("refused"),
+        httpx.ReadTimeout("too slow"),
+        httpx.RemoteProtocolError("garbled"),
+        # The two RequestError adds over TransportError. Caught as
+        # TransportError only, these escaped api.py untranslated and reached
+        # the coordinator as unexpected exceptions with a traceback instead of
+        # as a clean retry.
+        httpx.TooManyRedirects("redirect loop"),
+        httpx.DecodingError("bad content-encoding"),
+    ],
+)
+async def test_request_failures_become_a_connection_error(error):
+    """Everything under httpx.RequestError means the same thing here.
+
+    The request produced no usable response, so the coordinator should keep
+    the last known values and try again next hour.
+    """
+
+    class FakeHttp:
+        async def request(self, method, url, **kwargs):
+            raise error
+
+    client = BrunataApiClient("user@example.com", "s3cret", FakeHttp())
+
+    with pytest.raises(BrunataConnectionError):
+        await client._async_request("GET", "https://example.invalid")
+
+
+async def test_a_url_we_built_wrong_is_not_disguised_as_a_network_problem():
+    """httpx.InvalidURL sits outside RequestError, and that is why the handler
+    is RequestError rather than HTTPError.
+
+    A malformed URL is this integration's own mistake. Translating it into
+    BrunataConnectionError would turn it into an hourly "cannot reach Brunata"
+    that no amount of waiting fixes.
+    """
+
+    class FakeHttp:
+        async def request(self, method, url, **kwargs):
+            raise httpx.InvalidURL("not a url")
+
+    client = BrunataApiClient("user@example.com", "s3cret", FakeHttp())
+
+    with pytest.raises(httpx.InvalidURL):
+        await client._async_request("GET", "not a url")
+
+
+async def test_the_browser_headers_reach_the_http_client(hass):
+    """The headers are the whole defence against Brunata's bot protection.
+
+    They are set in one place — when async_create() builds the HTTP client —
+    and every other test in this file goes around it with a fake client. Delete
+    the headers and the entire suite stays green, while logins start failing
+    for users with no explanation in the log.
+
+    This is the one test that builds the real client.
+    """
+    client = await BrunataApiClient.async_create(hass, "user@example.com", "s3cret")
+    try:
+        for name, value in DEFAULT_HEADERS.items():
+            assert client._client.headers[name] == value
+    finally:
+        await client.async_close()
+
+
+def test_the_browser_version_is_the_same_in_all_four_places():
+    """Bumping the Edge version means editing four strings, and missing one
+    produces headers no real browser would send — which is worse than being a
+    version behind, because it is exactly the inconsistency bot protection
+    looks for.
+
+    Nothing can tell whether the version is current; that stays a manual job.
+    This only holds the four to each other.
+    """
+    user_agent = DEFAULT_HEADERS["User-Agent"]
+    client_hints = DEFAULT_HEADERS["Sec-Ch-Ua"]
+
+    versions = {
+        re.search(r"Chrome/(\d+)", user_agent).group(1),
+        re.search(r"Edg/(\d+)", user_agent).group(1),
+        re.search(r'"Chromium";v="(\d+)"', client_hints).group(1),
+        re.search(r'"Microsoft Edge";v="(\d+)"', client_hints).group(1),
+    }
+
+    assert len(versions) == 1, f"Edge version differs between the headers: {versions}"
+
+
+async def test_the_lookup_tables_are_loaded_before_the_meters_are_parsed():
+    """Order, not just outcome.
+
+    async_get_meters() fetches the locale resource first and then parses the
+    meter payload against it. Reversed, the tables would be empty at parse
+    time, every unit would fail to resolve, every meter would be skipped — and
+    the update would *succeed* with nothing in it. Nothing else in the suite
+    notices, because the other endpoint test presets the tables itself.
+    """
+    calls: list[str] = []
+
+    class FakeHttp:
+        async def request(self, method, url, **kwargs):
+            calls.append(url)
+            if url.endswith("/locales/en/common"):
+                return FakeResponse(
+                    200,
+                    json_data={
+                        "mappers": {
+                            "meterType": METER_TYPES,
+                            "measurementUnit": MEASUREMENT_UNITS,
+                        }
+                    },
+                )
+            return FakeResponse(200, json_data=[_meter_item("abc")])
+
+    client = BrunataApiClient("user@example.com", "s3cret", FakeHttp())
+    client._access_token = "T"
+    client._expires_at = time.time() + 300
+
+    meters = await client.async_get_meters()
+
+    assert calls[0].endswith("/locales/en/common")
+    assert calls[1].endswith("/consumer/metersforconsumer")
+    assert set(meters) == {"abc"}
+
+
+async def test_the_parse_report_describes_the_call_it_came_from():
+    """The coordinator reads the report immediately after the meters, and the
+    two have to describe the same poll."""
+
+    class FakeHttp:
+        async def request(self, method, url, **kwargs):
+            return FakeResponse(200, json_data=[_meter_item("abc")])
+
+    client = BrunataApiClient("user@example.com", "s3cret", FakeHttp())
+    client._access_token = "T"
+    client._expires_at = time.time() + 300
+    client._meter_types = METER_TYPES
+    client._measurement_units = MEASUREMENT_UNITS
+    client._lookup_tables_loaded = True
+
+    # Before any call: nothing has been reported, so nothing may be concluded.
+    assert client.last_parse_report().raw_item_count == 0
+
+    await client.async_get_meters()
+
+    assert client.last_parse_report().raw_item_count == 1
+    assert client.last_parse_report().unresolved_unit_meter_ids == frozenset()
 
 
 def test_non_list_payload_raises_api_error():
@@ -642,6 +1015,23 @@ def test_non_integer_decimals_is_ignored(decimals):
     """
     item = _meter_item("abc")
     item["decimals"] = decimals
+
+    assert _parse([item])["abc"].decimals is None
+
+
+def test_a_negative_decimals_is_ignored():
+    """There is no such thing as minus four decimal places.
+
+    decimals sets how many digits Home Assistant shows. The guard beside it
+    already rejects bools and non-integers; a negative number is the same kind
+    of unusable input and was the one case that slipped through. Passing it on
+    would show the reading rounded to a number Brunata never reported.
+
+    Not seen in any payload. The point is that the field is checked the same
+    way in every direction.
+    """
+    item = _meter_item("abc")
+    item["decimals"] = -4
 
     assert _parse([item])["abc"].decimals is None
 

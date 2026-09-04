@@ -20,13 +20,14 @@ import base64
 import hashlib
 import html
 import logging
+import math
 import re
 import secrets
 import time
 from dataclasses import dataclass
 from datetime import date, datetime
 from functools import lru_cache, partial
-from typing import Any
+from typing import Any, NamedTuple
 from urllib.parse import parse_qs, urlparse
 
 import httpx
@@ -88,11 +89,10 @@ ISSUE_TRACKER_URL = "https://github.com/MSL-DA/brunata_online/issues"
 # person it gets tested against. Adding it is one number and one line in the
 # README. Leaving it out costs nothing until then.
 #
-# Note what is still untested even for 5: no electricity meter has passed
-# through this code, so which unit such a meter reports is unconfirmed. Every
-# energy unit in the live measurementUnit table is already in sensor.py's
-# UNIT_MAP, so it should resolve — but "should" is the operative word, and a
-# unit that does not resolve now skips the meter rather than mislabelling it.
+# An electricity meter has since been through this code and resolved to kWh,
+# which sensor.py's UNIT_MAP turns into UnitOfEnergy.KILO_WATT_HOUR with
+# device class ENERGY. So 5 is not just a code read off a table any more; it
+# is a type that has produced a working entity.
 #
 # The old reasoning is still wrong and worth keeping wrong: the presence of
 # GJ/Gcal in UNIT_MAP never said anything about meterType. That is the
@@ -300,6 +300,37 @@ class BrunataMeter:
     transmitting: bool | None = None
 
 
+class ParseReport(NamedTuple):
+    """What the last parse saw, beyond the meters it produced.
+
+    The meters dictionary alone cannot answer "is this meter gone?". A meter
+    can be absent from it for three reasons that mean different things:
+
+    * Brunata dismounted it — it really is gone.
+    * Its meterType is not one we surface — it never had an entity.
+    * Its unit could not be resolved this poll — it is still on the wall, and
+      we simply could not name what it measures.
+
+    The third case must not be mistaken for the first, and neither must "the
+    payload was empty, so we learned nothing at all". This record carries the
+    two facts needed to tell them apart.
+    """
+
+    # Meter ids skipped because their unit code did not resolve. Absent from
+    # the meters dictionary, but still reported by Brunata.
+    unresolved_unit_meter_ids: frozenset[str]
+    # How many entries the payload held before any filtering. Zero means
+    # Brunata reported nothing, which is not evidence about any single meter.
+    raw_item_count: int
+
+
+class ParsedMeters(NamedTuple):
+    """What _parse_meters() returns: the meters, and what it saw getting them."""
+
+    meters: dict[str, BrunataMeter]
+    report: ParseReport
+
+
 def _as_text(raw: Any) -> str:
     """Coerce a lookup code to text.
 
@@ -404,6 +435,37 @@ def parse_timestamp(raw: Any) -> datetime | None:
     return None
 
 
+def _expires_in_seconds(raw: Any) -> float | None:
+    """Read a token lifetime, or None when it cannot be read.
+
+    _store_tokens() used to call float() on this directly. A string that is not
+    a number raised ValueError and a list raised TypeError, and both callers
+    catch only BrunataApiError around that call — so either one went straight
+    out of _async_login(), out of async_get_meters() and into the coordinator
+    as an unexpected exception rather than as a clean retry or reauth.
+
+    None means "no usable expiry", which _store_tokens() already treats as an
+    immediately unusable token: the next request logs in again. Failing that
+    way costs one login; failing the other way costs the update.
+
+    Bools are refused for the same reason _meter_type_code() refuses them.
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, bool):
+        _LOGGER.debug("Brunata sent an unreadable expires_in: %r", raw)
+        return None
+    try:
+        seconds = float(raw)
+    except (TypeError, ValueError):
+        _LOGGER.debug("Brunata sent an unreadable expires_in: %r", raw)
+        return None
+    if not math.isfinite(seconds):
+        _LOGGER.debug("Brunata sent a non-finite expires_in: %r", raw)
+        return None
+    return seconds
+
+
 def _parse_value(raw: Any) -> float | None:
     """Parse a meter reading, tolerating anything that is not a number.
 
@@ -411,14 +473,24 @@ def _parse_value(raw: Any) -> float | None:
     costs one meter. A bare float() would break that: the ValueError escapes
     _parse_meters() untranslated and reaches the coordinator as an unexpected
     exception, costing every meter that update.
+
+    float() is not the whole guard, though. It also accepts "NaN", "Infinity"
+    and "1e400", and none of those is a meter reading. nan is the worse of the
+    two: every comparison against it is false, so _accept_reading() takes it
+    whenever there is no previous value — first poll after setup, or after a
+    restart with nothing to restore — and it becomes the sensor's state.
     """
     if raw is None:
         return None
     try:
-        return float(raw)
+        value = float(raw)
     except (TypeError, ValueError):
         _LOGGER.debug("Could not parse reading value %r", raw)
         return None
+    if not math.isfinite(value):
+        _LOGGER.debug("Ignoring non-finite reading value %r", raw)
+        return None
+    return value
 
 
 def parse_reading_date(raw: Any) -> date | None:
@@ -435,6 +507,29 @@ def parse_reading_date(raw: Any) -> date | None:
     return None
 
 
+def format_date(value: Any) -> Any:
+    """Render a date or datetime as an ISO string, leaving anything else alone.
+
+    The counterpart to the two parsers above, and public for the same reason:
+    sensor.py needs it for the reading_date attribute and diagnostics.py for
+    the downloaded report. It lived in both of those files as a private copy
+    with the same body and the same docstring note — the 1.3.1 round put date
+    *parsing* in one place on the argument that there should be one spelling of
+    a Brunata date and one module that knows it, and this is the other half of
+    that argument.
+
+    Passing non-dates through unchanged is what both callers want. A reading
+    date restored from the state machine is already the ISO string we wrote,
+    and every other field in a diagnostics report is already JSON.
+
+    ``date`` alone covers both cases: datetime subclasses it, and both spell
+    isoformat().
+    """
+    if isinstance(value, date):
+        return value.isoformat()
+    return value
+
+
 class BrunataApiClient:
     """Talks to Brunata Online on behalf of one account."""
 
@@ -449,6 +544,9 @@ class BrunataApiClient:
         # Whether the locale resource has been fetched, which is not the same
         # as the tables being non-empty. See _async_ensure_lookup_tables().
         self._lookup_tables_loaded = False
+
+        # What the most recent parse saw. See last_parse_report().
+        self._last_parse_report = ParseReport(frozenset(), 0)
 
         self._access_token: str | None = None
         self._token_type: str = "Bearer"
@@ -500,6 +598,21 @@ class BrunataApiClient:
             "has_refresh_token": self._refresh_token is not None,
         }
 
+    def last_parse_report(self) -> ParseReport:
+        """Return what the most recent async_get_meters() call saw.
+
+        A method rather than a bare attribute for the same reason as
+        diagnostics(): what the rest of the integration may read off this
+        client is decided here, next to the field.
+
+        The coordinator is the only caller and its updates are serialised, so
+        there is nothing to race. Callers must read it immediately after the
+        call it belongs to.
+
+        See ParseReport for why the meters dictionary alone is not enough.
+        """
+        return self._last_parse_report
+
     async def async_close(self) -> None:
         """Close the underlying HTTP client.
 
@@ -531,11 +644,13 @@ class BrunataApiClient:
             f"{API_URL}/consumer/metersforconsumer"
         )
 
-        return _parse_meters(
+        parsed = _parse_meters(
             _payload(response),
             meter_types=self._meter_types,
             measurement_units=self._measurement_units,
         )
+        self._last_parse_report = parsed.report
+        return parsed.meters
 
     async def _async_ensure_lookup_tables(self) -> None:
         """Fetch the locale resource once per client, or fail the update.
@@ -644,10 +759,36 @@ class BrunataApiClient:
         )
 
     async def _async_request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
-        """Perform a request, mapping transport failures to our own error."""
+        """Perform a request, mapping transport failures to our own error.
+
+        httpx.RequestError, not httpx.TransportError. Read off httpx's own
+        exception hierarchy rather than inferred from the names:
+
+            RequestError
+              + TransportError
+                - TimeoutException, NetworkError, ProtocolError,
+                  ProxyError, UnsupportedProtocol
+              + DecodingError
+              + TooManyRedirects
+            HTTPStatusError
+            InvalidURL          <- outside RequestError
+
+        RequestError adds exactly two cases over TransportError, and both mean
+        the same thing as the rest: the request produced no usable response.
+        TooManyRedirects can only reach us from _async_authorize(), the one
+        call made with follow_redirects=True, and DecodingError from a broken
+        content-encoding somewhere in the path. Caught as TransportError only,
+        both escaped this module untranslated and reached the coordinator as
+        unexpected exceptions with a traceback, instead of as the clean retry
+        that keeps the last known values.
+
+        Not httpx.HTTPError: InvalidURL sits outside RequestError, so a URL
+        this integration built wrong keeps failing loudly instead of being
+        disguised as a network problem.
+        """
         try:
             return await self._client.request(method, url, **kwargs)
-        except httpx.TransportError as err:
+        except httpx.RequestError as err:
             raise BrunataConnectionError(f"Cannot reach Brunata: {err}") from err
 
     # --- Authentication -----------------------------------------------------
@@ -671,9 +812,9 @@ class BrunataApiClient:
         self._token_type = payload.get("token_type") or "Bearer"
         self._refresh_token = payload.get("refresh_token")
 
-        expires_in = payload.get("expires_in")
+        expires_in = _expires_in_seconds(payload.get("expires_in"))
         self._expires_at = (
-            time.time() + float(expires_in) - _EXPIRY_MARGIN_SECONDS
+            time.time() + expires_in - _EXPIRY_MARGIN_SECONDS
             if expires_in is not None
             else 0.0
         )
@@ -862,7 +1003,18 @@ def _retry_after_seconds(response: httpx.Response) -> float | None:
     RFC 9110 also allows an HTTP-date. That form is not read here: it needs the
     server's clock to agree with ours to be worth anything, and getting it
     wrong means waiting either far too long or not at all. Falling back to a
-    fixed hour is the safer failure, and the coordinator does that.
+    fixed default is the safer failure, and the coordinator does that.
+
+    The finiteness check is not decoration. float() accepts "inf", "Infinity"
+    and "1e400", and inf is greater than zero, so such a header used to pass
+    straight through to timedelta(seconds=...) in the coordinator — which
+    raises OverflowError from inside the very except block that exists to
+    translate this error, so it escaped as an unexpected exception. A header
+    that is not a real number is no header at all, same as the date form.
+
+    A number that is merely enormous is left to the caller: the coordinator
+    caps it, because how long we are willing to stay away is its decision, not
+    the parser's.
     """
     raw = response.headers.get("Retry-After")
     if raw is None:
@@ -871,6 +1023,9 @@ def _retry_after_seconds(response: httpx.Response) -> float | None:
         seconds = float(str(raw).strip())
     except ValueError:
         _LOGGER.debug("Brunata sent an unreadable Retry-After: %r", raw)
+        return None
+    if not math.isfinite(seconds):
+        _LOGGER.debug("Brunata sent a non-finite Retry-After: %r", raw)
         return None
     return seconds if seconds > 0 else None
 
@@ -915,11 +1070,17 @@ def _parse_meters(
     *,
     meter_types: list[str] | None = None,
     measurement_units: list[str] | None = None,
-) -> dict[str, BrunataMeter]:
+) -> ParsedMeters:
     """Turn a /consumer/metersforconsumer payload into meters keyed by ID.
 
     Each entry is flat — meter, latest reading and metadata side by side — so
     there is no wrapper object to guard against.
+
+    Returns the meters *and* a ParseReport. The report exists because an
+    absent meter is ambiguous: dismounted, unsupported, or merely skipped for
+    a unit we could not name this poll. Only the first of those means the
+    meter is gone, and the rest of the integration cannot tell without being
+    told. See ParseReport.
     """
     if not isinstance(payload, list):
         raise BrunataApiError(
@@ -929,6 +1090,7 @@ def _parse_meters(
     _LOGGER.debug("Brunata returned %s raw item(s)", len(payload))
 
     meters: dict[str, BrunataMeter] = {}
+    unresolved_units: set[str] = set()
     for index, item in enumerate(payload):
         if not isinstance(item, dict):
             _LOGGER.debug(
@@ -982,6 +1144,11 @@ def _parse_meters(
         )
         if unit is None or unit.lower() == UNDEFINED_UNIT:
             _log_unresolved_unit(str(raw_id), repr(item.get("unit")))
+            # Recorded, not just dropped. Brunata still reports this meter, so
+            # its sensor must keep its value and stay available, and its
+            # device must not become removable — see BrunataSensor.available
+            # and async_remove_config_entry_device().
+            unresolved_units.add(str(raw_id))
             continue
 
         value = _parse_value(item.get("latestReadingValue"))
@@ -1013,17 +1180,28 @@ def _parse_meters(
             reading_date=parse_reading_date(item.get("latestReadingDate")),
             placement=placement if isinstance(placement, str) and placement else None,
             mounting_date=parse_timestamp(item.get("mountingDate")),
-            # `not isinstance(decimals, bool)` because bool subclasses int, so
-            # `true` would otherwise become a display precision of 1.
-            # _meter_type_code() guards the same way: the two fields read the
-            # same kind of input and have to treat it the same way.
+            # Three things have to hold before this becomes a display
+            # precision. It must be an int, because Home Assistant counts
+            # digits with it. It must not be a bool, because bool subclasses
+            # int and `true` would otherwise become a precision of 1 —
+            # _meter_type_code() guards the same way, and the two fields read
+            # the same kind of input. And it must not be negative: there is no
+            # such thing as minus four decimal places, and passing one on would
+            # put a number Brunata never reported into the entity.
+            #
+            # Anything else is dropped, and sensor.py falls back to a precision
+            # chosen from the unit.
             decimals=(
                 int(decimals)
-                if isinstance(decimals, int) and not isinstance(decimals, bool)
+                if isinstance(decimals, int)
+                and not isinstance(decimals, bool)
+                and decimals >= 0
                 else None
             ),
             transmitting=transmitting if isinstance(transmitting, bool) else None,
         )
 
     _LOGGER.debug("Parsed %s meters from Brunata", len(meters))
-    return meters
+    return ParsedMeters(
+        meters, ParseReport(frozenset(unresolved_units), len(payload))
+    )

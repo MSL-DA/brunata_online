@@ -17,7 +17,7 @@ from homeassistant.core import HomeAssistant, State
 from homeassistant.helpers import device_registry as dr
 from pytest_homeassistant_custom_component.common import MockConfigEntry, mock_restore_cache
 
-from custom_components.brunata.api import BASE_URL, SUPPORTED_METER_TYPES
+from custom_components.brunata.api import BASE_URL, SUPPORTED_METER_TYPES, ParseReport
 from custom_components.brunata.const import DOMAIN
 from custom_components.brunata.sensor import (
     ANNUAL_RESET_METER_TYPES,
@@ -1040,6 +1040,28 @@ async def test_sensor_placement_updates_even_when_the_reading_is_rejected(mock_m
     assert entity.extra_state_attributes["placement"] == "Kitchen"
 
 
+def _device_for_meter(hass: HomeAssistant, entry: MockConfigEntry, meter_id: str):
+    """Find a meter's device without device_registry.async_get_device().
+
+    That method is deprecated from Home Assistant 2026.9 and *raises* when it
+    is called from test code, which has no integration frame; the same call
+    from inside the integration only logs a warning. So this is a test-side
+    problem with a test-side fix — sensor.py is unaffected until 2027.8.
+
+    async_get_device_by_identifier(), which the deprecation message suggests,
+    is not the replacement to reach for here: it arrived in 2026.8, and
+    hacs.json declares a floor of 2025.3. async_entries_for_config_entry() is
+    not deprecated and has been in Home Assistant far longer, so it works on
+    both sides of that line and the floor stays where it is.
+    """
+    registry = dr.async_get(hass)
+    identifier = (DOMAIN, f"brunata_{meter_id}")
+    for device in dr.async_entries_for_config_entry(registry, entry.entry_id):
+        if identifier in device.identifiers:
+            return device
+    return None
+
+
 async def test_device_name_follows_a_relabelled_meter(
     hass: HomeAssistant, mock_brunata_client, mock_meter
 ):
@@ -1060,11 +1082,7 @@ async def test_device_name_follows_a_relabelled_meter(
     await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done()
 
-    device_registry = dr.async_get(hass)
-    identifiers = {(DOMAIN, "brunata_12345")}
-    assert device_registry.async_get_device(identifiers=identifiers).name == (
-        "Water - Living room"
-    )
+    assert _device_for_meter(hass, entry, "12345").name == "Water - Living room"
 
     mock_brunata_client.async_get_meters = AsyncMock(
         return_value={"12345": replace(meter, placement="Kitchen", value=200.0)}
@@ -1072,9 +1090,7 @@ async def test_device_name_follows_a_relabelled_meter(
     await entry.runtime_data.async_refresh()
     await hass.async_block_till_done()
 
-    assert device_registry.async_get_device(identifiers=identifiers).name == (
-        "Water - Kitchen"
-    )
+    assert _device_for_meter(hass, entry, "12345").name == "Water - Kitchen"
 
 
 async def test_sensor_placement_is_cleared_when_it_disappears(mock_meter):
@@ -1111,6 +1127,59 @@ async def test_a_meter_that_disappears_from_the_payload_goes_unavailable(mock_me
     assert entity.available is True
 
     coordinator.data = {}
+    assert entity.available is False
+
+
+async def test_a_meter_skipped_for_an_unusable_unit_stays_available(mock_meter):
+    """Missing from the payload is not the same as gone.
+
+    api.py drops a meter whose unit code did not resolve, so it cannot become
+    an entity carrying "8" where the user had "m³" — Home Assistant would treat
+    that as a different measurement and discard the statistics behind the old
+    one, permanently. But the meter is still on the wall.
+
+    Going unavailable for it would punch exactly the hole in Long Term
+    Statistics that test_a_failed_update_does_not_make_the_sensor_unavailable
+    refuses to punch, for the same kind of transient cause. The value stands,
+    the sensor stays available, and it resumes on the next poll that resolves.
+
+    If this test ever has to be loosened, that is the moment to think hard.
+    """
+    coordinator = MagicMock()
+    coordinator.data = {"12345": mock_meter}
+    coordinator.last_update_success = True
+    coordinator.last_parse = ParseReport(frozenset(), 1)
+
+    entity = _make_entity(coordinator, mock_meter)
+    entity._apply_latest_reading()
+    assert entity.available is True
+
+    # The unit stopped resolving: the meter is gone from the payload, but
+    # api.py says it is only skipped.
+    coordinator.data = {}
+    coordinator.last_parse = ParseReport(frozenset({"12345"}), 1)
+
+    assert entity.available is True
+    assert entity.native_value == mock_meter.value
+
+
+async def test_a_dismounted_meter_still_goes_unavailable(mock_meter):
+    """The other half. Relaxing the rule for a skipped meter must not relax it
+    for one Brunata has actually taken off the wall — that device showing a
+    final reading forever is indistinguishable from a working one."""
+    coordinator = MagicMock()
+    coordinator.data = {"12345": mock_meter}
+    coordinator.last_update_success = True
+    coordinator.last_parse = ParseReport(frozenset(), 1)
+
+    entity = _make_entity(coordinator, mock_meter)
+    entity._apply_latest_reading()
+    assert entity.available is True
+
+    # Gone from the payload, and not among the skipped ids.
+    coordinator.data = {}
+    coordinator.last_parse = ParseReport(frozenset(), 1)
+
     assert entity.available is False
 
 

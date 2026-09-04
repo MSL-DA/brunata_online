@@ -18,6 +18,9 @@ from pytest_homeassistant_custom_component.common import (
 )
 
 from custom_components.brunata import (
+    _POLL_WINDOW_BASE_MINUTE,
+    _POLL_WINDOW_BASE_SECOND,
+    _POLL_WINDOW_SPREAD_SECONDS,
     BrunataDataUpdateCoordinator,
     _jittered_poll_time,
     async_remove_config_entry_device,
@@ -27,6 +30,7 @@ from custom_components.brunata.api import (
     BrunataApiError,
     BrunataAuthError,
     BrunataConnectionError,
+    ParseReport,
 )
 from custom_components.brunata.const import DOMAIN
 
@@ -106,6 +110,28 @@ async def test_auth_failure_during_setup_starts_reauth(
 # --- removing a device whose meter is gone --------------------------------
 
 
+def _device_for_meter(hass: HomeAssistant, entry: MockConfigEntry, meter_id: str):
+    """Find a meter's device without device_registry.async_get_device().
+
+    That method is deprecated from Home Assistant 2026.9 and *raises* when it
+    is called from test code, which has no integration frame; the same call
+    from inside the integration only logs a warning. So this is a test-side
+    problem with a test-side fix — sensor.py is unaffected until 2027.8.
+
+    async_get_device_by_identifier(), which the deprecation message suggests,
+    is not the replacement to reach for here: it arrived in 2026.8, and
+    hacs.json declares a floor of 2025.3. async_entries_for_config_entry() is
+    not deprecated and has been in Home Assistant far longer, so it works on
+    both sides of that line and the floor stays where it is.
+    """
+    registry = dr.async_get(hass)
+    identifier = (DOMAIN, f"brunata_{meter_id}")
+    for device in dr.async_entries_for_config_entry(registry, entry.entry_id):
+        if identifier in device.identifiers:
+            return device
+    return None
+
+
 async def _setup_with_meter(hass: HomeAssistant, mock_brunata_client, mock_meter):
     """Set up the entry with one meter and return the entry and its device."""
     entry = _entry(hass)
@@ -116,9 +142,7 @@ async def _setup_with_meter(hass: HomeAssistant, mock_brunata_client, mock_meter
     assert await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done()
 
-    device = dr.async_get(hass).async_get_device(
-        identifiers={(DOMAIN, "brunata_12345")}
-    )
+    device = _device_for_meter(hass, entry, "12345")
     assert device is not None
     return entry, device
 
@@ -194,6 +218,86 @@ async def test_a_meter_that_is_merely_gone_is_not_forgotten(
     assert coordinator.known_meter_ids == {"12345"}
 
 
+async def test_nothing_is_removable_when_brunata_reported_no_meters_at_all(
+    hass: HomeAssistant, mock_brunata_client, mock_meter
+):
+    """A payload with zero entries is a *successful* update with empty data.
+
+    Nothing in _parse_meters() raises for an empty list, so last_update_success
+    stays True and every device this integration owns looks dismounted at the
+    same moment. Guarding on last_update_success alone did not cover this,
+    which is what the raw item count is for.
+
+    The cost is stated in the hook's docstring and is deliberate: an account
+    whose meters are all gone at once, and which Brunata answers for with an
+    empty list, cannot delete them individually. Refusing a legitimate
+    deletion is recoverable; agreeing to a wrong one is not.
+    """
+    entry, device = await _setup_with_meter(hass, mock_brunata_client, mock_meter)
+
+    mock_brunata_client.async_get_meters = AsyncMock(return_value={})
+    mock_brunata_client.last_parse_report.return_value = ParseReport(frozenset(), 0)
+    await entry.runtime_data.async_refresh()
+    await hass.async_block_till_done()
+
+    # The premise, asserted rather than assumed: this is a *successful* update.
+    assert entry.runtime_data.last_update_success is True
+    assert entry.runtime_data.data == {}
+
+    assert await async_remove_config_entry_device(hass, entry, device) is False
+
+
+async def test_a_meter_skipped_for_an_unusable_unit_is_not_removable(
+    hass: HomeAssistant, mock_brunata_client, mock_meter
+):
+    """It is missing from the payload, but it is not gone.
+
+    api.py drops a meter whose unit did not resolve so it cannot become an
+    entity carrying a raw code as its unit — but the meter is still on the
+    wall, and Brunata is still listing it. Offering to delete it would take
+    the entity and its long term statistics with it for a fault that clears
+    itself on the next poll.
+    """
+    entry, device = await _setup_with_meter(hass, mock_brunata_client, mock_meter)
+
+    mock_brunata_client.async_get_meters = AsyncMock(return_value={})
+    mock_brunata_client.last_parse_report.return_value = ParseReport(
+        frozenset({"12345"}), 1
+    )
+    await entry.runtime_data.async_refresh()
+    await hass.async_block_till_done()
+
+    assert entry.runtime_data.last_update_success is True
+    assert await async_remove_config_entry_device(hass, entry, device) is False
+
+    # And its id is not forgotten, so the entity is not rebuilt as a duplicate
+    # when the unit resolves again.
+    assert entry.runtime_data.known_meter_ids == {"12345"}
+
+
+async def test_a_failed_update_leaves_the_previous_parse_report_alone(
+    hass: HomeAssistant, mock_brunata_client, mock_meter
+):
+    """The report and the data are read together and must describe one poll.
+
+    On a failed update the coordinator keeps its previous data, so the report
+    it is compared against has to stay with it. Updating one and not the other
+    would let a stale meter list be judged against a fresh report.
+    """
+    entry, _ = await _setup_with_meter(hass, mock_brunata_client, mock_meter)
+    coordinator = entry.runtime_data
+    before = coordinator.last_parse
+
+    mock_brunata_client.async_get_meters = AsyncMock(
+        side_effect=BrunataApiError("Brunata server error (503)", 503)
+    )
+    mock_brunata_client.last_parse_report.return_value = ParseReport(frozenset(), 0)
+    await coordinator.async_refresh()
+
+    assert coordinator.last_update_success is False
+    assert coordinator.last_parse == before
+
+
 async def test_nothing_is_removable_while_the_last_update_failed(
     hass: HomeAssistant, mock_brunata_client, mock_meter
 ):
@@ -244,6 +348,26 @@ async def test_no_device_is_removable_when_the_entry_is_not_loaded(
 
 
 # --- the polling schedule --------------------------------------------------
+
+
+def test_the_poll_window_stays_inside_the_hour():
+    """The three constants have to be picked together, and nothing said so.
+
+    _jittered_poll_time() carries seconds into minutes: base second plus the
+    jitter, divided by sixty, added to the base minute. With the spread at 60
+    the last possible poll is 59:29. Widen the spread to 120 and it becomes
+    60:29 — not a clock time. async_track_time_change() rejects it, the
+    listener is never registered, and the integration loads and then simply
+    never polls, with nothing in the log pointing at the cause.
+
+    This checks the worst case rather than the sample of jitters that real
+    entry ids happen to produce.
+    """
+    last_second = _POLL_WINDOW_BASE_SECOND + _POLL_WINDOW_SPREAD_SECONDS - 1
+    last_minute = _POLL_WINDOW_BASE_MINUTE + last_second // 60
+
+    assert last_minute <= 59
+    assert last_second % 60 <= 59
 
 
 async def test_polling_is_driven_by_the_wall_clock(
@@ -369,22 +493,70 @@ async def test_a_rate_limit_is_honoured_to_the_second(
     assert coordinator.async_should_poll(now + timedelta(hours=3)) is True
 
 
-async def test_a_rate_limit_without_retry_after_waits_an_hour(
+async def test_a_rate_limit_without_retry_after_lets_the_next_tick_through(
     hass: HomeAssistant, mock_brunata_client, mock_meter
 ):
-    """No usable header means a fixed hour, which is the next poll anyway —
-    the point is that a header asking for longer is never shortened."""
+    """The default backoff must clear the next scheduled poll, not land past it.
+
+    The baseline is taken *before* the refresh on purpose. _rate_limited_until
+    is set after the request has failed, so the next tick — exactly one hour
+    after the tick that failed — is what has to be tested against. An earlier
+    version of this test anchored on dt_util.utcnow() after the refresh and
+    checked 30 and 61 minutes, which cannot see the boundary at all: with a
+    one-hour default the tick an hour later fell a fraction of a second short
+    and was skipped, so two hours passed between polls and a reading was
+    booked an hour late.
+    """
     entry, _ = await _setup_with_meter(hass, mock_brunata_client, mock_meter)
     coordinator = entry.runtime_data
 
+    tick = dt_util.utcnow()
     mock_brunata_client.async_get_meters = AsyncMock(
         side_effect=BrunataApiError("Brunata rate limit reached (429)", 429)
     )
     await coordinator.async_refresh()
 
+    # Well inside the backoff.
+    assert coordinator.async_should_poll(tick + timedelta(minutes=30)) is False
+    # The next hourly tick, measured from the one that failed.
+    assert coordinator.async_should_poll(tick + timedelta(hours=1)) is True
+
+
+@pytest.mark.parametrize("retry_after", [1e12, 8.64e13, 1e15, 1e300])
+async def test_a_rate_limit_longer_than_a_day_is_capped(
+    hass: HomeAssistant, mock_brunata_client, mock_meter, retry_after
+):
+    """Retry-After is a number from the network.
+
+    Without a ceiling, a header of 1e12 stops this integration polling for
+    thirty thousand years, and the only trace is one warning naming a date in
+    the year 33000. A day is longer than any real rate limit and recovers on
+    its own.
+
+    The values above 8.64e13 are the ones that matter, and the reason the cap
+    is applied to the seconds rather than to a finished timedelta. timedelta
+    tops out at 999999999 days, so an earlier version — which built
+    timedelta(seconds=err.retry_after) and only then compared it against the
+    ceiling — raised OverflowError inside the except block that exists to
+    translate this error, and it escaped as an unexpected exception. api.py's
+    guard does not catch these: every one of them is finite.
+
+    1e12 is kept because it is the one that fits in a timedelta, so it would
+    pass either way. Alone, it could not tell the two versions apart.
+    """
+    entry, _ = await _setup_with_meter(hass, mock_brunata_client, mock_meter)
+    coordinator = entry.runtime_data
+
+    mock_brunata_client.async_get_meters = AsyncMock(
+        side_effect=BrunataApiError(
+            "Brunata rate limit reached (429)", 429, retry_after
+        )
+    )
+    await coordinator.async_refresh()
+
     now = dt_util.utcnow()
-    assert coordinator.async_should_poll(now + timedelta(minutes=30)) is False
-    assert coordinator.async_should_poll(now + timedelta(minutes=61)) is True
+    assert coordinator.async_should_poll(now + timedelta(hours=23)) is False
+    assert coordinator.async_should_poll(now + timedelta(hours=25)) is True
 
 
 async def test_other_errors_do_not_hold_the_schedule(

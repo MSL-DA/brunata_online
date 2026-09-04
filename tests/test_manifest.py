@@ -61,6 +61,8 @@ import pytest
 from awesomeversion import AwesomeVersion
 from homeassistant.const import __version__ as HA_VERSION
 
+from custom_components.brunata.api import ISSUE_TRACKER_URL
+
 REPO_ROOT = Path(__file__).parent.parent
 MANIFEST = json.loads(
     (REPO_ROOT / "custom_components" / "brunata" / "manifest.json").read_text()
@@ -104,6 +106,16 @@ def test_no_third_party_loggers_declared():
 
 def test_manifest_and_hacs_agree_on_the_name():
     assert MANIFEST["name"] == HACS["name"]
+
+
+def test_the_issue_tracker_url_is_the_one_the_manifest_declares():
+    """api.py prints this URL in two log lines asking users to report a meter.
+
+    It is the same address as manifest.json's issue_tracker, written out a
+    second time — so if the repository ever moves, one of them follows and the
+    other silently sends people to a 404. Nothing else would fail.
+    """
+    assert ISSUE_TRACKER_URL == MANIFEST["issue_tracker"]
 
 
 @pytest.mark.parametrize(
