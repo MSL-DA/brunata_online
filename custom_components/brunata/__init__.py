@@ -36,6 +36,12 @@ type BrunataConfigEntry = ConfigEntry[BrunataDataUpdateCoordinator]
 # itself to finish, not for a retry — there is none. Measured round trips are
 # 0.2-1.6 s, so it is generous; it is cheap and it means a slow response still
 # lands its reading in the hour it was taken.
+#
+# The spread must not push the last possible poll past 59:59.
+# _jittered_poll_time() carries seconds into minutes, so a spread of 120 would
+# hand async_track_time_change() a minute of 60, which is not a clock time and
+# fails at registration — the integration would load and then never poll.
+# test_the_poll_window_stays_inside_the_hour holds the three constants to that.
 _POLL_WINDOW_BASE_MINUTE = 58
 _POLL_WINDOW_BASE_SECOND = 30
 _POLL_WINDOW_SPREAD_SECONDS = 60
@@ -324,6 +330,10 @@ class BrunataDataUpdateCoordinator(DataUpdateCoordinator[dict[str, BrunataMeter]
                     self._rate_limited_until,
                 )
                 return False
+            # Cleared here, and only here. This is the one place the deadline
+            # is read, so it expires where it is used rather than being reset
+            # by a successful update somewhere else — a second place would have
+            # to be kept in step with this one for no gain.
             self._rate_limited_until = None
 
         return True
