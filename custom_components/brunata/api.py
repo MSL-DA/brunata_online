@@ -797,13 +797,34 @@ class BrunataApiClient:
     def _token_is_usable(self) -> bool:
         return bool(self._access_token) and time.time() < self._expires_at
 
-    def _store_tokens(self, payload: dict[str, Any]) -> None:
+    def _store_tokens(self, payload: Any) -> None:
         """Record a token response.
 
         Every field is replaced rather than merged. Merging let an old expiry
         survive a response that carried none, so an expired token could be
         reported as usable and the login it needed was skipped.
+
+        The payload is checked for being a JSON object first, the same check
+        _async_ensure_lookup_tables() makes on the locale resource and for the
+        same reason. _payload() reads the status and looks for an error body,
+        but a body that is a list, a string or a bare null passes through it
+        untouched — and .get() on one of those raises AttributeError, which is
+        not a type either caller catches. It escaped _async_login(), escaped
+        async_get_meters() and reached the coordinator as an unexpected
+        exception with a traceback instead of a clean retry.
+
+        The traceback is the smaller half. It escaped from inside
+        _async_try_refresh() *before* the return that falls back to a full
+        login, so the same rejected refresh token was replayed every hour
+        until the entry was reloaded. BrunataApiError is the type both callers
+        already know what to do with.
         """
+        if not isinstance(payload, dict):
+            raise BrunataApiError(
+                "Brunata returned a token response that is not an object: "
+                f"{type(payload).__name__}"
+            )
+
         access_token = payload.get("access_token")
         if not access_token:
             raise BrunataApiError("Brunata returned no access token")
