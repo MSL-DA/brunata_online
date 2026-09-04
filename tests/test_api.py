@@ -17,6 +17,7 @@ import httpx
 import pytest
 
 from custom_components.brunata.api import (
+    API_URL,
     DEFAULT_HEADERS,
     REFERER_URL,
     SUPPORTED_METER_TYPES,
@@ -1094,6 +1095,74 @@ async def test_stale_token_on_the_locale_endpoint_retries_with_a_fresh_login():
     assert logins == [False, True]
     assert client._lookup_tables_loaded is True
     assert client._meter_types == ["a"]
+
+
+@pytest.mark.parametrize("status", [401, 403])
+async def test_a_rejected_token_is_retried_once_with_a_fresh_login(status):
+    """A cached token can look locally valid while the server no longer accepts
+    it — a revoked Keycloak session, or clock drift.
+
+    403 is checked alongside 401 because the code treats the two identically in
+    four places and neither status appeared in a test that exercised this path.
+    """
+    responses = [FakeResponse(status), FakeResponse(200, json_data=[])]
+    logins: list[bool] = []
+
+    class FakeHttp:
+        async def request(self, method, url, **kwargs):
+            return responses.pop(0)
+
+    client = BrunataApiClient("user@example.com", "s3cret", FakeHttp())
+
+    async def _fake_login(*, force=False):
+        logins.append(force)
+        client._access_token = "T"
+        client._expires_at = time.time() + 300
+
+    client._async_login = _fake_login
+
+    response = await client._async_authenticated_get(
+        f"{API_URL}/consumer/metersforconsumer"
+    )
+
+    assert response.status_code == 200
+    # The retry is a *forced* login: without it, _async_login() would hand back
+    # the same cached token the server has just refused.
+    assert logins == [False, True]
+
+
+@pytest.mark.parametrize("status", [401, 403])
+async def test_a_token_rejected_after_a_fresh_login_is_an_auth_error(status):
+    """Only a rejection on the *second* attempt means the credentials are no
+    longer accepted.
+
+    BrunataAuthError is what the coordinator turns into ConfigEntryAuthFailed,
+    which is what opens the re-authentication dialog. Nothing reached this
+    line before: the retry was covered, its failure was not, so the one path
+    that asks the user for a new password was never exercised.
+    """
+    responses = [FakeResponse(status), FakeResponse(status)]
+    logins: list[bool] = []
+
+    class FakeHttp:
+        async def request(self, method, url, **kwargs):
+            return responses.pop(0)
+
+    client = BrunataApiClient("user@example.com", "s3cret", FakeHttp())
+
+    async def _fake_login(*, force=False):
+        logins.append(force)
+        client._access_token = "T"
+        client._expires_at = time.time() + 300
+
+    client._async_login = _fake_login
+
+    with pytest.raises(BrunataAuthError, match="even after a fresh login"):
+        await client._async_authenticated_get(
+            f"{API_URL}/consumer/metersforconsumer"
+        )
+
+    assert logins == [False, True]
 
 
 async def test_client_diagnostics_reports_tokens_without_quoting_them():
