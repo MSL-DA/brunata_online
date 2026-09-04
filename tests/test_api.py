@@ -1019,6 +1019,23 @@ def test_non_integer_decimals_is_ignored(decimals):
     assert _parse([item])["abc"].decimals is None
 
 
+def test_a_negative_decimals_is_ignored():
+    """There is no such thing as minus four decimal places.
+
+    decimals sets how many digits Home Assistant shows. The guard beside it
+    already rejects bools and non-integers; a negative number is the same kind
+    of unusable input and was the one case that slipped through. Passing it on
+    would show the reading rounded to a number Brunata never reported.
+
+    Not seen in any payload. The point is that the field is checked the same
+    way in every direction.
+    """
+    item = _meter_item("abc")
+    item["decimals"] = -4
+
+    assert _parse([item])["abc"].decimals is None
+
+
 async def test_meters_are_fetched_from_metersforconsumer():
     """The endpoint itself. /consumer/meters answers too, with a different
     shape and without placement, mountingDate or decimals — so a silent

@@ -520,7 +520,10 @@ class BrunataSensor(
         and the device is still called "Water - Living room".
 
         Takes the finished name rather than the meter, because the caller has
-        already built it in order to notice that it changed.
+        already built it in order to notice that it changed. That is also why
+        there is no name comparison here: the caller only calls this when the
+        name it holds has changed, so a second check would answer the same
+        question twice.
 
         Only `name` is written. A name the user typed in Home Assistant lands
         in `name_by_user`, which the UI prefers and which this leaves alone.
@@ -532,7 +535,7 @@ class BrunataSensor(
         device = device_registry.async_get_device(
             identifiers={(DOMAIN, f"{DEVICE_ID_PREFIX}{self._meter_id}")}
         )
-        if device is None or device.name == name:
+        if device is None:
             return
 
         _LOGGER.debug(

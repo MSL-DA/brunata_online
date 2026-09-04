@@ -18,6 +18,9 @@ from pytest_homeassistant_custom_component.common import (
 )
 
 from custom_components.brunata import (
+    _POLL_WINDOW_BASE_MINUTE,
+    _POLL_WINDOW_BASE_SECOND,
+    _POLL_WINDOW_SPREAD_SECONDS,
     BrunataDataUpdateCoordinator,
     _jittered_poll_time,
     async_remove_config_entry_device,
@@ -345,6 +348,26 @@ async def test_no_device_is_removable_when_the_entry_is_not_loaded(
 
 
 # --- the polling schedule --------------------------------------------------
+
+
+def test_the_poll_window_stays_inside_the_hour():
+    """The three constants have to be picked together, and nothing said so.
+
+    _jittered_poll_time() carries seconds into minutes: base second plus the
+    jitter, divided by sixty, added to the base minute. With the spread at 60
+    the last possible poll is 59:29. Widen the spread to 120 and it becomes
+    60:29 — not a clock time. async_track_time_change() rejects it, the
+    listener is never registered, and the integration loads and then simply
+    never polls, with nothing in the log pointing at the cause.
+
+    This checks the worst case rather than the sample of jitters that real
+    entry ids happen to produce.
+    """
+    last_second = _POLL_WINDOW_BASE_SECOND + _POLL_WINDOW_SPREAD_SECONDS - 1
+    last_minute = _POLL_WINDOW_BASE_MINUTE + last_second // 60
+
+    assert last_minute <= 59
+    assert last_second % 60 <= 59
 
 
 async def test_polling_is_driven_by_the_wall_clock(

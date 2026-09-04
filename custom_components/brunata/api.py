@@ -1180,13 +1180,22 @@ def _parse_meters(
             reading_date=parse_reading_date(item.get("latestReadingDate")),
             placement=placement if isinstance(placement, str) and placement else None,
             mounting_date=parse_timestamp(item.get("mountingDate")),
-            # `not isinstance(decimals, bool)` because bool subclasses int, so
-            # `true` would otherwise become a display precision of 1.
-            # _meter_type_code() guards the same way: the two fields read the
-            # same kind of input and have to treat it the same way.
+            # Three things have to hold before this becomes a display
+            # precision. It must be an int, because Home Assistant counts
+            # digits with it. It must not be a bool, because bool subclasses
+            # int and `true` would otherwise become a precision of 1 —
+            # _meter_type_code() guards the same way, and the two fields read
+            # the same kind of input. And it must not be negative: there is no
+            # such thing as minus four decimal places, and passing one on would
+            # put a number Brunata never reported into the entity.
+            #
+            # Anything else is dropped, and sensor.py falls back to a precision
+            # chosen from the unit.
             decimals=(
                 int(decimals)
-                if isinstance(decimals, int) and not isinstance(decimals, bool)
+                if isinstance(decimals, int)
+                and not isinstance(decimals, bool)
+                and decimals >= 0
                 else None
             ),
             transmitting=transmitting if isinstance(transmitting, bool) else None,
