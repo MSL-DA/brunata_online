@@ -1,14 +1,12 @@
-# pytest-homeassistant-custom-component pins the exact Home Assistant, pytest
-# and pytest-asyncio versions it was generated against, so this is deliberately
-# the single pin. Adding separate pins for those only creates resolver
-# conflicts the next time it bumps them.
+# This pins the Home Assistant version CI tests against — the version you
+# would write in a support request, not the test package's own version
+# number. pytest-homeassistant-custom-component is left unpinned below: it
+# only exists to expose HA's test fixtures, so pip picks whichever release of
+# it matches the homeassistant version pinned here.
 #
-# It is not an ordinary dependency: it decides which Home Assistant version CI
-# tests against, so it is bumped by hand with a reason, and dependabot.yml
-# excludes it by name. The lint toolchain is pinned separately in
-# requirements_lint.txt precisely because it *is* ordinary — do not merge the
-# two files.
-#
-# 0.13.356 is Home Assistant 2026.8.2. The "Show resolved versions" step in
-# pytest.yml prints it on every run, so the log is the authority, not this line.
-pytest-homeassistant-custom-component==0.13.356
+# It is not an ordinary dependency, and dependabot.yml is set up to bump it
+# with the Home Assistant version visible in the pull request title. The lint
+# toolchain is pinned separately in requirements_lint.txt precisely because
+# it *is* ordinary — do not merge the two files.
+homeassistant==2026.9.0
+pytest-homeassistant-custom-component
