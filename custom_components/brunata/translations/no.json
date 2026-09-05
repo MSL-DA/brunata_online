@@ -20,7 +20,7 @@
           "email": "E-post",
           "password": "Passord"
         },
-        "description": "Oppdater påloggingsopplysningene dine for Brunata. Du kan også skrive inn en annen e-postadresse, så lenge det er den samme husstanden: kontoen bak den må inneholde målerne integrasjonen allerede har."
+        "description": "Endre passordet, eller flytt til en annen e-postadresse for samme husstand. [Slik fungerer det](https://github.com/MSL-DA/brunata_online/wiki/Changing-your-login)"
       }
     },
     "error": {
