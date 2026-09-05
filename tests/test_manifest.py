@@ -33,8 +33,7 @@ says nothing about any release in 2025.
 
 That version is deliberately not written out here. Dependabot bumps it weekly,
 and a number restated in prose goes stale at the next bump with no test to
-catch it — which is exactly what happened to this paragraph once already. Read
-requirements_test.txt for the current one.
+catch it. Read requirements_test.txt for the current one.
 
 Testing against that floor was tried and dropped. Installing a year-old Home
 Assistant from PyPI today pulls newer releases of its loosely pinned indirect
