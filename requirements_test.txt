@@ -5,8 +5,11 @@
 # it matches the homeassistant version pinned here.
 #
 # It is not an ordinary dependency, and dependabot.yml is set up to bump it
-# with the Home Assistant version visible in the pull request title. The lint
-# toolchain is pinned separately in requirements_lint.txt precisely because
-# it *is* ordinary — do not merge the two files.
+# with the Home Assistant version visible in the pull request title, so the
+# number below moves on its own schedule. Nothing else should restate it: a
+# document or docstring naming this version goes stale at the next bump with
+# nothing to catch it. Point at this file instead. The lint toolchain is
+# pinned separately in requirements_lint.txt precisely because it *is*
+# ordinary — do not merge the two files.
 homeassistant==2026.9.0
 pytest-homeassistant-custom-component
