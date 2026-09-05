@@ -17,9 +17,10 @@
       },
       "reconfigure": {
         "data": {
+          "email": "E-postadress",
           "password": "Lösenord"
         },
-        "description": "Ange det nya lösenordet för {email}. Vill du använda ett annat konto lägger du till det som en ny integration."
+        "description": "Uppdatera dina inloggningsuppgifter för Brunata. Du kan även ange en annan e-postadress, så länge det är samma hushåll: kontot bakom den måste innehålla de mätare som integrationen redan har."
       }
     },
     "error": {
@@ -31,7 +32,9 @@
       "already_configured": "Det här kontot är redan konfigurerat",
       "reauth_successful": "Inloggningsuppgifterna har uppdaterats",
       "wrong_account": "Den här e-postadressen tillhör ett annat konto. Logga in med det ursprungliga kontot.",
-      "reconfigure_successful": "Lösenordet har uppdaterats"
+      "account_already_configured": "Den e-postadressen används redan av en annan Brunata-integration. Ingenting ändrades.",
+      "meter_mismatch": "Kontot bakom den e-postadressen innehåller inte alla mätare som integrationen redan har, så det är ett annat hushåll. Ingenting ändrades.",
+      "reconfigure_successful": "Inloggningsuppgifterna har uppdaterats"
     }
   },
   "entity": {

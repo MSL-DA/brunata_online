@@ -1,18 +1,20 @@
 """Test Brunata config flow."""
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import voluptuous as vol
 
 from homeassistant import config_entries, data_entry_flow
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers import selector
+from homeassistant.helpers import device_registry as dr, selector
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.brunata.api import (
     BrunataApiError,
     BrunataAuthError,
     BrunataConnectionError,
+    ParseReport,
 )
 from custom_components.brunata.config_flow import (
     CannotConnect,
@@ -22,6 +24,28 @@ from custom_components.brunata.config_flow import (
 from custom_components.brunata.const import DOMAIN
 
 CREDENTIALS = {"email": "test@example.com", "password": "password123"}
+
+
+def _add_meter_device(hass: HomeAssistant, entry: MockConfigEntry, meter_id: str):
+    """Register the device a meter would have, without setting the entry up.
+
+    The reconfigure step reads the entry's meters from the device registry
+    rather than from the coordinator, because the dialog can be opened while
+    the entry is not loaded. Creating the device directly is what models that.
+    """
+    return dr.async_get(hass).async_get_or_create(
+        config_entry_id=entry.entry_id,
+        identifiers={(DOMAIN, f"brunata_{meter_id}")},
+        name=f"Water ({meter_id})",
+    )
+
+
+def _schema_default(schema, key: str):
+    """Return the default a form field offers, or None if it has none."""
+    for marker in schema.schema:
+        if marker == key:
+            return marker.default() if marker.default is not vol.UNDEFINED else None
+    raise AssertionError(f"{key} missing from schema")
 
 
 # --- validate_input itself -------------------------------------------------
@@ -326,9 +350,10 @@ async def test_reauth_rejects_the_wrong_account_without_logging_in(
 
 
 async def test_credential_fields_use_selectors(hass: HomeAssistant, mock_brunata_client):
-    """The password field must render masked, in both the initial and the
-    reauth form. A bare `str` in the schema gives an ordinary text box, so the
-    password was visible while being typed."""
+    """The password field must render masked, in all three forms that ask for
+    one. A bare `str` in the schema gives an ordinary text box, so the password
+    was visible while being typed. The reconfigure form is included because it
+    is the newest of the three and gained its address field last."""
     def _field(schema, key):
         for marker in schema.schema:
             if marker == key:
@@ -365,6 +390,13 @@ async def test_credential_fields_use_selectors(hass: HomeAssistant, mock_brunata
     )
     assert reauth["step_id"] == "reauth_confirm"
     _assert_credential_fields(reauth["data_schema"])
+
+    reconfigure = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={"source": config_entries.SOURCE_RECONFIGURE, "entry_id": entry.entry_id},
+    )
+    assert reconfigure["step_id"] == "reconfigure"
+    _assert_credential_fields(reconfigure["data_schema"])
 
 
 async def test_flow_user_normalises_email_for_unique_id(
@@ -489,6 +521,7 @@ async def test_reconfigure_updates_the_password(
     entry = MockConfigEntry(
         domain=DOMAIN,
         unique_id="test@example.com",
+        title="Brunata (test@example.com)",
         data={"email": "test@example.com", "password": "old_password"},
     )
     entry.add_to_hass(hass)
@@ -498,10 +531,9 @@ async def test_reconfigure_updates_the_password(
         context={"source": config_entries.SOURCE_RECONFIGURE, "entry_id": entry.entry_id},
     )
     assert result["step_id"] == "reconfigure"
-
-    # The address is not on the form: it is the unique_id, and changing it
-    # would orphan every entity and device behind it.
-    assert "email" not in result["data_schema"].schema
+    # The stored address is offered back, so leaving the field alone is a
+    # password change and nothing else.
+    assert _schema_default(result["data_schema"], "email") == "test@example.com"
 
     with patch(
         "custom_components.brunata.config_flow.validate_input",
@@ -509,16 +541,61 @@ async def test_reconfigure_updates_the_password(
     ) as validate:
         result2 = await hass.config_entries.flow.async_configure(
             result["flow_id"],
-            {"password": "new_password123"},
+            {"email": "test@example.com", "password": "new_password123"},
         )
         await hass.async_block_till_done()
 
     assert result2["type"] == data_entry_flow.FlowResultType.ABORT
     assert result2["reason"] == "reconfigure_successful"
     assert entry.data["password"] == "new_password123"
-    # The stored address is reused, so a login is still attempted with both
-    # halves of the credentials.
+    # The address is unchanged, so a login is still attempted with both halves
+    # of the credentials.
     assert validate.call_args.args[1]["email"] == "test@example.com"
+    assert entry.unique_id == "test@example.com"
+
+
+async def test_reconfigure_with_the_same_address_does_not_list_meters(
+    hass: HomeAssistant, mock_brunata_client
+):
+    """An unchanged address is a password change, and a password change must
+    stay one round trip.
+
+    The meter listing exists to prove that a *new* address is the same
+    household. Running it on every password change would double the traffic
+    against a bot-protected endpoint for a question already answered.
+
+    Asserted on the helper rather than on the client's own call counter: a
+    successful reconfiguration reloads the entry, and the reload fetches the
+    meters as an ordinary update, so the counter cannot say which of the two
+    it was counting.
+    """
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        unique_id="test@example.com",
+        data={"email": "test@example.com", "password": "old_password"},
+    )
+    entry.add_to_hass(hass)
+    _add_meter_device(hass, entry, "12345")
+
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={"source": config_entries.SOURCE_RECONFIGURE, "entry_id": entry.entry_id},
+    )
+
+    with patch(
+        "custom_components.brunata.config_flow.validate_input",
+        return_value={"title": "Brunata (test@example.com)"},
+    ), patch(
+        "custom_components.brunata.config_flow._async_missing_meters"
+    ) as missing_meters:
+        result2 = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            {"email": "test@example.com", "password": "new_password123"},
+        )
+        await hass.async_block_till_done()
+
+    assert result2["reason"] == "reconfigure_successful"
+    assert missing_meters.call_count == 0
 
 
 async def test_reconfigure_normalises_an_address_stored_before_1_4_0(
@@ -528,11 +605,10 @@ async def test_reconfigure_normalises_an_address_stored_before_1_4_0(
 
     async_step_user only started normalising what it writes in 1.4.0. Before
     that, only the unique_id derived from the address was cleaned up, so an
-    older entry can hold "  Bruger@Example.COM " verbatim. Reconfigure logs in
-    with the stored value, so without normalising it here Keycloak rejects the
-    padded string and the user is told their password is wrong — the exact
-    failure normalisation was added to prevent, on the one path that was added
-    in the same release and never got it.
+    older entry can hold "  Bruger@Example.COM " verbatim. The form offers the
+    stored value as its default, so without normalising it here the user would
+    submit the padded string back and Keycloak would reject it — and they would
+    be told their password was wrong.
     """
     entry = MockConfigEntry(
         domain=DOMAIN,
@@ -545,9 +621,7 @@ async def test_reconfigure_normalises_an_address_stored_before_1_4_0(
         DOMAIN,
         context={"source": config_entries.SOURCE_RECONFIGURE, "entry_id": entry.entry_id},
     )
-    # The dialog says which account is being changed, so it must not offer the
-    # padded string either.
-    assert result["description_placeholders"]["email"] == "bruger@example.com"
+    assert _schema_default(result["data_schema"], "email") == "bruger@example.com"
 
     with patch(
         "custom_components.brunata.config_flow.validate_input",
@@ -555,7 +629,7 @@ async def test_reconfigure_normalises_an_address_stored_before_1_4_0(
     ) as validate:
         result2 = await hass.config_entries.flow.async_configure(
             result["flow_id"],
-            {"password": "new_password123"},
+            {"email": "bruger@example.com", "password": "new_password123"},
         )
         await hass.async_block_till_done()
 
@@ -591,9 +665,273 @@ async def test_reconfigure_keeps_the_old_password_when_the_new_one_is_wrong(
     ):
         result2 = await hass.config_entries.flow.async_configure(
             result["flow_id"],
-            {"password": "wrong_password"},
+            {"email": "test@example.com", "password": "wrong_password"},
         )
 
     assert result2["type"] == data_entry_flow.FlowResultType.FORM
     assert result2["errors"] == {"base": "invalid_auth"}
     assert entry.data["password"] == "old_password"
+
+
+# --- reconfigure: moving the entry to a new address ------------------------
+
+
+async def test_reconfigure_moves_the_address_when_the_meters_match(
+    hass: HomeAssistant, mock_brunata_client, mock_meter
+):
+    """The whole point of the step: a Brunata account reached under a new
+    e-mail keeps its history.
+
+    Deleting and re-adding the integration is the alternative, and it starts
+    every meter's long term statistics from zero. Moving the entry does not,
+    because entry_id is what the entity and device registries are keyed on and
+    entry_id cannot change.
+    """
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        unique_id="gammel@example.com",
+        title="Brunata (gammel@example.com)",
+        data={"email": "gammel@example.com", "password": "password123"},
+    )
+    entry.add_to_hass(hass)
+    device = _add_meter_device(hass, entry, "12345")
+    mock_brunata_client.async_get_meters = AsyncMock(return_value={"12345": mock_meter})
+
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={"source": config_entries.SOURCE_RECONFIGURE, "entry_id": entry.entry_id},
+    )
+    result2 = await hass.config_entries.flow.async_configure(
+        result["flow_id"],
+        {"email": "  Ny@Example.COM ", "password": "password123"},
+    )
+    await hass.async_block_till_done()
+
+    assert result2["type"] == data_entry_flow.FlowResultType.ABORT
+    assert result2["reason"] == "reconfigure_successful"
+    # Written in its normalised form, in all three places that hold it.
+    assert entry.unique_id == "ny@example.com"
+    assert entry.data["email"] == "ny@example.com"
+    assert entry.title == "Brunata (ny@example.com)"
+    # And the device the statistics hang off is the one that was there before.
+    assert dr.async_get(hass).async_get(device.id) is not None
+
+
+async def test_reconfigure_refuses_an_address_missing_a_known_meter(
+    hass: HomeAssistant, mock_brunata_client, mock_meter
+):
+    """A partial match is the one case where statistics can actually be lost.
+
+    The identity would move, but a meter whose number the new account does not
+    report becomes a new sensor with a new internal id, and the old one is left
+    behind without data. The user gets no notice and finds out in the energy
+    dashboard months later. So the flow stops instead, and the user still has
+    the route they have today: delete the integration and set it up again.
+    """
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        unique_id="gammel@example.com",
+        data={"email": "gammel@example.com", "password": "password123"},
+    )
+    entry.add_to_hass(hass)
+    _add_meter_device(hass, entry, "12345")
+    _add_meter_device(hass, entry, "67890")
+    # The new account reports only one of the two.
+    mock_brunata_client.async_get_meters = AsyncMock(return_value={"12345": mock_meter})
+
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={"source": config_entries.SOURCE_RECONFIGURE, "entry_id": entry.entry_id},
+    )
+    result2 = await hass.config_entries.flow.async_configure(
+        result["flow_id"],
+        {"email": "ny@example.com", "password": "password123"},
+    )
+    await hass.async_block_till_done()
+
+    assert result2["type"] == data_entry_flow.FlowResultType.ABORT
+    assert result2["reason"] == "meter_mismatch"
+    # Nothing was written on the way to the abort.
+    assert entry.unique_id == "gammel@example.com"
+    assert entry.data["email"] == "gammel@example.com"
+
+
+async def test_reconfigure_counts_a_meter_with_an_unresolved_unit_as_present(
+    hass: HomeAssistant, mock_brunata_client, mock_meter
+):
+    """A meter Brunata reported but whose unit code did not resolve is still on
+    the wall.
+
+    api.py drops it from the parsed result so it cannot become an entity
+    carrying a raw number as its unit, and it names it in the parse report
+    instead. Reading only the parsed meters here would call it gone and block a
+    move that was legitimate.
+    """
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        unique_id="gammel@example.com",
+        data={"email": "gammel@example.com", "password": "password123"},
+    )
+    entry.add_to_hass(hass)
+    _add_meter_device(hass, entry, "12345")
+    _add_meter_device(hass, entry, "67890")
+    mock_brunata_client.async_get_meters = AsyncMock(return_value={"12345": mock_meter})
+    mock_brunata_client.last_parse_report = MagicMock(
+        return_value=ParseReport(frozenset({"67890"}), 2)
+    )
+
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={"source": config_entries.SOURCE_RECONFIGURE, "entry_id": entry.entry_id},
+    )
+    result2 = await hass.config_entries.flow.async_configure(
+        result["flow_id"],
+        {"email": "ny@example.com", "password": "password123"},
+    )
+    await hass.async_block_till_done()
+
+    assert result2["reason"] == "reconfigure_successful"
+    assert entry.unique_id == "ny@example.com"
+
+
+async def test_reconfigure_refuses_an_address_another_entry_already_has(
+    hass: HomeAssistant, mock_brunata_client
+):
+    """Home Assistant does not stop a unique_id from being reused.
+
+    It writes the value, logs "Unique id of config entry ... changed to ...
+    which is already in use", and leaves two entries claiming the same account.
+    Nothing in this integration can undo that, so the address is checked
+    against the other entries before anything is written — and before the
+    login, since the answer needs no network at all.
+    """
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        unique_id="gammel@example.com",
+        data={"email": "gammel@example.com", "password": "password123"},
+    )
+    entry.add_to_hass(hass)
+    other = MockConfigEntry(
+        domain=DOMAIN,
+        unique_id="optaget@example.com",
+        data={"email": "optaget@example.com", "password": "password123"},
+    )
+    other.add_to_hass(hass)
+
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={"source": config_entries.SOURCE_RECONFIGURE, "entry_id": entry.entry_id},
+    )
+    result2 = await hass.config_entries.flow.async_configure(
+        result["flow_id"],
+        {"email": "optaget@example.com", "password": "password123"},
+    )
+    await hass.async_block_till_done()
+
+    assert result2["type"] == data_entry_flow.FlowResultType.ABORT
+    assert result2["reason"] == "account_already_configured"
+    assert entry.unique_id == "gammel@example.com"
+    assert mock_brunata_client.async_get_meters.await_count == 0
+    assert mock_brunata_client.async_validate_credentials.await_count == 0
+
+
+async def test_reconfigure_moving_still_checks_the_password(
+    hass: HomeAssistant, mock_brunata_client
+):
+    """An entry with no devices yet has no meters to compare, and that must not
+    turn into "accept whatever was typed".
+
+    The meter listing is also the login. Skipping it when there is nothing to
+    compare would write an unverified password to the entry, and the next poll
+    would open the re-authentication dialog for a change the user was just told
+    had succeeded.
+    """
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        unique_id="gammel@example.com",
+        data={"email": "gammel@example.com", "password": "password123"},
+    )
+    entry.add_to_hass(hass)
+    mock_brunata_client.async_get_meters = AsyncMock(
+        side_effect=BrunataAuthError("credentials rejected")
+    )
+
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={"source": config_entries.SOURCE_RECONFIGURE, "entry_id": entry.entry_id},
+    )
+    result2 = await hass.config_entries.flow.async_configure(
+        result["flow_id"],
+        {"email": "ny@example.com", "password": "wrong_password"},
+    )
+
+    assert result2["type"] == data_entry_flow.FlowResultType.FORM
+    assert result2["errors"] == {"base": "invalid_auth"}
+    assert entry.unique_id == "gammel@example.com"
+    assert entry.data["password"] == "password123"
+
+
+async def test_reconfigure_shows_cannot_connect_while_moving(
+    hass: HomeAssistant, mock_brunata_client
+):
+    """A network problem during the meter listing must not read as a bad
+    password, for the same reason it must not on the other two paths: it sends
+    people off changing credentials that were fine."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        unique_id="gammel@example.com",
+        data={"email": "gammel@example.com", "password": "password123"},
+    )
+    entry.add_to_hass(hass)
+    _add_meter_device(hass, entry, "12345")
+    mock_brunata_client.async_get_meters = AsyncMock(
+        side_effect=BrunataConnectionError("network unreachable")
+    )
+
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={"source": config_entries.SOURCE_RECONFIGURE, "entry_id": entry.entry_id},
+    )
+    result2 = await hass.config_entries.flow.async_configure(
+        result["flow_id"],
+        {"email": "ny@example.com", "password": "password123"},
+    )
+
+    assert result2["type"] == data_entry_flow.FlowResultType.FORM
+    assert result2["errors"] == {"base": "cannot_connect"}
+    assert entry.unique_id == "gammel@example.com"
+
+
+async def test_reconfigure_closes_the_client_after_listing_meters(
+    hass: HomeAssistant, mock_brunata_client, mock_meter
+):
+    """The meter listing builds its own client, which owns an httpx session.
+    Without the close, every attempt at moving an address leaks one for the
+    life of the process.
+
+    The address is refused here on purpose. A successful move reloads the
+    entry, the reload builds a second client of its own, and the counter could
+    then no longer say anything about the one the listing owned.
+    """
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        unique_id="gammel@example.com",
+        data={"email": "gammel@example.com", "password": "password123"},
+    )
+    entry.add_to_hass(hass)
+    _add_meter_device(hass, entry, "12345")
+    _add_meter_device(hass, entry, "67890")
+    mock_brunata_client.async_get_meters = AsyncMock(return_value={"12345": mock_meter})
+
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={"source": config_entries.SOURCE_RECONFIGURE, "entry_id": entry.entry_id},
+    )
+    result2 = await hass.config_entries.flow.async_configure(
+        result["flow_id"],
+        {"email": "ny@example.com", "password": "password123"},
+    )
+    await hass.async_block_till_done()
+
+    assert result2["reason"] == "meter_mismatch"
+    assert mock_brunata_client.async_close.await_count == 1

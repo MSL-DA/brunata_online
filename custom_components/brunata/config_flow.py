@@ -9,11 +9,11 @@ from typing import Any
 import voluptuous as vol
 
 from homeassistant import config_entries
-from homeassistant.config_entries import ConfigFlowResult
+from homeassistant.config_entries import ConfigEntry, ConfigFlowResult
 from homeassistant.const import CONF_EMAIL, CONF_PASSWORD
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers import selector
+from homeassistant.helpers import device_registry as dr, selector
 
 from .api import (
     BrunataApiClient,
@@ -21,7 +21,7 @@ from .api import (
     BrunataAuthError,
     BrunataConnectionError,
 )
-from .const import DOMAIN
+from .const import DEVICE_ID_PREFIX, DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -40,6 +40,17 @@ def _normalise_email(email: str) -> str:
     derived from it in one form, so the two can never disagree.
     """
     return email.strip().lower()
+
+
+def _entry_title(email: str) -> str:
+    """Return the title shown for an account in the integrations list.
+
+    One definition, because two steps write it: async_step_user when the entry
+    is created, and async_step_reconfigure when the address moves to another
+    one. Two literals would let the same integration end up with two shapes of
+    title depending on which step last touched it.
+    """
+    return f"Brunata ({email})"
 
 
 # A bare `str` renders as an ordinary text box, so the password was shown in
@@ -84,7 +95,70 @@ async def validate_input(hass: HomeAssistant, data: dict[str, Any]) -> dict[str,
         # successful or not, leaks one.
         await client.async_close()
 
-    return {"title": f"Brunata ({data[CONF_EMAIL]})"}
+    return {"title": _entry_title(data[CONF_EMAIL])}
+
+
+def _meter_ids_with_a_device(hass: HomeAssistant, entry: ConfigEntry) -> set[str]:
+    """Return the meter ids this entry already has a device for.
+
+    Read from the device registry rather than from the coordinator, because
+    the reconfigure dialog can be opened while the entry is not loaded, and
+    then there is no coordinator to ask. Every meter device carries the
+    identifier DEVICE_ID_PREFIX followed by the meter id, the registry holds it
+    whether or not the integration is running, and those devices are exactly
+    what moving the entry to another account would leave behind.
+    """
+    registry = dr.async_get(hass)
+    return {
+        identifier.removeprefix(DEVICE_ID_PREFIX)
+        for device in dr.async_entries_for_config_entry(registry, entry.entry_id)
+        for domain, identifier in device.identifiers
+        if domain == DOMAIN and identifier.startswith(DEVICE_ID_PREFIX)
+    }
+
+
+async def _async_missing_meters(
+    hass: HomeAssistant, entry: ConfigEntry, data: dict[str, Any]
+) -> frozenset[str]:
+    """Log in with `data` and return the entry's meters that account lacks.
+
+    An empty result means every meter this entry already has a device for was
+    found again, which is the test for "the same household under a new
+    address". Anything else names the meters that would be orphaned.
+
+    The meter lookup logs in on the way, and it raises the same two exceptions
+    validate_input() does, so a caller needs one of the two and not both.
+
+    A meter Brunata skipped this poll because its unit code did not resolve
+    counts as reported. It is still on the wall — api.py drops it from the
+    parsed result only so it cannot become an entity carrying a raw code as its
+    unit — and treating it as gone would block a move that was legitimate.
+    """
+    # The login happens even when the entry has no devices at all, and its
+    # result is what the caller relies on to know the credentials are good. A
+    # shortcut here would let a mistyped password be written to the entry
+    # unchecked, and the next poll would open the re-authentication dialog.
+    known = _meter_ids_with_a_device(hass, entry)
+
+    client = await BrunataApiClient.async_create(
+        hass, data[CONF_EMAIL], data[CONF_PASSWORD]
+    )
+    try:
+        meters = await client.async_get_meters()
+        reported = set(meters) | set(
+            client.last_parse_report().unresolved_unit_meter_ids
+        )
+    except BrunataAuthError as err:
+        raise InvalidAuth from err
+    except BrunataConnectionError as err:
+        raise CannotConnect from err
+    except BrunataApiError as err:
+        _LOGGER.error("Brunata rejected the meter lookup: %s", err)
+        raise CannotConnect from err
+    finally:
+        await client.async_close()
+
+    return frozenset(known - reported)
 
 
 class BrunataConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -143,7 +217,15 @@ class BrunataConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_reauth_confirm(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Confirm re-authentication dialog."""
+        """Confirm re-authentication dialog.
+
+        The address is fixed here even though async_step_reconfigure lets it
+        move. Reauth starts on its own, from a failing poll, so the account it
+        is repairing is the one the user was already using; an address typed
+        into a dialog that appeared unasked is a typo far more often than it is
+        a deliberate move. Moving to a new account is a decision, and it is
+        made in the reconfigure dialog, which the user opens themselves.
+        """
         reauth_entry = self._get_reauth_entry()
         errors = {}
 
@@ -200,45 +282,64 @@ class BrunataConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_reconfigure(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Let the user replace the password before anything has failed.
+        """Let the user replace either stored credential before anything fails.
 
-        Without this the only way to hand Home Assistant a password changed in
-        Brunata Online is to wait for the integration to fail on the old one.
-        Polling is hourly, so that is up to an hour of a broken integration and
-        a "could not authenticate" notification for something already fixed.
+        The password, so that one changed in Brunata Online can be handed over
+        without waiting for the integration to fail on the old one. Polling is
+        hourly, so that is up to an hour of a broken integration and a "could
+        not authenticate" notification for something already fixed.
 
-        The address is not on the form. It is the entry's unique_id, so
-        changing it here would either orphan every entity and device behind it
-        or need a migration; a user who genuinely moved accounts should add the
-        new one and delete the old. It is passed as a placeholder instead, so
-        the dialog still says which account is being changed.
+        The address, so that a Brunata account reached under a new e-mail is
+        not a reason to delete the integration and set it up again, which
+        starts every meter's long term statistics from zero. Moving it is safe:
+        entry_id is frozen and it is entry_id the entity and device registries
+        are keyed on, while unique_id is a field on the config entry that
+        neither registry reads. The sensors' own identifiers are built from the
+        meter id, not from the address.
+
+        A new address is accepted only if the account behind it reports every
+        meter this entry already has a device for. See _async_missing_meters()
+        for what a partial match would cost.
         """
         entry = self._get_reconfigure_entry()
         # Normalised on the way out of the entry, not assumed to have been
         # normalised on the way in. async_step_user only started doing that in
         # 1.4.0; an older entry can hold "  Bruger@Example.COM " verbatim,
-        # because only the unique_id derived from it was cleaned up. Logging in
-        # with that string is the exact failure normalisation was added to
-        # prevent. Writing it back below is what makes such an entry correct
-        # itself the first time its owner changes their password.
-        email = _normalise_email(entry.data[CONF_EMAIL])
+        # because only the unique_id derived from it was cleaned up. Offering
+        # that string back as the form's default would send it to Keycloak
+        # again, which is the exact failure normalisation was added to prevent.
+        current_email = _normalise_email(entry.data[CONF_EMAIL])
         errors = {}
 
         if user_input is not None:
-            # The stored address, not one typed in — see the docstring.
+            email = _normalise_email(user_input[CONF_EMAIL])
             credentials = {
                 CONF_EMAIL: email,
                 CONF_PASSWORD: user_input[CONF_PASSWORD],
             }
+            moving = email != current_email
+
+            if moving and self._address_belongs_to_another_entry(entry, email):
+                # Checked before anything is written, because afterwards there
+                # is no way back. Home Assistant accepts a unique_id another
+                # entry already holds: it logs "Unique id of config entry ...
+                # changed to ... which is already in use" and leaves two
+                # entries claiming the same account, a state no code here can
+                # undo. Only reachable with two Brunata integrations set up.
+                return self.async_abort(reason="account_already_configured")
+
             try:
-                await validate_input(self.hass, credentials)
-                _LOGGER.debug(
-                    "Reconfiguration successful for entry %s", entry.entry_id
-                )
-                return self.async_update_reload_and_abort(
-                    entry,
-                    data_updates=credentials,
-                )
+                # One login either way. When the address moves, the meter
+                # lookup proves the credentials as it goes, so validate_input()
+                # would only add a second round trip against a bot-protected
+                # endpoint.
+                if moving:
+                    missing = await _async_missing_meters(
+                        self.hass, entry, credentials
+                    )
+                else:
+                    await validate_input(self.hass, credentials)
+                    missing = frozenset()
             except CannotConnect:
                 errors["base"] = "cannot_connect"
             except InvalidAuth:
@@ -246,12 +347,62 @@ class BrunataConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             except Exception:  # pylint: disable=broad-except
                 _LOGGER.exception("Unexpected error during reconfiguration")
                 errors["base"] = "unknown"
+            else:
+                if missing:
+                    # Logged because this has never been observed, and the log
+                    # line is the only thing that would say what Brunata did
+                    # with the meter numbers when it happens. Meter ids, not
+                    # the address: the address identifies the account.
+                    _LOGGER.warning(
+                        "Refusing to move entry %s to another address: the new "
+                        "account does not report meter(s) %s, which would be "
+                        "left without data",
+                        entry.entry_id,
+                        ", ".join(sorted(missing)),
+                    )
+                    return self.async_abort(reason="meter_mismatch")
+
+                if moving:
+                    # unique_id and title are written here rather than through
+                    # async_update_reload_and_abort(), which takes data updates
+                    # only. The call below then updates the data and reloads.
+                    self.hass.config_entries.async_update_entry(
+                        entry, unique_id=email, title=_entry_title(email)
+                    )
+                _LOGGER.debug(
+                    "Reconfiguration successful for entry %s", entry.entry_id
+                )
+                return self.async_update_reload_and_abort(
+                    entry,
+                    data_updates=credentials,
+                )
 
         return self.async_show_form(
             step_id="reconfigure",
-            data_schema=vol.Schema({vol.Required(CONF_PASSWORD): PASSWORD_SELECTOR}),
-            description_placeholders={"email": email},
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_EMAIL, default=current_email): EMAIL_SELECTOR,
+                    vol.Required(CONF_PASSWORD): PASSWORD_SELECTOR,
+                }
+            ),
             errors=errors,
+        )
+
+    def _address_belongs_to_another_entry(
+        self, entry: ConfigEntry, email: str
+    ) -> bool:
+        """Return whether some other Brunata entry already holds this address.
+
+        Written out rather than delegated to _abort_if_unique_id_configured()
+        or _abort_if_unique_id_mismatch(). Both are built around the entry the
+        flow belongs to, and which of them treats the entry being reconfigured
+        as an exception is a detail of the Home Assistant version underneath —
+        one that would have to be re-checked on every floor change. Six lines
+        of our own answer the question the same way on every version.
+        """
+        return any(
+            other.entry_id != entry.entry_id and other.unique_id == email
+            for other in self.hass.config_entries.async_entries(DOMAIN)
         )
 
 

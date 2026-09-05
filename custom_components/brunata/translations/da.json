@@ -17,9 +17,10 @@
       },
       "reconfigure": {
         "data": {
+          "email": "E-mail",
           "password": "Adgangskode"
         },
-        "description": "Indtast den nye adgangskode til {email}. Vil du bruge en anden konto, skal den tilføjes som en ny integration."
+        "description": "Opdater dine Brunata loginoplysninger. Du kan også indtaste en anden e-mailadresse, så længe det er den samme husstand: kontoen bag den skal indeholde de målere, integrationen allerede har."
       }
     },
     "error": {
@@ -31,7 +32,9 @@
       "already_configured": "Kontoen er allerede konfigureret",
       "reauth_successful": "Loginoplysningerne er opdateret",
       "wrong_account": "E-mailen tilhører en anden konto. Log ind med den oprindelige konto.",
-      "reconfigure_successful": "Adgangskoden er opdateret"
+      "account_already_configured": "Den e-mailadresse bruges allerede af en anden Brunata-integration. Intet blev ændret.",
+      "meter_mismatch": "Kontoen bag den e-mailadresse indeholder ikke alle de målere, integrationen allerede har, så det er en anden husstand. Intet blev ændret.",
+      "reconfigure_successful": "Loginoplysningerne er opdateret"
     }
   },
   "entity": {

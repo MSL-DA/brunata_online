@@ -17,9 +17,10 @@
       },
       "reconfigure": {
         "data": {
+          "email": "Adresse e-mail",
           "password": "Mot de passe"
         },
-        "description": "Saisissez le nouveau mot de passe pour {email}. Pour utiliser un autre compte, ajoutez-le comme nouvelle intégration."
+        "description": "Mettez à jour vos identifiants Brunata. Vous pouvez aussi saisir une autre adresse e-mail, à condition qu’il s’agisse du même logement : le compte associé doit contenir les compteurs que cette intégration possède déjà."
       }
     },
     "error": {
@@ -31,7 +32,9 @@
       "already_configured": "Ce compte est déjà configuré",
       "reauth_successful": "Les identifiants ont été mis à jour",
       "wrong_account": "Cette adresse e-mail est associée à un autre compte. Connectez-vous avec le compte d’origine.",
-      "reconfigure_successful": "Mot de passe mis à jour"
+      "account_already_configured": "Cette adresse e-mail est déjà utilisée par une autre intégration Brunata. Rien n’a été modifié.",
+      "meter_mismatch": "Le compte associé à cette adresse e-mail ne contient pas tous les compteurs que cette intégration possède déjà ; il s’agit donc d’un autre logement. Rien n’a été modifié.",
+      "reconfigure_successful": "Les identifiants ont été mis à jour"
     }
   },
   "entity": {
