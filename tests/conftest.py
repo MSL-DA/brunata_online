@@ -11,7 +11,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from homeassistant.helpers import device_registry as dr
+
 from custom_components.brunata.api import BrunataMeter, ParseReport
+from custom_components.brunata.const import DOMAIN
 
 
 @pytest.fixture(autouse=True)
@@ -53,6 +56,38 @@ def mock_brunata_client():
         )
 
         yield client
+
+
+@pytest.fixture
+def device_for_meter():
+    """Find a meter's device without device_registry.async_get_device().
+
+    That method is deprecated from Home Assistant 2026.9 and *raises* when it
+    is called from test code, which has no integration frame; the same call
+    from inside the integration only logs a warning. So this is a test-side
+    problem with a test-side fix — sensor.py is unaffected until 2027.8.
+
+    async_get_device_by_identifier(), which the deprecation message suggests,
+    is not the replacement to reach for here: it arrived in 2026.8, and
+    hacs.json declares a floor of 2025.3. async_entries_for_config_entry() is
+    not deprecated and has been in Home Assistant far longer, so it works on
+    both sides of that line and the floor stays where it is.
+
+    It lives here rather than in a test module because test_init.py and
+    test_sensor.py both need it, and it stood in both of them word for word —
+    including this explanation. Two copies of a reasoned exception are two
+    chances for one of them to be updated alone.
+    """
+
+    def _find(hass, entry, meter_id: str):
+        registry = dr.async_get(hass)
+        identifier = (DOMAIN, f"brunata_{meter_id}")
+        for device in dr.async_entries_for_config_entry(registry, entry.entry_id):
+            if identifier in device.identifiers:
+                return device
+        return None
+
+    return _find
 
 
 @pytest.fixture

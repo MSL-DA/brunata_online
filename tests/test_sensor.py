@@ -14,7 +14,6 @@ from homeassistant.components.sensor import (
 )
 from homeassistant.const import UnitOfEnergy, UnitOfVolume
 from homeassistant.core import HomeAssistant, State
-from homeassistant.helpers import device_registry as dr
 from pytest_homeassistant_custom_component.common import MockConfigEntry, mock_restore_cache
 
 from custom_components.brunata.api import BASE_URL, SUPPORTED_METER_TYPES, ParseReport
@@ -23,6 +22,7 @@ from custom_components.brunata.sensor import (
     ANNUAL_RESET_METER_TYPES,
     BrunataRestoredData,
     BrunataSensor,
+    _is_cumulative_unit,
 )
 
 
@@ -212,7 +212,9 @@ async def test_sensor_maps_the_units_brunata_actually_reports(
     assert entity.device_class == expected_class
 
 
-@pytest.mark.parametrize("raw_unit", ["Btu", "°C", "Doprimo units", "m³ per hour"])
+@pytest.mark.parametrize(
+    "raw_unit", ["Btu", "Dal", "Doprimo units", "m³ per hour"]
+)
 async def test_sensor_unmappable_units_claim_no_device_class(mock_meter, raw_unit):
     """Anything outside the supported water/energy/allocator units passes
     through without a device class. Claiming one Home Assistant would reject
@@ -251,10 +253,16 @@ async def test_sensor_reset_detection(mock_meter):
 
 
 async def test_sensor_reset_accepted_when_first_reading_arrives_late(mock_meter):
-    """Allocators report infrequently, so the first reading after the 1 January
-    reset is not necessarily dated 1 January. Matching only 31 Dec / 1 Jan
-    rejected those, and since the cached value is never lowered the sensor then
-    stayed frozen at the pre-reset value for the rest of the year."""
+    """The first reading after the 1 January reset is not necessarily dated
+    1 January. Matching only 31 Dec / 1 Jan rejected those, and since the
+    cached value is never lowered the sensor then stayed frozen at the
+    pre-reset value for the rest of the year.
+
+    Brunata publishes one reading per meter per day, around 02:00, whether or
+    not the value moved. The rule under test does not depend on that — it
+    compares calendar years, not intervals — which is why a mid-January date is
+    accepted here.
+    """
     mock_meter = replace(mock_meter, meter_type="Radiator", meter_type_code=1, unit="units")
 
     coordinator = MagicMock()
@@ -806,12 +814,66 @@ async def test_unusable_extra_data_leaves_the_init_baseline_alone(mock_meter, st
 
 
 # --- what counts, and what merely measures --------------------------------
+#
+# _is_cumulative_unit() takes two strings and returns a bool. Testing it here,
+# rather than only through an entity, is what lets the odd corners of Brunata's
+# unit table be covered without building a meter that carries them: a unit
+# string on its own claims nothing about which meter it arrived on.
+
+
+@pytest.mark.parametrize(
+    "canonical",
+    [
+        UnitOfVolume.CUBIC_METERS,
+        UnitOfVolume.LITERS,
+        UnitOfEnergy.KILO_WATT_HOUR,
+        UnitOfEnergy.GIGA_JOULE,
+    ],
+)
+def test_a_mapped_unit_counts_up_whatever_brunata_spelled_it(canonical):
+    """Once UNIT_MAP has resolved the unit, the raw spelling stops mattering:
+    the same litre arrives as "liter" or "l" and must count either way."""
+    assert _is_cumulative_unit(canonical, "whatever Brunata sent") is True
 
 
 @pytest.mark.parametrize(
     ("raw_unit", "expected"),
     [
-        # Consumption: counts up until the meter is zeroed.
+        # Every allocator spelling carries the same marker. Brunata's table has
+        # nineteen of them; three are enough to show the marker is what matches
+        # rather than the vendor name.
+        ("units", True),
+        ("Doprimo units", True),
+        ("VVME87 units", True),
+        # Real entries in Brunata's table that Home Assistant has no constant
+        # for and that carry no marker.
+        ("Dal", False),
+        ("Btu", False),
+        ("m³ per hour", False),
+        # Entries from the parts of the table this integration never sees,
+        # because api.py filters on meter type before a unit is read at all.
+        # They are here to pin this function's behaviour on any string, not to
+        # suggest a supported meter could arrive carrying one.
+        ("°C", False),
+        ("%", False),
+        ("ppm", False),
+        # Nothing at all. api.py drops a meter whose unit did not resolve, so
+        # this should not reach the function — the safe answer is still False.
+        ("", False),
+    ],
+)
+def test_an_unmapped_unit_counts_up_only_if_it_carries_the_marker(
+    raw_unit, expected
+):
+    """With no Home Assistant constant to go on, the raw spelling is all there
+    is. Anything without the marker gets the deliberately safe answer."""
+    assert _is_cumulative_unit(None, raw_unit) is expected
+
+
+@pytest.mark.parametrize(
+    ("raw_unit", "expected"),
+    [
+        # Recognised consumption units, spelled as Brunata's table spells them.
         ("m3", SensorStateClass.TOTAL_INCREASING),
         ("m³", SensorStateClass.TOTAL_INCREASING),
         ("liter", SensorStateClass.TOTAL_INCREASING),
@@ -821,28 +883,32 @@ async def test_unusable_extra_data_leaves_the_init_baseline_alone(mock_meter, st
         ("units", SensorStateClass.TOTAL_INCREASING),
         ("Doprimo units", SensorStateClass.TOTAL_INCREASING),
         ("Zenner units", SensorStateClass.TOTAL_INCREASING),
-        ("pts", SensorStateClass.TOTAL_INCREASING),
-        # Instantaneous readings: these fall as readily as they rise.
-        ("°C", SensorStateClass.MEASUREMENT),
-        ("%", SensorStateClass.MEASUREMENT),
-        ("ppm", SensorStateClass.MEASUREMENT),
-        ("bar", SensorStateClass.MEASUREMENT),
+        # Real table entries a supported meter could plausibly carry that Home
+        # Assistant has no constant for: a volume, an energy and a flow rate.
+        ("Dal", SensorStateClass.MEASUREMENT),
+        ("Btu", SensorStateClass.MEASUREMENT),
         ("m³ per hour", SensorStateClass.MEASUREMENT),
     ],
 )
 async def test_state_class_follows_whether_the_unit_accumulates(
     mock_meter, raw_unit, expected
 ):
-    """Only water, energy and heat cost allocators are supported. For
-    anything else, defaulting to TOTAL_INCREASING would be actively wrong: it
-    sums a reading that isn't consumption, and the decrease guard would freeze
-    it at the highest value it ever took the first time it fell."""
+    """That the entity wires itself to _is_cumulative_unit(), on units a water
+    meter could actually arrive with.
+
+    Every unit here is a real entry in Brunata's table. Temperature and the
+    rest of the instrument units are covered against the function above
+    instead: putting them on this meter would depict a payload Brunata cannot
+    send, and a test fixture gets read as a reading months later.
+    """
     entity = _make_entity(MagicMock(), replace(mock_meter, unit=raw_unit))
 
     assert entity.state_class == expected
 
 
-@pytest.mark.parametrize("raw_unit", ["m3", "kWh", "units", "°C", "ppm", "Btu"])
+@pytest.mark.parametrize(
+    "raw_unit", ["m3", "kWh", "units", "Dal", "Btu", "m³ per hour"]
+)
 async def test_every_meter_keeps_a_state_class(mock_meter, raw_unit):
     """Both classes are recorded in Long Term Statistics — MEASUREMENT stores
     min/max/mean where TOTAL_INCREASING stores a sum. Dropping the state class
@@ -853,17 +919,21 @@ async def test_every_meter_keeps_a_state_class(mock_meter, raw_unit):
 
 
 async def test_an_unrecognised_measuring_unit_is_allowed_to_fall(mock_meter):
-    """The fallback behaviour for a unit outside water/energy/allocators, not
-    a claim that such a meter is supported. Holding the old value on a fall
-    would be wrong regardless of what the meter actually is, so the guard
-    stays off — see _is_cumulative_unit()."""
-    meter = replace(mock_meter, meter_type="Unrecognised", unit="°C")
+    """The fallback behaviour for a unit outside water, energy and allocators.
+
+    Dal is decalitres — a volume, so a water meter could carry it, and the one
+    entry in Brunata's table that would actually reach this branch. Home
+    Assistant has no constant for it, so the guard is off and the value follows
+    whatever Brunata reports, including downwards. That is the cost of the
+    conservative default, and it is why the reading is not summed either.
+    """
+    meter = replace(mock_meter, unit="Dal")
 
     coordinator = MagicMock()
     coordinator.data = {"12345": meter}
     entity = _make_entity(coordinator, meter)
 
-    for value, day in ((21.5, 1), (23.0, 2), (18.4, 3), (19.1, 4)):
+    for value, day in ((1510.4, 1), (1512.0, 2), (1499.8, 3), (1503.1, 4)):
         coordinator.data = {
             "12345": replace(meter, value=value, reading_date=date(2026, 6, day))
         }
@@ -1040,30 +1110,8 @@ async def test_sensor_placement_updates_even_when_the_reading_is_rejected(mock_m
     assert entity.extra_state_attributes["placement"] == "Kitchen"
 
 
-def _device_for_meter(hass: HomeAssistant, entry: MockConfigEntry, meter_id: str):
-    """Find a meter's device without device_registry.async_get_device().
-
-    That method is deprecated from Home Assistant 2026.9 and *raises* when it
-    is called from test code, which has no integration frame; the same call
-    from inside the integration only logs a warning. So this is a test-side
-    problem with a test-side fix — sensor.py is unaffected until 2027.8.
-
-    async_get_device_by_identifier(), which the deprecation message suggests,
-    is not the replacement to reach for here: it arrived in 2026.8, and
-    hacs.json declares a floor of 2025.3. async_entries_for_config_entry() is
-    not deprecated and has been in Home Assistant far longer, so it works on
-    both sides of that line and the floor stays where it is.
-    """
-    registry = dr.async_get(hass)
-    identifier = (DOMAIN, f"brunata_{meter_id}")
-    for device in dr.async_entries_for_config_entry(registry, entry.entry_id):
-        if identifier in device.identifiers:
-            return device
-    return None
-
-
 async def test_device_name_follows_a_relabelled_meter(
-    hass: HomeAssistant, mock_brunata_client, mock_meter
+    hass: HomeAssistant, mock_brunata_client, mock_meter, device_for_meter
 ):
     """DeviceInfo is only read when the entity is added, so a meter renamed in
     Brunata's own UI used to keep its old device name until the config entry
@@ -1082,7 +1130,7 @@ async def test_device_name_follows_a_relabelled_meter(
     await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done()
 
-    assert _device_for_meter(hass, entry, "12345").name == "Water - Living room"
+    assert device_for_meter(hass, entry, "12345").name == "Water - Living room"
 
     mock_brunata_client.async_get_meters = AsyncMock(
         return_value={"12345": replace(meter, placement="Kitchen", value=200.0)}
@@ -1090,7 +1138,7 @@ async def test_device_name_follows_a_relabelled_meter(
     await entry.runtime_data.async_refresh()
     await hass.async_block_till_done()
 
-    assert _device_for_meter(hass, entry, "12345").name == "Water - Kitchen"
+    assert device_for_meter(hass, entry, "12345").name == "Water - Kitchen"
 
 
 async def test_sensor_placement_is_cleared_when_it_disappears(mock_meter):

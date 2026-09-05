@@ -6,32 +6,35 @@
           "email": "E-Mail",
           "password": "Passwort"
         },
-        "description": "Bitte geben Sie Ihre Brunata-Zugangsdaten ein."
+        "description": "Bitte gib deine Brunata-Zugangsdaten ein."
       },
       "reauth_confirm": {
         "data": {
           "email": "E-Mail",
           "password": "Passwort"
         },
-        "description": "Ihre Brunata-Zugangsdaten sind nicht mehr gültig. Bitte geben Sie sie erneut ein, um fortzufahren."
+        "description": "Deine Brunata-Zugangsdaten sind nicht mehr gültig. Bitte gib sie erneut ein, um fortzufahren."
       },
       "reconfigure": {
         "data": {
+          "email": "E-Mail",
           "password": "Passwort"
         },
-        "description": "Geben Sie das neue Passwort für {email} ein. Für ein anderes Konto fügen Sie es als neue Integration hinzu."
+        "description": "Passwort oder E-Mail ändern"
       }
     },
     "error": {
-      "cannot_connect": "Verbindung zur Brunata-API nicht möglich. Überprüfen Sie Ihre Netzwerkverbindung.",
+      "cannot_connect": "Verbindung zu Brunata nicht möglich. Überprüfe deine Internetverbindung.",
       "invalid_auth": "Ungültige Anmeldedaten",
       "unknown": "Unerwarteter Fehler"
     },
     "abort": {
       "already_configured": "Dieses Konto ist bereits konfiguriert",
-      "reauth_successful": "Anmeldedaten aktualisiert",
-      "wrong_account": "Diese E-Mail-Adresse gehört zu einem anderen Konto. Melden Sie sich mit dem ursprünglichen Konto an.",
-      "reconfigure_successful": "Passwort aktualisiert"
+      "reauth_successful": "Die Anmeldedaten wurden aktualisiert",
+      "wrong_account": "Diese E-Mail-Adresse gehört zu einem anderen Konto. Melde dich mit dem ursprünglichen Konto an.",
+      "account_already_configured": "Diese E-Mail-Adresse wird bereits von einer anderen Brunata-Integration verwendet. Es wurden keine Änderungen vorgenommen.",
+      "meter_mismatch": "Das Konto, das mit dieser E-Mail-Adresse verknüpft ist, meldet nicht alle Zähler, die diese Integration bereits erfasst hat – es handelt sich demnach um einen anderen Haushalt. Es wurden keine Änderungen vorgenommen.",
+      "reconfigure_successful": "Die Anmeldedaten wurden aktualisiert"
     }
   },
   "entity": {

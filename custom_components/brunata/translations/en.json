@@ -17,9 +17,10 @@
       },
       "reconfigure": {
         "data": {
+          "email": "Email",
           "password": "Password"
         },
-        "description": "Enter the new password for {email}. To use a different account, add it as a new integration."
+        "description": "Change password or email"
       }
     },
     "error": {
@@ -31,7 +32,9 @@
       "already_configured": "This account is already configured",
       "reauth_successful": "Login credentials updated",
       "wrong_account": "This email belongs to a different account. Log in with the original account.",
-      "reconfigure_successful": "Password updated"
+      "account_already_configured": "That email address is already used by another Brunata integration. Nothing was changed.",
+      "meter_mismatch": "The account behind that email address does not report all the meters this integration already has, so it is a different household. Nothing was changed.",
+      "reconfigure_successful": "Login credentials updated"
     }
   },
   "entity": {

@@ -6,32 +6,35 @@
           "email": "E-post",
           "password": "Passord"
         },
-        "description": "Skriv inn påloggingsopplysningene dine for Brunata."
+        "description": "Angi Brunata-påloggingsinformasjonen din."
       },
       "reauth_confirm": {
         "data": {
           "email": "E-post",
           "password": "Passord"
         },
-        "description": "Påloggingsopplysningene dine for Brunata er ikke lenger gyldige. Skriv dem inn på nytt for å fortsette."
+        "description": "Brunata-påloggingsinformasjonen din er ikke lenger gyldig. Angi den på nytt for å fortsette."
       },
       "reconfigure": {
         "data": {
+          "email": "E-post",
           "password": "Passord"
         },
-        "description": "Skriv inn det nye passordet for {email}. Vil du bruke en annen konto, må den legges til som en ny integrasjon."
+        "description": "Endre passord eller e-post"
       }
     },
     "error": {
-      "cannot_connect": "Kan ikke koble til Brunata API-et. Sjekk nettverkstilkoblingen.",
-      "invalid_auth": "Ugyldige påloggingsopplysninger",
+      "cannot_connect": "Kan ikke koble til Brunata. Kontroller internettforbindelsen din.",
+      "invalid_auth": "Feil e-post eller passord",
       "unknown": "Uventet feil"
     },
     "abort": {
       "already_configured": "Denne kontoen er allerede konfigurert",
-      "reauth_successful": "Påloggingsopplysningene er oppdatert",
+      "reauth_successful": "Påloggingsinformasjonen er oppdatert",
       "wrong_account": "Denne e-postadressen tilhører en annen konto. Logg inn med den opprinnelige kontoen.",
-      "reconfigure_successful": "Passordet er oppdatert"
+      "account_already_configured": "Denne e-postadressen brukes allerede av en annen Brunata-integrasjon. Ingenting ble endret.",
+      "meter_mismatch": "Kontoen som er knyttet til denne e-postadressen, rapporterer ikke alle målerne denne integrasjonen allerede har, så det ser ut til å være en annen husstand. Ingenting ble endret.",
+      "reconfigure_successful": "Påloggingsinformasjonen er oppdatert"
     }
   },
   "entity": {

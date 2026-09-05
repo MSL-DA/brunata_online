@@ -3,35 +3,38 @@
     "step": {
       "user": {
         "data": {
-          "email": "E-postadress",
+          "email": "E-post",
           "password": "Lösenord"
         },
-        "description": "Ange dina inloggningsuppgifter för Brunata."
+        "description": "Ange dina Brunata-uppgifter."
       },
       "reauth_confirm": {
         "data": {
-          "email": "E-postadress",
+          "email": "E-post",
           "password": "Lösenord"
         },
-        "description": "Dina inloggningsuppgifter för Brunata är inte längre giltiga. Ange dem igen för att fortsätta."
+        "description": "Dina Brunata-uppgifter är inte längre giltiga. Ange dem igen för att fortsätta."
       },
       "reconfigure": {
         "data": {
+          "email": "E-post",
           "password": "Lösenord"
         },
-        "description": "Ange det nya lösenordet för {email}. Vill du använda ett annat konto lägger du till det som en ny integration."
+        "description": "Ändra lösenord eller e-postadress"
       }
     },
     "error": {
-      "cannot_connect": "Kan inte ansluta till Brunatas API. Kontrollera nätverksanslutningen.",
-      "invalid_auth": "Ogiltiga inloggningsuppgifter",
-      "unknown": "Ett oväntat fel inträffade"
+      "cannot_connect": "Det gick inte att ansluta till Brunata. Kontrollera din internetanslutning.",
+      "invalid_auth": "Felaktiga inloggningsuppgifter",
+      "unknown": "Oväntat fel"
     },
     "abort": {
       "already_configured": "Det här kontot är redan konfigurerat",
       "reauth_successful": "Inloggningsuppgifterna har uppdaterats",
       "wrong_account": "Den här e-postadressen tillhör ett annat konto. Logga in med det ursprungliga kontot.",
-      "reconfigure_successful": "Lösenordet har uppdaterats"
+      "account_already_configured": "Den här e-postadressen används redan av en annan Brunata-integration. Ingenting har ändrats.",
+      "meter_mismatch": "Kontot som är kopplat till den här e-postadressen rapporterar inte alla mätare som integrationen redan har, vilket tyder på att det är ett annat hushåll. Ingenting har ändrats.",
+      "reconfigure_successful": "Inloggningsuppgifterna har uppdaterats"
     }
   },
   "entity": {

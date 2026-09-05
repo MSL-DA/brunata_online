@@ -6,32 +6,35 @@
           "email": "E-mail",
           "password": "Adgangskode"
         },
-        "description": "Indtast venligst dine Brunata loginoplysninger."
+        "description": "Angiv dine Brunata-loginoplysninger."
       },
       "reauth_confirm": {
         "data": {
           "email": "E-mail",
           "password": "Adgangskode"
         },
-        "description": "Dine Brunata loginoplysninger er ikke længere gyldige. Indtast dem venligst igen for at fortsætte."
+        "description": "Dine Brunata-loginoplysninger er ikke længere gyldige. Angiv dem igen for at fortsætte."
       },
       "reconfigure": {
         "data": {
+          "email": "E-mail",
           "password": "Adgangskode"
         },
-        "description": "Indtast den nye adgangskode til {email}. Vil du bruge en anden konto, skal den tilføjes som en ny integration."
+        "description": "Skift adgangskode eller e-mail"
       }
     },
     "error": {
-      "cannot_connect": "Kan ikke oprette forbindelse til Brunata API. Tjek din netværksforbindelse.",
+      "cannot_connect": "Kan ikke oprette forbindelse til Brunata. Tjek din internetforbindelse.",
       "invalid_auth": "Ugyldigt login",
       "unknown": "Uventet fejl"
     },
     "abort": {
-      "already_configured": "Kontoen er allerede konfigureret",
-      "reauth_successful": "Loginoplysningerne er opdateret",
-      "wrong_account": "E-mailen tilhører en anden konto. Log ind med den oprindelige konto.",
-      "reconfigure_successful": "Adgangskoden er opdateret"
+      "already_configured": "Denne konto er allerede konfigureret",
+      "reauth_successful": "Loginoplysninger er opdateret",
+      "wrong_account": "Denne e-mailadresse tilhører en anden konto. Log ind med den oprindelige konto.",
+      "account_already_configured": "Denne e-mailadresse bruges allerede af en anden Brunata-integration. Intet blev ændret.",
+      "meter_mismatch": "Kontoen bag denne e-mailadresse indberetter ikke alle de målere, integrationen allerede har, så det er tilsyneladende en anden husstand. Intet blev ændret.",
+      "reconfigure_successful": "Loginoplysninger er opdateret"
     }
   },
   "entity": {

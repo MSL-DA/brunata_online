@@ -96,10 +96,16 @@ ENERGY_UNITS = (
     UnitOfEnergy.GIGA_CALORIE,
 )
 
-# Substrings that identify an allocator unit — a count that only ever climbs.
-# Brunata's table carries a dozen vendor-specific variants ("Doprimo units",
-# "Zenner units"), so matching the marker rather than listing the spellings
-# keeps a new vendor from being misclassified.
+# The substring that identifies an allocator unit — a count that only ever
+# climbs. Nineteen entries in Brunata's table carry it, eighteen of them
+# vendor-specific ("Doprimo units", "Zenner units"), so matching the marker
+# rather than listing the spellings keeps a new vendor from being
+# misclassified.
+#
+# One marker, not a list: it is the only substring the table actually uses, and
+# LOCALE fixes that table to English, so the spellings do not vary by account.
+# A marker no entry contains would match nothing, and a unit that matches
+# nothing already falls to the safe outcome _is_cumulative_unit() describes.
 #
 # There is deliberately no fallback unit and no special case for the table's
 # "undefined" entry. Both used to stand in for a unit Brunata had not given us,
@@ -107,7 +113,7 @@ ENERGY_UNITS = (
 # Home Assistant treats as a different measurement, discarding the history
 # behind it. api.py drops such a meter instead, so anything reaching this
 # module has a unit that resolved.
-ALLOCATOR_UNIT_MARKERS = ("unit", "pts")
+ALLOCATOR_UNIT_MARKER = "unit"
 
 
 def _is_cumulative_unit(canonical: str | None, raw_unit: str) -> bool:
@@ -126,8 +132,7 @@ def _is_cumulative_unit(canonical: str | None, raw_unit: str) -> bool:
     if canonical in VOLUME_UNITS or canonical in ENERGY_UNITS:
         return True
 
-    lowered = raw_unit.lower()
-    return any(marker in lowered for marker in ALLOCATOR_UNIT_MARKERS)
+    return ALLOCATOR_UNIT_MARKER in raw_unit.lower()
 
 
 def _device_name(meter_type: str, placement: str | None, meter_id: str) -> str:
@@ -373,9 +378,8 @@ class BrunataSensor(
         The cached value and reading date are plain in-memory attributes, so
         they reset whenever this entity is recreated. available() would then
         depend on the coordinator already holding a fresh reading for this
-        meter at that exact moment — likelier to be empty for meters that
-        report rarely. Restoring closes that gap and gives the decrease guard
-        its baseline.
+        meter at that exact moment. Restoring closes that gap and gives the
+        decrease guard its baseline.
 
         The baseline is two halves: the value and reading date come from the
         state, the meter number and mounting date from the extra data, because
@@ -553,9 +557,14 @@ class BrunataSensor(
         cases, both of which Brunata states outright:
 
         1. The mounting date or the meter number changed — the physical device
-           was replaced, so the new one legitimately starts near zero.
+           was replaced, so the new one legitimately starts near zero. This
+           applies to *every* meter that counts upwards. All meters are
+           replaced eventually, roughly every 8-10 years, heat cost allocators
+           included; the check below is deliberately not conditioned on meter
+           type, and it is tested first.
         2. It is a heat cost allocator around new year. Those are zeroed on
-           1 January, every year.
+           1 January, every year. This one is on top of case 1 for allocators,
+           not instead of it.
 
         Anything else is discarded as a glitch: accepting one under
         TOTAL_INCREASING would record a false consumption spike on the way up.
@@ -638,12 +647,17 @@ class BrunataSensor(
         """Return True if a decrease on this date is the annual 1 January reset.
 
         Heat cost allocators are zeroed on 1 January, but the first reading
-        published afterwards is not necessarily dated 1 January — these meters
-        report infrequently, so it can arrive days or weeks into the new year.
-        Matching only (12, 31) and (1, 1) rejected such a reading as a glitch,
-        and since the cached value is never lowered, every reading for the rest
-        of the year was rejected with it: the sensor froze at the pre-reset
-        value until the new period happened to exceed it.
+        published afterwards is not necessarily dated 1 January. Matching only
+        (12, 31) and (1, 1) rejected such a reading as a glitch, and since the
+        cached value is never lowered, every reading for the rest of the year
+        was rejected with it: the sensor froze at the pre-reset value until the
+        new period happened to exceed it.
+
+        Brunata publishes one reading per meter per day, around 02:00, whether
+        or not the value moved, so the reset is visible within a day of it
+        happening. The rule below does not depend on that: it compares calendar
+        years, not intervals, so it holds whatever the reporting cadence turns
+        out to be.
 
         The reliable signal is the calendar year: a reading dated in a later
         year than the last accepted one is on the far side of a 1 January,
