@@ -20,7 +20,7 @@
           "email": "E-post",
           "password": "Passord"
         },
-        "description": "Endre passordet, eller flytt til en annen e-postadresse for samme husstand. [Slik fungerer det](https://github.com/MSL-DA/brunata_online/wiki/Changing-your-login)"
+        "description": "Endre passordet, eller flytt til en annen e-postadresse for samme husstand. [Slik fungerer det]({wiki_url})"
       }
     },
     "error": {
