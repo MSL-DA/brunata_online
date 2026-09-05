@@ -20,7 +20,7 @@
           "email": "E-Mail",
           "password": "Passwort"
         },
-        "description": "Ändern Sie Ihr Passwort oder wechseln Sie zu einer anderen E-Mail-Adresse desselben Haushalts. [So funktioniert es](https://github.com/MSL-DA/brunata_online/wiki/Changing-your-login)"
+        "description": "Ändern Sie Ihr Passwort oder wechseln Sie zu einer anderen E-Mail-Adresse desselben Haushalts. [So funktioniert es]({wiki_url})"
       }
     },
     "error": {
