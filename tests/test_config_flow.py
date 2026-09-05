@@ -1,14 +1,85 @@
 """Test Brunata config flow."""
 
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
+
+import pytest
 
 from homeassistant import config_entries, data_entry_flow
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import selector
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.brunata.config_flow import CannotConnect, InvalidAuth
+from custom_components.brunata.api import (
+    BrunataApiError,
+    BrunataAuthError,
+    BrunataConnectionError,
+)
+from custom_components.brunata.config_flow import (
+    CannotConnect,
+    InvalidAuth,
+    validate_input,
+)
 from custom_components.brunata.const import DOMAIN
+
+CREDENTIALS = {"email": "test@example.com", "password": "password123"}
+
+
+# --- validate_input itself -------------------------------------------------
+#
+# Every other test in this file replaces validate_input() with a stub, which is
+# right for testing the dialog around it but left the function itself with no
+# coverage at all: the error mapping, the title and the client close could all
+# have been deleted with nothing turning red.
+
+
+async def test_validate_input_returns_the_entry_title(
+    hass: HomeAssistant, mock_brunata_client
+):
+    """The title is what the user sees in the integrations list, and it is the
+    only place the address is shown once setup is done."""
+    result = await validate_input(hass, CREDENTIALS)
+
+    assert result == {"title": "Brunata (test@example.com)"}
+    mock_brunata_client.async_validate_credentials.assert_awaited_once()
+
+
+@pytest.mark.parametrize(
+    ("api_error", "flow_error"),
+    [
+        (BrunataAuthError("credentials rejected"), InvalidAuth),
+        (BrunataConnectionError("network unreachable"), CannotConnect),
+        (BrunataApiError("Brunata returned 500"), CannotConnect),
+    ],
+)
+async def test_validate_input_maps_api_errors_to_flow_errors(
+    hass: HomeAssistant, mock_brunata_client, api_error, flow_error
+):
+    """A network problem reported as a bad password sends people off changing
+    credentials that were fine. The three API error types are the whole reason
+    this mapping exists, and none of them reached it before."""
+    mock_brunata_client.async_validate_credentials = AsyncMock(side_effect=api_error)
+
+    with pytest.raises(flow_error):
+        await validate_input(hass, CREDENTIALS)
+
+
+@pytest.mark.parametrize(
+    "side_effect", [None, BrunataAuthError("credentials rejected")]
+)
+async def test_validate_input_always_closes_the_client(
+    hass: HomeAssistant, mock_brunata_client, side_effect
+):
+    """The client owns an httpx session. Without the close, every login
+    attempt — successful or not — leaks one for the life of the process, and a
+    user retyping a password leaks one per attempt."""
+    mock_brunata_client.async_validate_credentials = AsyncMock(side_effect=side_effect)
+
+    try:
+        await validate_input(hass, CREDENTIALS)
+    except InvalidAuth:
+        pass
+
+    mock_brunata_client.async_close.assert_awaited_once()
 
 
 async def test_flow_user_init(hass: HomeAssistant):
