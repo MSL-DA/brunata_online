@@ -20,7 +20,7 @@
           "email": "Adresse e-mail",
           "password": "Mot de passe"
         },
-        "description": "Modifiez votre mot de passe, ou passez à une autre adresse e-mail du même logement. [Comment cela fonctionne]({wiki_url})"
+        "description": "Modifier le mot de passe ou l’adresse e-mail"
       }
     },
     "error": {

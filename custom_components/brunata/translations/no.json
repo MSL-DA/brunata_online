@@ -20,7 +20,7 @@
           "email": "E-post",
           "password": "Passord"
         },
-        "description": "Endre passordet, eller flytt til en annen e-postadresse for samme husstand. [Slik fungerer det]({wiki_url})"
+        "description": "Endre passord eller e-post"
       }
     },
     "error": {

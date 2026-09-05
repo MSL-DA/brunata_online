@@ -20,7 +20,7 @@
           "email": "E-Mail",
           "password": "Passwort"
         },
-        "description": "Ändern Sie Ihr Passwort oder wechseln Sie zu einer anderen E-Mail-Adresse desselben Haushalts. [So funktioniert es]({wiki_url})"
+        "description": "Passwort oder E-Mail ändern"
       }
     },
     "error": {

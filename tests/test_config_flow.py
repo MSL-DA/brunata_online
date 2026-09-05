@@ -1,7 +1,5 @@
 """Test Brunata config flow."""
 
-import json
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -19,7 +17,6 @@ from custom_components.brunata.api import (
     ParseReport,
 )
 from custom_components.brunata.config_flow import (
-    RECONFIGURE_HELP_URL,
     CannotConnect,
     InvalidAuth,
     validate_input,
@@ -27,8 +24,6 @@ from custom_components.brunata.config_flow import (
 from custom_components.brunata.const import DOMAIN
 
 CREDENTIALS = {"email": "test@example.com", "password": "password123"}
-
-TRANSLATIONS = Path(__file__).parent.parent / "custom_components" / "brunata" / "translations"
 
 
 def _add_meter_device(hass: HomeAssistant, entry: MockConfigEntry, meter_id: str):
@@ -676,52 +671,6 @@ async def test_reconfigure_keeps_the_old_password_when_the_new_one_is_wrong(
     assert result2["type"] == data_entry_flow.FlowResultType.FORM
     assert result2["errors"] == {"base": "invalid_auth"}
     assert entry.data["password"] == "old_password"
-
-
-# --- reconfigure: the link to the wiki -------------------------------------
-#
-# The two tests below are one check in two halves. The dialog's description ends
-# in a link to the wiki page that explains changing a password and moving to a
-# new address, and the address of that page cannot live in the sentence: hassfest
-# refuses a translation string containing a URL and asks for a description
-# placeholder instead. So the sentence writes {wiki_url} and the flow supplies
-# the value. Break either half and the user is shown the literal text
-# "{wiki_url}" with nothing failing anywhere else.
-
-
-async def test_reconfigure_supplies_the_wiki_url(
-    hass: HomeAssistant, mock_brunata_client
-):
-    """The flow half: the placeholder the sentence asks for is handed over."""
-    entry = MockConfigEntry(
-        domain=DOMAIN,
-        unique_id="test@example.com",
-        data={"email": "test@example.com", "password": "password123"},
-    )
-    entry.add_to_hass(hass)
-
-    result = await hass.config_entries.flow.async_init(
-        DOMAIN,
-        context={"source": config_entries.SOURCE_RECONFIGURE, "entry_id": entry.entry_id},
-    )
-
-    assert result["description_placeholders"]["wiki_url"] == RECONFIGURE_HELP_URL
-
-
-@pytest.mark.parametrize("language", ["da", "de", "en", "fr", "no", "sv"])
-def test_every_language_uses_the_placeholder_and_no_url(language):
-    """The translation half, in all six languages.
-
-    hassfest reported only en.json when the URL was written out, so the other
-    five are not known to be covered there. A missing placeholder in one
-    language shows that language's users a link that goes nowhere.
-    """
-    description = json.loads((TRANSLATIONS / f"{language}.json").read_text("utf-8"))[
-        "config"
-    ]["step"]["reconfigure"]["description"]
-
-    assert "{wiki_url}" in description
-    assert "http" not in description
 
 
 # --- reconfigure: moving the entry to a new address ------------------------

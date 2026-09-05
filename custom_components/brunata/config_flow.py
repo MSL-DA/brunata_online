@@ -70,19 +70,6 @@ PASSWORD_SELECTOR = selector.TextSelector(
     )
 )
 
-# The wiki page the reconfigure dialog links to. It is a placeholder handed to
-# the form rather than part of the translated sentence, because hassfest
-# rejects a URL inside a translation string outright:
-#
-#   [ERROR] [TRANSLATIONS] Invalid translations/en.json: the string should not
-#   contain URLs, please use description placeholders instead
-#
-# So the six translation files write [text]({wiki_url}) and the address lives
-# here, in one place, in one language.
-RECONFIGURE_HELP_URL = (
-    "https://github.com/MSL-DA/brunata_online/wiki/Changing-your-login"
-)
-
 
 async def validate_input(hass: HomeAssistant, data: dict[str, Any]) -> dict[str, Any]:
     """Validate the credentials by performing a real login.
@@ -398,7 +385,6 @@ class BrunataConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     vol.Required(CONF_PASSWORD): PASSWORD_SELECTOR,
                 }
             ),
-            description_placeholders={"wiki_url": RECONFIGURE_HELP_URL},
             errors=errors,
         )
 
