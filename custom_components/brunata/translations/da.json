@@ -20,7 +20,7 @@
           "email": "E-mail",
           "password": "Adgangskode"
         },
-        "description": "Skift adgangskode, eller flyt til en anden e-mailadresse for samme husstand. [Sådan virker det]({wiki_url})"
+        "description": "Skift adgangskode eller e-mail"
       }
     },
     "error": {
