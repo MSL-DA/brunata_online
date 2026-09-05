@@ -20,7 +20,7 @@
           "email": "E-postadress",
           "password": "Lösenord"
         },
-        "description": "Byt lösenord, eller flytta till en annan e-postadress för samma hushåll. [Så fungerar det]({wiki_url})"
+        "description": "Ändra lösenord eller e-postadress"
       }
     },
     "error": {
