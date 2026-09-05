@@ -373,9 +373,8 @@ class BrunataSensor(
         The cached value and reading date are plain in-memory attributes, so
         they reset whenever this entity is recreated. available() would then
         depend on the coordinator already holding a fresh reading for this
-        meter at that exact moment — likelier to be empty for meters that
-        report rarely. Restoring closes that gap and gives the decrease guard
-        its baseline.
+        meter at that exact moment. Restoring closes that gap and gives the
+        decrease guard its baseline.
 
         The baseline is two halves: the value and reading date come from the
         state, the meter number and mounting date from the extra data, because
@@ -553,9 +552,14 @@ class BrunataSensor(
         cases, both of which Brunata states outright:
 
         1. The mounting date or the meter number changed — the physical device
-           was replaced, so the new one legitimately starts near zero.
+           was replaced, so the new one legitimately starts near zero. This
+           applies to *every* meter that counts upwards. All meters are
+           replaced eventually, roughly every 8-10 years, heat cost allocators
+           included; the check below is deliberately not conditioned on meter
+           type, and it is tested first.
         2. It is a heat cost allocator around new year. Those are zeroed on
-           1 January, every year.
+           1 January, every year. This one is on top of case 1 for allocators,
+           not instead of it.
 
         Anything else is discarded as a glitch: accepting one under
         TOTAL_INCREASING would record a false consumption spike on the way up.
@@ -638,12 +642,20 @@ class BrunataSensor(
         """Return True if a decrease on this date is the annual 1 January reset.
 
         Heat cost allocators are zeroed on 1 January, but the first reading
-        published afterwards is not necessarily dated 1 January — these meters
-        report infrequently, so it can arrive days or weeks into the new year.
-        Matching only (12, 31) and (1, 1) rejected such a reading as a glitch,
-        and since the cached value is never lowered, every reading for the rest
-        of the year was rejected with it: the sensor froze at the pre-reset
-        value until the new period happened to exceed it.
+        published afterwards is not necessarily dated 1 January. Matching only
+        (12, 31) and (1, 1) rejected such a reading as a glitch, and since the
+        cached value is never lowered, every reading for the rest of the year
+        was rejected with it: the sensor froze at the pre-reset value until the
+        new period happened to exceed it.
+
+        An earlier version of this docstring explained the gap by saying these
+        meters report infrequently, so a reset could be weeks in arriving. That
+        was never read anywhere. Brunata's own reading list shows one reading
+        per meter per day, around 02:00, whether or not the value moved, so a
+        reset is visible within a day. The year comparison below does not
+        depend on which of the two is true — it is only the explanation that
+        was invented, and an invented explanation is what someone changes the
+        rule on later.
 
         The reliable signal is the calendar year: a reading dated in a later
         year than the last accepted one is on the far side of a 1 January,
