@@ -356,10 +356,10 @@ def test_the_poll_window_stays_inside_the_hour():
     never polls, with nothing in the log pointing at the cause.
 
     Every jitter the spread can produce is walked rather than the sample real
-    entry ids happen to give. The function is called rather than its arithmetic
-    restated: an earlier version of this test recomputed the formula here, so
-    it held the constants to each other but would have passed even if
-    _jittered_poll_time() had stopped carrying seconds into minutes at all.
+    entry ids happen to give, and _jittered_poll_time() is called rather than
+    its arithmetic restated here. Restating it would hold the constants to each
+    other while passing even if the function stopped carrying seconds into
+    minutes at all.
     """
     times = []
     for jitter in range(_POLL_WINDOW_SPREAD_SECONDS):

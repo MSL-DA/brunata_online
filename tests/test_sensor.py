@@ -255,11 +255,10 @@ async def test_sensor_reset_accepted_when_first_reading_arrives_late(mock_meter)
     cached value is never lowered the sensor then stayed frozen at the
     pre-reset value for the rest of the year.
 
-    This test used to say allocators report infrequently. They do not:
-    Brunata's reading list shows one reading per meter per day, around 02:00,
-    whether or not the value moved. The rule under test is unaffected — it
-    compares calendar years, not intervals — but the reason given for it was
-    invented, and a test docstring is read as a statement of fact.
+    Brunata publishes one reading per meter per day, around 02:00, whether or
+    not the value moved. The rule under test does not depend on that — it
+    compares calendar years, not intervals — which is why a mid-January date is
+    accepted here.
     """
     mock_meter = replace(mock_meter, meter_type="Radiator", meter_type_code=1, unit="units")
 
