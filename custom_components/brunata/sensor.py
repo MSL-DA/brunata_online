@@ -96,10 +96,16 @@ ENERGY_UNITS = (
     UnitOfEnergy.GIGA_CALORIE,
 )
 
-# Substrings that identify an allocator unit — a count that only ever climbs.
-# Brunata's table carries a dozen vendor-specific variants ("Doprimo units",
-# "Zenner units"), so matching the marker rather than listing the spellings
-# keeps a new vendor from being misclassified.
+# The substring that identifies an allocator unit — a count that only ever
+# climbs. Nineteen entries in Brunata's table carry it, eighteen of them
+# vendor-specific ("Doprimo units", "Zenner units"), so matching the marker
+# rather than listing the spellings keeps a new vendor from being
+# misclassified.
+#
+# One marker, not a list: it is the only substring the table actually uses, and
+# LOCALE fixes that table to English, so the spellings do not vary by account.
+# A marker no entry contains would match nothing, and a unit that matches
+# nothing already falls to the safe outcome _is_cumulative_unit() describes.
 #
 # There is deliberately no fallback unit and no special case for the table's
 # "undefined" entry. Both used to stand in for a unit Brunata had not given us,
@@ -107,7 +113,7 @@ ENERGY_UNITS = (
 # Home Assistant treats as a different measurement, discarding the history
 # behind it. api.py drops such a meter instead, so anything reaching this
 # module has a unit that resolved.
-ALLOCATOR_UNIT_MARKERS = ("unit", "pts")
+ALLOCATOR_UNIT_MARKER = "unit"
 
 
 def _is_cumulative_unit(canonical: str | None, raw_unit: str) -> bool:
@@ -126,8 +132,7 @@ def _is_cumulative_unit(canonical: str | None, raw_unit: str) -> bool:
     if canonical in VOLUME_UNITS or canonical in ENERGY_UNITS:
         return True
 
-    lowered = raw_unit.lower()
-    return any(marker in lowered for marker in ALLOCATOR_UNIT_MARKERS)
+    return ALLOCATOR_UNIT_MARKER in raw_unit.lower()
 
 
 def _device_name(meter_type: str, placement: str | None, meter_id: str) -> str:
