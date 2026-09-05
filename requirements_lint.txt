@@ -1,9 +1,10 @@
 # Lint toolchain. Separate from requirements_test.txt on purpose: that file
-# pins pytest-homeassistant-custom-component, which is not an ordinary
-# dependency — it decides which Home Assistant version CI tests against, and it
-# is bumped by hand with a reason. Ruff is an ordinary dependency and should be
-# bumped like one, so dependabot.yml covers this file and excludes that pin by
-# name. Do not merge the two files.
+# pins the Home Assistant version CI tests against, which is a claim about what
+# the integration is known to work on rather than an ordinary dependency. Ruff
+# is an ordinary dependency and should be bumped like one. Dependabot covers
+# both files under `pip`; keeping them apart is what makes a Ruff bump and a
+# Home Assistant bump two separate pull requests you can judge on their own.
+# Do not merge the two files.
 #
 # It lived as a `pip install ruff==...` argument inside lint.yml, where nothing
 # could see it: not Dependabot, and not anyone looking for the repo's pinned

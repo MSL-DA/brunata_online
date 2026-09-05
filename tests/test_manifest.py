@@ -28,8 +28,13 @@ then died on import with
 which is the PyPI problem described below, not a fault in the integration.
 They stay unmeasured, and that is not a hole in the claim: the floor is the
 *oldest* release that works, and that one was measured directly. The pin in
-requirements_test.txt, which CI runs green on every push, is Home Assistant
-2026.8 — it says nothing about any release in 2025.
+requirements_test.txt, which CI runs green on every push, is years newer and
+says nothing about any release in 2025.
+
+That version is deliberately not written out here. Dependabot bumps it weekly,
+and a number restated in prose goes stale at the next bump with no test to
+catch it — which is exactly what happened to this paragraph once already. Read
+requirements_test.txt for the current one.
 
 Testing against that floor was tried and dropped. Installing a year-old Home
 Assistant from PyPI today pulls newer releases of its loosely pinned indirect

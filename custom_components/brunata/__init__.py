@@ -70,7 +70,11 @@ _RATE_LIMIT_MAX_BACKOFF = timedelta(hours=24)
 
 
 def _entry_jitter_seconds(entry_id: str) -> int:
-    """Derive a stable 0..59 second offset from the entry_id.
+    """Derive a stable second offset, inside the spread, from the entry_id.
+
+    The range is _POLL_WINDOW_SPREAD_SECONDS and is not written out here: a
+    number restated in prose stops matching the constant the moment someone
+    changes it, and nothing turns red.
 
     Deterministic per config entry (stable across HA restarts and reloads),
     so a given install always polls at the same wall-clock second — but
