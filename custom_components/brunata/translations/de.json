@@ -20,7 +20,7 @@
           "email": "E-Mail",
           "password": "Passwort"
         },
-        "description": "Aktualisieren Sie Ihre Brunata-Zugangsdaten. Sie können auch eine andere E-Mail-Adresse eingeben, solange es derselbe Haushalt ist: Das Konto dahinter muss die Zähler enthalten, die diese Integration bereits hat."
+        "description": "Ändern Sie Ihr Passwort oder wechseln Sie zu einer anderen E-Mail-Adresse desselben Haushalts. [So funktioniert es](https://github.com/MSL-DA/brunata_online/wiki/Changing-your-login)"
       }
     },
     "error": {
