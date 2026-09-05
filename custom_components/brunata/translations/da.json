@@ -20,7 +20,7 @@
           "email": "E-mail",
           "password": "Adgangskode"
         },
-        "description": "Opdater dine Brunata loginoplysninger. Du kan også indtaste en anden e-mailadresse, så længe det er den samme husstand: kontoen bag den skal indeholde de målere, integrationen allerede har."
+        "description": "Skift adgangskode, eller flyt til en anden e-mailadresse for samme husstand. [Sådan virker det]({wiki_url})"
       }
     },
     "error": {
