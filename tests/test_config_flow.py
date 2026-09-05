@@ -563,6 +563,11 @@ async def test_reconfigure_with_the_same_address_does_not_list_meters(
     The meter listing exists to prove that a *new* address is the same
     household. Running it on every password change would double the traffic
     against a bot-protected endpoint for a question already answered.
+
+    Asserted on the helper rather than on the client's own call counter: a
+    successful reconfiguration reloads the entry, and the reload fetches the
+    meters as an ordinary update, so the counter cannot say which of the two
+    it was counting.
     """
     entry = MockConfigEntry(
         domain=DOMAIN,
@@ -580,14 +585,17 @@ async def test_reconfigure_with_the_same_address_does_not_list_meters(
     with patch(
         "custom_components.brunata.config_flow.validate_input",
         return_value={"title": "Brunata (test@example.com)"},
-    ):
+    ), patch(
+        "custom_components.brunata.config_flow._async_missing_meters"
+    ) as missing_meters:
         result2 = await hass.config_entries.flow.async_configure(
             result["flow_id"],
             {"email": "test@example.com", "password": "new_password123"},
         )
+        await hass.async_block_till_done()
 
     assert result2["reason"] == "reconfigure_successful"
-    assert mock_brunata_client.async_get_meters.await_count == 0
+    assert missing_meters.call_count == 0
 
 
 async def test_reconfigure_normalises_an_address_stored_before_1_4_0(
@@ -899,7 +907,12 @@ async def test_reconfigure_closes_the_client_after_listing_meters(
 ):
     """The meter listing builds its own client, which owns an httpx session.
     Without the close, every attempt at moving an address leaks one for the
-    life of the process."""
+    life of the process.
+
+    The address is refused here on purpose. A successful move reloads the
+    entry, the reload builds a second client of its own, and the counter could
+    then no longer say anything about the one the listing owned.
+    """
     entry = MockConfigEntry(
         domain=DOMAIN,
         unique_id="gammel@example.com",
@@ -907,15 +920,18 @@ async def test_reconfigure_closes_the_client_after_listing_meters(
     )
     entry.add_to_hass(hass)
     _add_meter_device(hass, entry, "12345")
+    _add_meter_device(hass, entry, "67890")
     mock_brunata_client.async_get_meters = AsyncMock(return_value={"12345": mock_meter})
 
     result = await hass.config_entries.flow.async_init(
         DOMAIN,
         context={"source": config_entries.SOURCE_RECONFIGURE, "entry_id": entry.entry_id},
     )
-    await hass.config_entries.flow.async_configure(
+    result2 = await hass.config_entries.flow.async_configure(
         result["flow_id"],
         {"email": "ny@example.com", "password": "password123"},
     )
+    await hass.async_block_till_done()
 
+    assert result2["reason"] == "meter_mismatch"
     assert mock_brunata_client.async_close.await_count == 1
