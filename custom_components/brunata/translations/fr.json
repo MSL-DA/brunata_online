@@ -20,7 +20,7 @@
           "email": "Adresse e-mail",
           "password": "Mot de passe"
         },
-        "description": "Mettez à jour vos identifiants Brunata. Vous pouvez aussi saisir une autre adresse e-mail, à condition qu’il s’agisse du même logement : le compte associé doit contenir les compteurs que cette intégration possède déjà."
+        "description": "Modifiez votre mot de passe, ou passez à une autre adresse e-mail du même logement. [Comment cela fonctionne](https://github.com/MSL-DA/brunata_online/wiki/Changing-your-login)"
       }
     },
     "error": {
