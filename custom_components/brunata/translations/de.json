@@ -17,9 +17,10 @@
       },
       "reconfigure": {
         "data": {
+          "email": "E-Mail",
           "password": "Passwort"
         },
-        "description": "Geben Sie das neue Passwort für {email} ein. Für ein anderes Konto fügen Sie es als neue Integration hinzu."
+        "description": "Aktualisieren Sie Ihre Brunata-Zugangsdaten. Sie können auch eine andere E-Mail-Adresse eingeben, solange es derselbe Haushalt ist: Das Konto dahinter muss die Zähler enthalten, die diese Integration bereits hat."
       }
     },
     "error": {
@@ -31,7 +32,9 @@
       "already_configured": "Dieses Konto ist bereits konfiguriert",
       "reauth_successful": "Anmeldedaten aktualisiert",
       "wrong_account": "Diese E-Mail-Adresse gehört zu einem anderen Konto. Melden Sie sich mit dem ursprünglichen Konto an.",
-      "reconfigure_successful": "Passwort aktualisiert"
+      "account_already_configured": "Diese E-Mail-Adresse wird bereits von einer anderen Brunata-Integration verwendet. Es wurde nichts geändert.",
+      "meter_mismatch": "Das Konto zu dieser E-Mail-Adresse enthält nicht alle Zähler, die diese Integration bereits hat, es ist also ein anderer Haushalt. Es wurde nichts geändert.",
+      "reconfigure_successful": "Anmeldedaten aktualisiert"
     }
   },
   "entity": {
