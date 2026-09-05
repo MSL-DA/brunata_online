@@ -648,14 +648,11 @@ class BrunataSensor(
         was rejected with it: the sensor froze at the pre-reset value until the
         new period happened to exceed it.
 
-        An earlier version of this docstring explained the gap by saying these
-        meters report infrequently, so a reset could be weeks in arriving. That
-        was never read anywhere. Brunata's own reading list shows one reading
-        per meter per day, around 02:00, whether or not the value moved, so a
-        reset is visible within a day. The year comparison below does not
-        depend on which of the two is true — it is only the explanation that
-        was invented, and an invented explanation is what someone changes the
-        rule on later.
+        Brunata publishes one reading per meter per day, around 02:00, whether
+        or not the value moved, so the reset is visible within a day of it
+        happening. The rule below does not depend on that: it compares calendar
+        years, not intervals, so it holds whatever the reporting cadence turns
+        out to be.
 
         The reliable signal is the calendar year: a reading dated in a later
         year than the last accepted one is on the far side of a 1 January,
