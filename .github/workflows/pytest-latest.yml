@@ -9,6 +9,14 @@ on:
   schedule:
     - cron: "0 6 * * 6"
 
+# None of these jobs write anything back to the repository: they check out,
+# install and run. Declaring the token read-only means a compromised action in
+# the chain cannot push, tag or open anything either. release.yml has said this
+# since it was written; the others inherited whatever the repository default
+# happened to be.
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
