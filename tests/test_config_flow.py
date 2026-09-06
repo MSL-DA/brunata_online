@@ -21,7 +21,7 @@ from custom_components.brunata.config_flow import (
     InvalidAuth,
     validate_input,
 )
-from custom_components.brunata.const import DOMAIN
+from custom_components.brunata.const import DEVICE_ID_PREFIX, DOMAIN
 
 CREDENTIALS = {"email": "test@example.com", "password": "password123"}
 
@@ -32,10 +32,16 @@ def _add_meter_device(hass: HomeAssistant, entry: MockConfigEntry, meter_id: str
     The reconfigure step reads the entry's meters from the device registry
     rather than from the coordinator, because the dialog can be opened while
     the entry is not loaded. Creating the device directly is what models that.
+
+    The identifier is built from DEVICE_ID_PREFIX, the same constant sensor.py
+    builds the real one from and config_flow.py strips the meter id back out
+    of. A literal here would keep producing the old spelling if that prefix
+    ever moved, and the step under test would then find no meters at all —
+    which is a passing result for some of these tests.
     """
     return dr.async_get(hass).async_get_or_create(
         config_entry_id=entry.entry_id,
-        identifiers={(DOMAIN, f"brunata_{meter_id}")},
+        identifiers={(DOMAIN, f"{DEVICE_ID_PREFIX}{meter_id}")},
         name=f"Water ({meter_id})",
     )
 
