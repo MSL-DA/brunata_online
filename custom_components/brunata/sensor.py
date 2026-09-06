@@ -97,10 +97,10 @@ ENERGY_UNITS = (
 )
 
 # The substring that identifies an allocator unit — a count that only ever
-# climbs. Nineteen entries in Brunata's table carry it, eighteen of them
-# vendor-specific ("Doprimo units", "Zenner units"), so matching the marker
-# rather than listing the spellings keeps a new vendor from being
-# misclassified.
+# climbs. Twenty entries in Brunata's table carry it: eighteen vendor-specific
+# ("Doprimo units", "Zenner units"), plus a plain "units" that the table holds
+# at two separate indices. Matching the marker rather than listing the
+# spellings keeps a new vendor from being misclassified.
 #
 # One marker, not a list: it is the only substring the table actually uses, and
 # LOCALE fixes that table to English, so the spellings do not vary by account.
@@ -108,11 +108,11 @@ ENERGY_UNITS = (
 # nothing already falls to the safe outcome _is_cumulative_unit() describes.
 #
 # There is deliberately no fallback unit and no special case for the table's
-# "undefined" entry. Both used to stand in for a unit Brunata had not given us,
-# producing a plausible-looking sensor carrying a unit nobody had read — which
-# Home Assistant treats as a different measurement, discarding the history
-# behind it. api.py drops such a meter instead, so anything reaching this
-# module has a unit that resolved.
+# "undefined" entry. Either one would stand in for a unit Brunata had not
+# given us, producing a plausible-looking sensor carrying a unit nobody had
+# read — which Home Assistant treats as a different measurement, discarding the
+# history behind it. api.py drops such a meter instead, so anything reaching
+# this module has a unit that resolved.
 ALLOCATOR_UNIT_MARKER = "unit"
 
 
@@ -259,6 +259,15 @@ class BrunataSensor(
         """Initialize the sensor."""
         super().__init__(coordinator)
         self._meter_id = meter.meter_id
+        # Spelled out here, and deliberately not built from DEVICE_ID_PREFIX.
+        # That constant is the prefix of a *device* identifier; this is an
+        # entity's unique id, and it is the string Home Assistant hangs the
+        # long term statistics on. Building it from the constant would mean
+        # that changing the device prefix renamed every sensor at once — and
+        # Home Assistant reads a renamed sensor as a new one, leaving the
+        # history behind the old name where nothing can reach it. The two
+        # strings start with the same word today and must stay free to move
+        # apart.
         self._attr_unique_id = f"brunata_{self._meter_id}_consumption"
         # The physical meter behind this meter_id. Brunata keeps the meter_id
         # when a device is swapped, so a change here means the hardware was
@@ -343,18 +352,19 @@ class BrunataSensor(
         # rule off. See ANNUAL_RESET_METER_TYPES and _accept_reading().
         self._resets_annually = meter.meter_type_code in ANNUAL_RESET_METER_TYPES
 
-        # One device per meter. The name is kept because _apply_latest_reading()
-        # compares the name it builds from each payload against this one to
-        # decide whether the device registry needs updating.
+        # One device per meter. The name and the model are kept because
+        # _apply_latest_reading() compares what it builds from each payload
+        # against these to decide whether the device registry needs updating.
         self._placement = meter.placement
         self._device_name = _device_name(
             meter.meter_type, meter.placement, self._meter_id
         )
+        self._device_model = meter.meter_type
         self._attr_device_info = dr.DeviceInfo(
             identifiers={(DOMAIN, f"{DEVICE_ID_PREFIX}{self._meter_id}")},
             name=self._device_name,
             manufacturer="Brunata",
-            model=meter.meter_type,
+            model=self._device_model,
             # Brunata's portal is where a user relabels a meter — the change
             # this integration then follows into the device registry — so the
             # device page links straight to it. The account root rather than
@@ -484,10 +494,17 @@ class BrunataSensor(
         # a changed type sit unnoticed until the entry was reloaded; and
         # comparing here rather than inside the function below keeps the common
         # case free of a device registry lookup.
+        #
+        # The model is compared separately even though the meter type is part
+        # of every name _device_name() builds. Tying the model to the name
+        # comparison would make the model depend on how the name happens to be
+        # composed, and that is a property of _device_name(), not a rule.
         name = _device_name(meter.meter_type, meter.placement, self._meter_id)
-        if name != self._device_name:
+        model = meter.meter_type
+        if name != self._device_name or model != self._device_model:
             self._device_name = name
-            self._async_update_device_name(name)
+            self._device_model = model
+            self._async_update_device_registry(name, model)
 
         if meter.value is None or not self._accept_reading(meter):
             return
@@ -498,13 +515,13 @@ class BrunataSensor(
         self._meter_no = meter.meter_no
         self._mounting_date = meter.mounting_date
 
-        # Only when the reading carries a date. An accepted reading without one
-        # used to overwrite both fields with None, and _is_annual_reset() reads
-        # a missing _last_reading_day as "no baseline", switching back to the
-        # December/January window the calendar-year rule replaced. One undated
-        # reading therefore reopened that window for the rest of the December
-        # and January it fell in, and a glitch dated 31 December was then
-        # adopted as an annual reset.
+        # Only when the reading carries a date. Overwriting both fields with
+        # None on an undated reading would clear the year baseline, and
+        # _is_annual_reset() reads a missing _last_reading_day as "no
+        # baseline" and falls back to the December/January window. One undated
+        # reading would therefore reopen that window for the rest of the
+        # December and January it fell in, and a glitch dated 31 December
+        # would be adopted as an annual reset.
         #
         # The cost is that reading_date describes the last reading Brunata
         # dated rather than the value now shown — the smaller of the two, since
@@ -514,8 +531,8 @@ class BrunataSensor(
             self._last_reading_day = meter.reading_date
 
     @callback
-    def _async_update_device_name(self, name: str) -> None:
-        """Follow a renamed meter into the device registry.
+    def _async_update_device_registry(self, name: str, model: str) -> None:
+        """Follow a relabelled meter into the device registry.
 
         DeviceInfo is only read when the entity is added, so without this a
         meter renamed in Brunata's own UI keeps its old device name until the
@@ -523,32 +540,49 @@ class BrunataSensor(
         poll. That split is what a user notices: the attribute says "Kitchen"
         and the device is still called "Water - Living room".
 
-        Takes the finished name rather than the meter, because the caller has
-        already built it in order to notice that it changed. That is also why
-        there is no name comparison here: the caller only calls this when the
-        name it holds has changed, so a second check would answer the same
+        `model` carries the meter type, shown on the device page. api.py falls
+        back to the raw code when Brunata's meter type table cannot resolve it,
+        on the stated grounds that a device called "2" fixes itself once the
+        table answers again. That only held for the name: the model was written
+        once at creation and never again, so the raw code stayed on the device
+        page for the life of the entry.
+
+        Takes the finished values rather than the meter, because the caller has
+        already built them in order to notice that they changed. That is also
+        why there is no comparison here: the caller only calls this when at
+        least one of them has changed, so a second check would answer the same
         question twice.
 
-        Only `name` is written. A name the user typed in Home Assistant lands
-        in `name_by_user`, which the UI prefers and which this leaves alone.
-        """
-        if self.hass is None:
-            return
+        Only `name` and `model` are written. A name the user typed in Home
+        Assistant lands in `name_by_user`, which the UI prefers and which this
+        leaves alone.
 
-        device_registry = dr.async_get(self.hass)
-        device = device_registry.async_get_device(
-            identifiers={(DOMAIN, f"{DEVICE_ID_PREFIX}{self._meter_id}")}
-        )
+        The device comes from `self.device_entry`, which the entity platform
+        sets when the entity is added. That is Home Assistant's own
+        recommendation for an entity that needs its own device, and it replaces
+        a DeviceRegistry.async_get_device() lookup here: that method is
+        deprecated from Home Assistant 2026.9 and removed in 2027.8, because
+        identifiers are unique per config entry rather than globally, so a
+        lookup by identifier alone can match more than one device. Its
+        suggested replacement, async_get_device_by_identifier(), arrived in
+        2026.8 — a year and a half above the floor hacs.json declares — so it
+        is not an option.
+
+        It is None until the entity has been added to a platform, which is the
+        only case the guard below covers. hass is not checked separately: the
+        same platform code sets both, so a device entry implies an hass.
+        """
+        device = self.device_entry
         if device is None:
             return
 
         _LOGGER.debug(
-            "Meter %s was relabelled: renaming device %r to %r",
+            "Meter %s was relabelled: setting device name to %r and model to %r",
             self._meter_id,
-            device.name,
             name,
+            model,
         )
-        device_registry.async_update_device(device.id, name=name)
+        dr.async_get(self.hass).async_update_device(device.id, name=name, model=model)
 
     def _accept_reading(self, meter: BrunataMeter) -> bool:
         """Decide whether a reading should replace the cached value.
@@ -569,12 +603,11 @@ class BrunataSensor(
         Anything else is discarded as a glitch: accepting one under
         TOTAL_INCREASING would record a false consumption spike on the way up.
 
-        This replaced a heuristic that adopted any decrease seen across three
-        reading dates — a stand-in for the replacement signal mountingDate now
-        gives us directly, and one a sustained API fault could fool. The
-        trade-off: a reset Brunata reports without touching either field is now
-        rejected indefinitely. No such case has been observed, and the warning
-        below makes it visible if one appears.
+        Both signals in case 1 are things Brunata states outright, rather than
+        anything inferred from the shape of the readings. The trade-off is that
+        a reset Brunata reports without touching either field is rejected
+        indefinitely. No such case has been observed, and the warning below
+        makes it visible if one appears.
         """
         previous = self._attr_native_value
         value = meter.value
@@ -647,27 +680,27 @@ class BrunataSensor(
         """Return True if a decrease on this date is the annual 1 January reset.
 
         Heat cost allocators are zeroed on 1 January, but the first reading
-        published afterwards is not necessarily dated 1 January. Matching only
-        (12, 31) and (1, 1) rejected such a reading as a glitch, and since the
-        cached value is never lowered, every reading for the rest of the year
-        was rejected with it: the sensor froze at the pre-reset value until the
-        new period happened to exceed it.
+        published afterwards is not necessarily dated 1 January. The reliable
+        signal is therefore the calendar year, not the day: a reading dated in
+        a later year than the last accepted one is on the far side of a
+        1 January, whenever it arrives. Matching only (12, 31) and (1, 1) would
+        reject a reading published a few days late — and since the cached value
+        is never lowered, that rejection takes every reading for the rest of
+        the year with it, freezing the sensor at the pre-reset value until the
+        new period happens to exceed it.
 
         Brunata publishes one reading per meter per day, around 02:00, whether
         or not the value moved, so the reset is visible within a day of it
-        happening. The rule below does not depend on that: it compares calendar
+        happening. The rule does not depend on that: it compares calendar
         years, not intervals, so it holds whatever the reporting cadence turns
         out to be.
 
-        The reliable signal is the calendar year: a reading dated in a later
-        year than the last accepted one is on the far side of a 1 January,
-        whenever it arrives.
-
-        The December/January window is only a fallback for when the previous
-        reading date is unknown. It used to be checked either way, which made
-        it wider than intended: a glitch on 20 January, with the last accepted
-        reading dated 12 January of the *same* year, was adopted as a reset
-        even though no year boundary had been crossed.
+        The December/January window below is only a fallback for when the
+        previous reading date is unknown, and it is consulted *only* then.
+        Checking it either way would widen it past its purpose: a glitch on
+        20 January, with the last accepted reading dated 12 January of the
+        *same* year, would be adopted as a reset even though no year boundary
+        had been crossed.
 
         A decrease with no usable date cannot be placed in the calendar, so it
         is not a reset either.

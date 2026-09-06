@@ -1,9 +1,8 @@
 """Fixtures for Brunata integration tests.
 
-The brunata_api stub that used to live here is gone: the integration no longer
-depends on an external library, so there is nothing left to stub. Tests now
-patch the integration's own BrunataApiClient, whose surface is small and under
-our control.
+The integration depends on no external library, so there is nothing to stub.
+These tests patch the integration's own BrunataApiClient, whose surface is
+small and under our control.
 """
 
 from datetime import UTC, date, datetime
@@ -14,7 +13,7 @@ import pytest
 from homeassistant.helpers import device_registry as dr
 
 from custom_components.brunata.api import BrunataMeter, ParseReport
-from custom_components.brunata.const import DOMAIN
+from custom_components.brunata.const import DEVICE_ID_PREFIX, DOMAIN
 
 
 @pytest.fixture(autouse=True)
@@ -64,8 +63,9 @@ def device_for_meter():
 
     That method is deprecated from Home Assistant 2026.9 and *raises* when it
     is called from test code, which has no integration frame; the same call
-    from inside the integration only logs a warning. So this is a test-side
-    problem with a test-side fix — sensor.py is unaffected until 2027.8.
+    from inside the integration only logs a warning. sensor.py does not call it
+    either — it reads self.device_entry, which an entity has and a test does
+    not — so this is the test-side answer to the same deprecation.
 
     async_get_device_by_identifier(), which the deprecation message suggests,
     is not the replacement to reach for here: it arrived in 2026.8, and
@@ -77,11 +77,17 @@ def device_for_meter():
     test_sensor.py both need it, and it stood in both of them word for word —
     including this explanation. Two copies of a reasoned exception are two
     chances for one of them to be updated alone.
+
+    The identifier is built from DEVICE_ID_PREFIX rather than spelled out.
+    sensor.py builds the real one from that constant and __init__.py takes a
+    meter id back out of it, so a literal here would go on matching the old
+    spelling if the prefix ever moved — and this fixture is what decides
+    whether a device was found at all.
     """
 
     def _find(hass, entry, meter_id: str):
         registry = dr.async_get(hass)
-        identifier = (DOMAIN, f"brunata_{meter_id}")
+        identifier = (DOMAIN, f"{DEVICE_ID_PREFIX}{meter_id}")
         for device in dr.async_entries_for_config_entry(registry, entry.entry_id):
             if identifier in device.identifiers:
                 return device
