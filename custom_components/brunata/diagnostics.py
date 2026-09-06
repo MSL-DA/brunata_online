@@ -10,10 +10,9 @@ below are the ones that have actually been needed to diagnose faults in this
 integration — the lookup tables, the numeric meter type code, the resolved
 unit, and the coordinator's last error.
 
-The unit is a resolved name rather than the raw index, because api.py now
-skips any meter whose unit does not resolve; a raw code can no longer reach a
-BrunataMeter at all. meter_type_code is the one field that is still the number
-Brunata sent.
+The unit is a resolved name rather than the raw index. api.py skips any meter
+whose unit does not resolve, so a raw code cannot reach a BrunataMeter at all.
+meter_type_code is the one field that is the number Brunata sent.
 """
 
 from __future__ import annotations
@@ -45,8 +44,8 @@ def _meter_diagnostics(meter: BrunataMeter) -> dict[str, Any]:
     a dataclass instance, so the signature should say so.
 
     Dates go through api.format_date(), which is the same function sensor.py
-    uses for the reading_date attribute. It used to be a private copy here
-    under the name _serialise.
+    uses for the reading_date attribute. There is one spelling of a Brunata
+    date and one module that knows it.
     """
     return async_redact_data(
         {key: format_date(value) for key, value in asdict(meter).items()},
@@ -60,8 +59,8 @@ def _api_status(err: BaseException | None) -> int | None:
     The coordinator never holds api.py's exception. _async_update_data()
     translates it — `raise UpdateFailed(str(err)) from err` — so last_exception
     is the translated one and ours is its __cause__. Reading the attribute off
-    last_exception directly returns None every time, which is exactly what the
-    first version of this did.
+    last_exception directly returns None every time, which is why the chain is
+    walked rather than the attribute read.
 
     The chain is walked with a seen-set because __cause__ can, in principle,
     form a cycle, and a diagnostics download is the wrong place to hang.
