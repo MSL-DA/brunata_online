@@ -97,10 +97,10 @@ ENERGY_UNITS = (
 )
 
 # The substring that identifies an allocator unit — a count that only ever
-# climbs. Nineteen entries in Brunata's table carry it, eighteen of them
-# vendor-specific ("Doprimo units", "Zenner units"), so matching the marker
-# rather than listing the spellings keeps a new vendor from being
-# misclassified.
+# climbs. Twenty entries in Brunata's table carry it: eighteen vendor-specific
+# ("Doprimo units", "Zenner units"), plus a plain "units" that the table holds
+# at two separate indices. Matching the marker rather than listing the
+# spellings keeps a new vendor from being misclassified.
 #
 # One marker, not a list: it is the only substring the table actually uses, and
 # LOCALE fixes that table to English, so the spellings do not vary by account.

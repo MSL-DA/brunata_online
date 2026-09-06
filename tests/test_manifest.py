@@ -5,10 +5,12 @@ that number decides who HACS lets install the integration at all. It is an API
 claim, not a tested one: it names the oldest release that has every core API
 the code imports.
 
-The declared number is 2025.3, and the API that sets it is
-AddConfigEntryEntitiesCallback in sensor.py. That was established by running
-the suite against each monthly release in turn rather than by reading release
-notes: 2025.2 fails at import with
+The declared number is 2025.3. Two core APIs hold it there, and both were
+established by running the suite against the releases in question rather than
+by reading release notes.
+
+The first is AddConfigEntryEntitiesCallback in sensor.py. 2025.2 fails at
+import with
 
     ImportError: cannot import name 'AddConfigEntryEntitiesCallback'
     from 'homeassistant.helpers.entity_platform'
@@ -17,30 +19,38 @@ while 2025.3 and 2025.4 pass in full. The previous number, 2025.8, was
 OptionsFlowWithReload — that class went with the options flow, and the number
 outlived the reason for it.
 
+The second is Entity.device_entry, which sensor.py reads to find a meter's
+device. The same two releases were run again for it: green on 2025.3.0, red on
+2025.2.0, including the two tests that touch the attribute directly.
+
 Declaring a floor that is too high only costs installability; declaring one
 that is too low breaks setup for anyone who takes it at its word.
 
-2025.5 through 2025.8 could not be measured the same way: each one installed,
-then died on import with
+The floor is measured by hand, on demand, and is deliberately not a standing CI
+job. Measuring it works: 2025.3.0 installs from PyPI and the suite runs green on
+it under Python 3.13, which is where both readings above come from. What does
+not work is sweeping the whole range — 2025.5 through 2025.8 each install and
+then die on
 
     AttributeError: module 'pycares' has no attribute 'ares_query_a_result'
 
-which is the PyPI problem described below, not a fault in the integration.
-They stay unmeasured, and that is not a hole in the claim: the floor is the
-*oldest* release that works, and that one was measured directly. The pin in
-requirements_test.txt, which CI runs green on every push, is years newer and
-says nothing about any release in 2025.
+which is a PyPI resolution problem rather than a fault in this integration.
+Users run Home Assistant in a container with everything locked, so those
+failures say nothing about the code, and a job that is red for reasons outside
+the repository teaches people to ignore it. Those four releases therefore stay
+unmeasured, and that is not a hole in the claim: the floor is the *oldest*
+release that works, and that one was measured directly.
 
-That version is deliberately not written out here. Dependabot bumps it weekly,
-and a number restated in prose goes stale at the next bump with no test to
-catch it. Read requirements_test.txt for the current one.
+CI runs against the pin in requirements_test.txt instead, with a scheduled job
+against the newest release. That pin is deliberately not written out here:
+Dependabot bumps it weekly, and a number restated in prose goes stale at the
+next bump with no test to catch it. Read requirements_test.txt for the current
+one. It is years newer than anything in 2025 and says nothing about the floor.
 
-Testing against that floor was tried and dropped. Installing a year-old Home
-Assistant from PyPI today pulls newer releases of its loosely pinned indirect
-dependencies, which breaks the environment rather than the integration; users
-run Home Assistant in a container with everything locked, so the failures were
-about PyPI, not about this code. CI therefore runs against the pin in
-requirements_test.txt, with a scheduled job against the newest release.
+To repeat the measurement — after a floor change, or after a new import from
+homeassistant appears — a throwaway workflow that installs a pinned
+homeassistant on Python 3.13 and runs pytest is the whole of it. Delete it again
+afterwards rather than leaving it in the Actions list.
 
 What is left to check here is that the advertised minimum stays a floor and
 never creeps above what is actually exercised.
@@ -50,12 +60,11 @@ against the version the suite runs on, so it fails when the number is too
 high. Nothing fails when it is too low: a commit that starts importing a core
 API introduced after 2025.3 would leave hacs.json promising a release the code
 can no longer run on, and CI would stay green because it tests a far newer
-Home Assistant. Catching that automatically would mean running the suite
-against the floor, which is the arrangement described above and abandoned for
-good reason. So it is a review question: when a new import from homeassistant
-appears, look up which release introduced it — read it, do not infer it from
-dates — and raise both hacs.json and this docstring if it is newer than the
-number above.
+Home Assistant. Catching that automatically would mean the standing job this
+docstring explains the absence of. So it is a review question: when a new import
+from homeassistant appears, look up which release introduced it — read it, do
+not infer it from dates — then either measure it as above, or raise both
+hacs.json and this docstring if it is newer than the number above.
 """
 
 import json

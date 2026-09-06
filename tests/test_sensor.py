@@ -840,7 +840,7 @@ def test_a_mapped_unit_counts_up_whatever_brunata_spelled_it(canonical):
     ("raw_unit", "expected"),
     [
         # Every allocator spelling carries the same marker. Brunata's table has
-        # nineteen of them; three are enough to show the marker is what matches
+        # twenty of them; three are enough to show the marker is what matches
         # rather than the vendor name.
         ("units", True),
         ("Doprimo units", True),
