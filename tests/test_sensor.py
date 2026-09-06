@@ -1138,7 +1138,52 @@ async def test_device_name_follows_a_relabelled_meter(
     await entry.runtime_data.async_refresh()
     await hass.async_block_till_done()
 
-    assert device_for_meter(hass, entry, "12345").name == "Water - Kitchen"
+    device = device_for_meter(hass, entry, "12345")
+    assert device.name == "Water - Kitchen"
+    # A relabelling must not disturb the meter type shown on the device page.
+    assert device.model == "Water"
+
+
+async def test_device_model_follows_a_meter_type_that_resolves_later(
+    hass: HomeAssistant, mock_brunata_client, mock_meter, device_for_meter
+):
+    """A meter type that could not be resolved has to stop showing a raw code.
+
+    Brunata sends the meter type as a number looked up in a table it serves.
+    api.py falls back to the raw number when that lookup fails, deliberately:
+    the type reaches the device name and the `model` field on the device page
+    and nothing else, since every decision is made on meter_type_code.
+
+    That fallback was only half true. The name was rewritten whenever it
+    changed, but the model was written once when the entity was created and
+    never again, so a device that came up as "2" kept "2" as its model for the
+    life of the config entry — including after the table started answering.
+    """
+    meter = replace(mock_meter, meter_type="2", placement="Living room")
+    mock_brunata_client.async_get_meters = AsyncMock(return_value={"12345": meter})
+
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={"email": "test@example.com", "password": "password123"},
+    )
+    entry.add_to_hass(hass)
+
+    await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    device = device_for_meter(hass, entry, "12345")
+    assert device.name == "2 - Living room"
+    assert device.model == "2"
+
+    mock_brunata_client.async_get_meters = AsyncMock(
+        return_value={"12345": replace(meter, meter_type="Water", value=200.0)}
+    )
+    await entry.runtime_data.async_refresh()
+    await hass.async_block_till_done()
+
+    device = device_for_meter(hass, entry, "12345")
+    assert device.name == "Water - Living room"
+    assert device.model == "Water"
 
 
 async def test_sensor_placement_is_cleared_when_it_disappears(mock_meter):
