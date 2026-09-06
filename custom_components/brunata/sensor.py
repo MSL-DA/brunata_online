@@ -108,11 +108,11 @@ ENERGY_UNITS = (
 # nothing already falls to the safe outcome _is_cumulative_unit() describes.
 #
 # There is deliberately no fallback unit and no special case for the table's
-# "undefined" entry. Both used to stand in for a unit Brunata had not given us,
-# producing a plausible-looking sensor carrying a unit nobody had read — which
-# Home Assistant treats as a different measurement, discarding the history
-# behind it. api.py drops such a meter instead, so anything reaching this
-# module has a unit that resolved.
+# "undefined" entry. Either one would stand in for a unit Brunata had not
+# given us, producing a plausible-looking sensor carrying a unit nobody had
+# read — which Home Assistant treats as a different measurement, discarding the
+# history behind it. api.py drops such a meter instead, so anything reaching
+# this module has a unit that resolved.
 ALLOCATOR_UNIT_MARKER = "unit"
 
 
@@ -515,13 +515,13 @@ class BrunataSensor(
         self._meter_no = meter.meter_no
         self._mounting_date = meter.mounting_date
 
-        # Only when the reading carries a date. An accepted reading without one
-        # used to overwrite both fields with None, and _is_annual_reset() reads
-        # a missing _last_reading_day as "no baseline", switching back to the
-        # December/January window the calendar-year rule replaced. One undated
-        # reading therefore reopened that window for the rest of the December
-        # and January it fell in, and a glitch dated 31 December was then
-        # adopted as an annual reset.
+        # Only when the reading carries a date. Overwriting both fields with
+        # None on an undated reading would clear the year baseline, and
+        # _is_annual_reset() reads a missing _last_reading_day as "no
+        # baseline" and falls back to the December/January window. One undated
+        # reading would therefore reopen that window for the rest of the
+        # December and January it fell in, and a glitch dated 31 December
+        # would be adopted as an annual reset.
         #
         # The cost is that reading_date describes the last reading Brunata
         # dated rather than the value now shown — the smaller of the two, since
@@ -603,12 +603,11 @@ class BrunataSensor(
         Anything else is discarded as a glitch: accepting one under
         TOTAL_INCREASING would record a false consumption spike on the way up.
 
-        This replaced a heuristic that adopted any decrease seen across three
-        reading dates — a stand-in for the replacement signal mountingDate now
-        gives us directly, and one a sustained API fault could fool. The
-        trade-off: a reset Brunata reports without touching either field is now
-        rejected indefinitely. No such case has been observed, and the warning
-        below makes it visible if one appears.
+        Both signals in case 1 are things Brunata states outright, rather than
+        anything inferred from the shape of the readings. The trade-off is that
+        a reset Brunata reports without touching either field is rejected
+        indefinitely. No such case has been observed, and the warning below
+        makes it visible if one appears.
         """
         previous = self._attr_native_value
         value = meter.value
@@ -681,27 +680,27 @@ class BrunataSensor(
         """Return True if a decrease on this date is the annual 1 January reset.
 
         Heat cost allocators are zeroed on 1 January, but the first reading
-        published afterwards is not necessarily dated 1 January. Matching only
-        (12, 31) and (1, 1) rejected such a reading as a glitch, and since the
-        cached value is never lowered, every reading for the rest of the year
-        was rejected with it: the sensor froze at the pre-reset value until the
-        new period happened to exceed it.
+        published afterwards is not necessarily dated 1 January. The reliable
+        signal is therefore the calendar year, not the day: a reading dated in
+        a later year than the last accepted one is on the far side of a
+        1 January, whenever it arrives. Matching only (12, 31) and (1, 1) would
+        reject a reading published a few days late — and since the cached value
+        is never lowered, that rejection takes every reading for the rest of
+        the year with it, freezing the sensor at the pre-reset value until the
+        new period happens to exceed it.
 
         Brunata publishes one reading per meter per day, around 02:00, whether
         or not the value moved, so the reset is visible within a day of it
-        happening. The rule below does not depend on that: it compares calendar
+        happening. The rule does not depend on that: it compares calendar
         years, not intervals, so it holds whatever the reporting cadence turns
         out to be.
 
-        The reliable signal is the calendar year: a reading dated in a later
-        year than the last accepted one is on the far side of a 1 January,
-        whenever it arrives.
-
-        The December/January window is only a fallback for when the previous
-        reading date is unknown. It used to be checked either way, which made
-        it wider than intended: a glitch on 20 January, with the last accepted
-        reading dated 12 January of the *same* year, was adopted as a reset
-        even though no year boundary had been crossed.
+        The December/January window below is only a fallback for when the
+        previous reading date is unknown, and it is consulted *only* then.
+        Checking it either way would widen it past its purpose: a glitch on
+        20 January, with the last accepted reading dated 12 January of the
+        *same* year, would be adopted as a reset even though no year boundary
+        had been crossed.
 
         A decrease with no usable date cannot be placed in the calendar, so it
         is not a reset either.
