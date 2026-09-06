@@ -64,8 +64,9 @@ def device_for_meter():
 
     That method is deprecated from Home Assistant 2026.9 and *raises* when it
     is called from test code, which has no integration frame; the same call
-    from inside the integration only logs a warning. So this is a test-side
-    problem with a test-side fix — sensor.py is unaffected until 2027.8.
+    from inside the integration only logs a warning. sensor.py no longer calls
+    it either — it reads self.device_entry, which an entity has and a test does
+    not — so this is the test-side answer to the same deprecation.
 
     async_get_device_by_identifier(), which the deprecation message suggests,
     is not the replacement to reach for here: it arrived in 2026.8, and
