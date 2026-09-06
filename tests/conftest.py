@@ -1,9 +1,8 @@
 """Fixtures for Brunata integration tests.
 
-The brunata_api stub that used to live here is gone: the integration no longer
-depends on an external library, so there is nothing left to stub. Tests now
-patch the integration's own BrunataApiClient, whose surface is small and under
-our control.
+The integration depends on no external library, so there is nothing to stub.
+These tests patch the integration's own BrunataApiClient, whose surface is
+small and under our control.
 """
 
 from datetime import UTC, date, datetime
@@ -64,8 +63,8 @@ def device_for_meter():
 
     That method is deprecated from Home Assistant 2026.9 and *raises* when it
     is called from test code, which has no integration frame; the same call
-    from inside the integration only logs a warning. sensor.py no longer calls
-    it either — it reads self.device_entry, which an entity has and a test does
+    from inside the integration only logs a warning. sensor.py does not call it
+    either — it reads self.device_entry, which an entity has and a test does
     not — so this is the test-side answer to the same deprecation.
 
     async_get_device_by_identifier(), which the deprecation message suggests,
