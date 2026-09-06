@@ -259,6 +259,15 @@ class BrunataSensor(
         """Initialize the sensor."""
         super().__init__(coordinator)
         self._meter_id = meter.meter_id
+        # Spelled out here, and deliberately not built from DEVICE_ID_PREFIX.
+        # That constant is the prefix of a *device* identifier; this is an
+        # entity's unique id, and it is the string Home Assistant hangs the
+        # long term statistics on. Building it from the constant would mean
+        # that changing the device prefix renamed every sensor at once — and
+        # Home Assistant reads a renamed sensor as a new one, leaving the
+        # history behind the old name where nothing can reach it. The two
+        # strings start with the same word today and must stay free to move
+        # apart.
         self._attr_unique_id = f"brunata_{self._meter_id}_consumption"
         # The physical meter behind this meter_id. Brunata keeps the meter_id
         # when a device is swapped, so a change here means the hardware was
