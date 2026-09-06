@@ -1,17 +1,13 @@
 """Client for the Brunata Online API.
 
-This replaces the external ``brunata-api`` package, which targeted Brunata's
-retired Azure AD B2C login and v1 data API: the integration had to
-monkey-patch ``Client._get_tokens``, rebind ``API_URL`` at import time and
-read a dozen private attributes, any of which could break without warning.
-
-Implemented here instead: the Keycloak login and the single
+Everything the integration needs from Brunata lives here and has no third-party
+package behind it: the Keycloak login, and the single
 ``/consumer/metersforconsumer`` call Brunata's own readings page uses, which
 carries each meter's reading together with its placement label.
 
 The HTTP client is built and owned here, deliberately *not* taken from
-``homeassistant.helpers.httpx_client`` — see ``async_create()``. Anything that
-reads like an argument for dropping ``async_close()`` is out of date.
+``homeassistant.helpers.httpx_client`` — see ``async_create()``, which also
+says why ``async_close()`` has to exist.
 """
 
 from __future__ import annotations
@@ -52,11 +48,9 @@ REFERER_URL = f"{BASE_URL}/react-online/meters-values"
 
 # Where anything this integration could not handle is reported.
 #
-# There used to be two: this one, and a link straight to issue #39, which asked
-# users to paste the numeric meterType of a meter that got skipped. That
-# question is answered — see SUPPORTED_METER_TYPES — so both log lines point at
-# the tracker itself. A meter still landing there is a fresh report, not an
-# answer to the old one.
+# Both log lines that name it point at the tracker itself rather than at any
+# one issue: a meter landing there is a fresh report, not an answer to an old
+# question.
 ISSUE_TRACKER_URL = "https://github.com/MSL-DA/brunata_online/issues"
 
 # The only meter types this integration will surface. Everything else is
@@ -75,12 +69,19 @@ ISSUE_TRACKER_URL = "https://github.com/MSL-DA/brunata_online/issues"
 #   2 = water
 #   5 = electricity
 #
-# How those numbers were established, because it matters: Brunata's own
-# meterType table is returned by the locale resource, and a debug log from a
-# live account printed it in full. In that table index 1 is "Radiator" and
-# index 2 is "Water" — the two types whose meters we can check against real
-# entities — so the same table's answer for 5 is a reading, not a guess. This
-# is what issue #39 was waiting for.
+# How those numbers are known, because it matters: Brunata's own meterType
+# table is returned by the locale resource, and a debug log from a live account
+# printed it in full. In that table index 1 is "Radiator" and index 2 is
+# "Water" — the two types whose meters can be checked against real entities —
+# so the same table's answer for 5 is a reading, not a guess. An electricity
+# meter has been through this code and resolved to kWh, which sensor.py's
+# UNIT_MAP turns into UnitOfEnergy.KILO_WATT_HOUR with device class ENERGY, so
+# 5 is a type that has produced a working entity.
+#
+# The one inference that must never be made here: UNIT_MAP says nothing about
+# meterType. GJ and Gcal being in it is a fact about the measurementUnit table,
+# which is a different table entirely. A meter type is added by reading the
+# meterType table, not by reasoning from a unit.
 #
 # The same table gives 6 = "Energy", and it is deliberately *not* listed. A
 # code being readable is not a reason to surface a meter type nobody has asked
@@ -88,16 +89,6 @@ ISSUE_TRACKER_URL = "https://github.com/MSL-DA/brunata_online/issues"
 # private customers, so the first person to want one can say so and be the
 # person it gets tested against. Adding it is one number and one line in the
 # README. Leaving it out costs nothing until then.
-#
-# An electricity meter has since been through this code and resolved to kWh,
-# which sensor.py's UNIT_MAP turns into UnitOfEnergy.KILO_WATT_HOUR with
-# device class ENERGY. So 5 is not just a code read off a table any more; it
-# is a type that has produced a working entity.
-#
-# The old reasoning is still wrong and worth keeping wrong: the presence of
-# GJ/Gcal in UNIT_MAP never said anything about meterType. That is the
-# measurementUnit table, a different table entirely. What changed is that the
-# right table was finally read, not that the inference became acceptable.
 #
 # _log_unsupported_meter() names the code of anything dropped, so the list is
 # extended by reading that line from a user's log, not by inference.
@@ -438,11 +429,12 @@ def parse_timestamp(raw: Any) -> datetime | None:
 def _expires_in_seconds(raw: Any) -> float | None:
     """Read a token lifetime, or None when it cannot be read.
 
-    _store_tokens() used to call float() on this directly. A string that is not
-    a number raised ValueError and a list raised TypeError, and both callers
-    catch only BrunataApiError around that call — so either one went straight
-    out of _async_login(), out of async_get_meters() and into the coordinator
-    as an unexpected exception rather than as a clean retry or reauth.
+    This exists so that _store_tokens() does not call float() on the raw value
+    directly. A string that is not a number raises ValueError and a list raises
+    TypeError, and both callers catch only BrunataApiError around that call —
+    so either one would go straight out of _async_login(), out of
+    async_get_meters() and into the coordinator as an unexpected exception
+    rather than as a clean retry or reauth.
 
     None means "no usable expiry", which _store_tokens() already treats as an
     immediately unusable token: the next request logs in again. Failing that
@@ -723,10 +715,10 @@ class BrunataApiClient:
         fresh login. Only a 401 on *that* attempt means the credentials are no
         longer accepted.
 
-        Shared by both endpoints on purpose. The retry used to sit in the
-        meters call alone, so a stale token on the locale resource surfaced as
-        "invalid JSON" — and since the tables are fetched once per client, that
-        repeated on every poll until something else happened to fix it.
+        Shared by both endpoints on purpose. Confined to the meters call, a
+        stale token on the locale resource would surface as "invalid JSON" —
+        and since the tables are fetched once per client, that would repeat on
+        every poll until something else happened to fix it.
         """
         response = await self._async_get(url, force_login=False)
         if response.status_code not in (401, 403):
@@ -1027,10 +1019,10 @@ def _retry_after_seconds(response: httpx.Response) -> float | None:
     fixed default is the safer failure, and the coordinator does that.
 
     The finiteness check is not decoration. float() accepts "inf", "Infinity"
-    and "1e400", and inf is greater than zero, so such a header used to pass
-    straight through to timedelta(seconds=...) in the coordinator — which
-    raises OverflowError from inside the very except block that exists to
-    translate this error, so it escaped as an unexpected exception. A header
+    and "1e400", and inf is greater than zero, so without it such a header
+    passes straight through to timedelta(seconds=...) in the coordinator —
+    which raises OverflowError from inside the very except block that exists to
+    translate this error, and it escapes as an unexpected exception. A header
     that is not a real number is no header at all, same as the date form.
 
     A number that is merely enormous is left to the caller: the coordinator
