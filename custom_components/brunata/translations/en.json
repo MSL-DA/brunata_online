@@ -24,7 +24,7 @@
       }
     },
     "error": {
-      "cannot_connect": "Cannot connect to the Brunata API. Check your network connection.",
+      "cannot_connect": "Unable to connect to Brunata. Check your internet connection.",
       "invalid_auth": "Invalid authentication",
       "unknown": "Unexpected error"
     },
