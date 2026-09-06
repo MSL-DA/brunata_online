@@ -9,8 +9,8 @@ updates:
       day: "monday"
       time: "05:00"
       timezone: "Europe/Copenhagen"
-    # All five workflows use the same two actions, so without grouping a single
-    # major bump would open one pull request per file.
+    # Every workflow here uses the same handful of actions, so without grouping
+    # a single major bump would open one pull request per file.
     groups:
       actions:
         patterns:
@@ -24,12 +24,16 @@ updates:
   #
   # It also covers requirements_test.txt, where homeassistant is pinned
   # directly (see that file). A weekly pull request for it therefore reads
-  # "Bump homeassistant from 2026.8.2 to 2026.9.0" — the version you would
+  # "Bump homeassistant from one release to the next" — the version you would
   # actually recognise — instead of a pytest-homeassistant-custom-component
-  # build number. pytest-latest.yml already reports separately when a newer
-  # Home Assistant breaks something; this is what turns that report into a
-  # ready pull request. Merge it when you want to move the floor, leave it
-  # otherwise — it is not required to pass.
+  # build number. No version number is written out here: requirements_test.txt
+  # owns that one, and a copy of it here would go stale at the next merge with
+  # nothing to catch it.
+  #
+  # pytest-latest.yml already reports separately when a newer Home Assistant
+  # breaks something; this is what turns that report into a ready pull
+  # request. Merge it when you want to move the floor, leave it otherwise — it
+  # is not required to pass.
   - package-ecosystem: "pip"
     directory: "/"
     target-branch: "beta"
