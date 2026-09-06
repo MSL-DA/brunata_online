@@ -1,0 +1,83 @@
+---
+name: Find minimum Home Assistant version
+
+# One-off, manual-only workflow. Not wired to push or pull_request — it exists
+# to answer one question: does the integration still import and pass its tests
+# on the Home Assistant version hacs.json declares as its floor?
+#
+# HOW TO USE IT
+# -------------
+# Commit this file to .github/workflows/, push it, then start it from the
+# Actions tab with "Run workflow". Every version in the matrix runs
+# independently (fail-fast: false), so one failing job does not stop the
+# others. The oldest green job is the real minimum.
+#
+# Delete the file again once you have the answer. It is a measuring
+# instrument, not part of CI: left in place it would sit in the Actions list
+# forever, testing a question that has already been answered.
+#
+# WHY IT PINS homeassistant AND NOT THE TEST PACKAGE
+# --------------------------------------------------
+# An earlier version of this workflow pinned
+# pytest-homeassistant-custom-component by its own build number, which meant
+# looking each month's build up by hand on that project's releases page.
+# requirements_test.txt no longer works that way: it pins homeassistant
+# directly and leaves the test package unpinned, so pip resolves whichever
+# build of it matches. The same trick works here, and the matrix below now
+# reads as the Home Assistant versions it actually tests.
+#
+# WHY PYTHON 3.13 AND NOT 3.14
+# ----------------------------
+# The other workflows run 3.14. Home Assistant 2025.3 predates it, and its
+# dependencies were built for 3.13 — which is the minimum Home Assistant 2025.3
+# itself requires, and the reason ruff.toml targets py313. Running the floor
+# on 3.13 tests the combination a user on that floor would actually have. A
+# failure caused by a missing 3.14 wheel would say nothing about this
+# integration.
+
+on:
+  workflow_dispatch:
+
+# None of these jobs write anything back to the repository: they check out,
+# install and run.
+permissions:
+  contents: read
+
+jobs:
+  floor:
+    name: "HA ${{ matrix.ha_version }}"
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        ha_version:
+          # Documented as failing on import. Kept in the matrix so the claim
+          # "2025.2 fails, 2025.3 passes" stays measured rather than
+          # remembered — a green job here would mean the floor can be lowered.
+          - "2025.2.0"
+          # The floor hacs.json declares.
+          - "2025.3.0"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install \
+            "homeassistant==${{ matrix.ha_version }}" \
+            pytest-homeassistant-custom-component
+
+      - name: Show resolved versions
+        run: |
+          pip show homeassistant pytest-homeassistant-custom-component \
+            | grep -E "^(Name|Version)"
+
+      - name: Run pytest
+        run: pytest tests/ -v
