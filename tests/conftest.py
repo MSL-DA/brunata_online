@@ -14,7 +14,7 @@ import pytest
 from homeassistant.helpers import device_registry as dr
 
 from custom_components.brunata.api import BrunataMeter, ParseReport
-from custom_components.brunata.const import DOMAIN
+from custom_components.brunata.const import DEVICE_ID_PREFIX, DOMAIN
 
 
 @pytest.fixture(autouse=True)
@@ -78,11 +78,17 @@ def device_for_meter():
     test_sensor.py both need it, and it stood in both of them word for word —
     including this explanation. Two copies of a reasoned exception are two
     chances for one of them to be updated alone.
+
+    The identifier is built from DEVICE_ID_PREFIX rather than spelled out.
+    sensor.py builds the real one from that constant and __init__.py takes a
+    meter id back out of it, so a literal here would go on matching the old
+    spelling if the prefix ever moved — and this fixture is what decides
+    whether a device was found at all.
     """
 
     def _find(hass, entry, meter_id: str):
         registry = dr.async_get(hass)
-        identifier = (DOMAIN, f"brunata_{meter_id}")
+        identifier = (DOMAIN, f"{DEVICE_ID_PREFIX}{meter_id}")
         for device in dr.async_entries_for_config_entry(registry, entry.entry_id):
             if identifier in device.identifiers:
                 return device
