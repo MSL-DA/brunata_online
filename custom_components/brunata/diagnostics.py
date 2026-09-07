@@ -32,8 +32,15 @@ from .api import BrunataApiError, BrunataMeter, format_date
 TO_REDACT = {CONF_EMAIL, CONF_PASSWORD}
 
 # The meter number identifies a physical device installed at an address. It is
-# redacted rather than dropped, so its *presence* and any change to it are
-# still visible — that is the signal the replacement guard acts on.
+# redacted rather than dropped, so the field itself stays in the report and a
+# reader can see that Brunata sent one.
+#
+# What that does *not* buy: async_redact_data() substitutes a fixed string —
+# the same "**REDACTED**" the email and password get — so two meters look
+# alike, and a number that changed between two downloads cannot be told from
+# one that did not. The replacement guard in sensor.py compares meter_no
+# against the value it cached, never against a diagnostics report, so nothing
+# depends on that being visible here.
 TO_REDACT_METER = {"meter_no"}
 
 
