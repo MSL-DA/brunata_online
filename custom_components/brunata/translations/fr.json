@@ -24,7 +24,7 @@
       }
     },
     "error": {
-      "cannot_connect": "Impossible de se connecter à Brunata. Vérifiez votre connexion réseau.",
+      "cannot_connect": "Impossible de se connecter à Brunata. Vérifiez votre connexion internet.",
       "invalid_auth": "Identifiants incorrects",
       "unknown": "Erreur inattendue"
     },
