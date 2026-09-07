@@ -222,6 +222,47 @@ async def test_normal_login_posts_credentials_and_exchanges_the_code():
     assert 43 <= len(exchange["code_verifier"]) <= 128
 
 
+@pytest.mark.parametrize(
+    "action",
+    [
+        # Another host entirely.
+        "https://evil.example/iam/login-actions/authenticate?session_code=abc",
+        # Brunata's host, but plaintext.
+        "http://online.brunata.com/iam/login-actions/authenticate?session_code=abc",
+        # Brunata's host over https, but a port nothing there listens on.
+        "https://online.brunata.com:8443/iam/login-actions/authenticate?session_code=abc",
+        # Relative. Reaches httpx as a URL with no host, where it raises
+        # httpx.InvalidURL — which _async_request() deliberately does not
+        # translate, so it would arrive as a traceback instead of this.
+        "/iam/login-actions/authenticate?session_code=abc",
+    ],
+)
+async def test_a_login_form_pointing_elsewhere_never_sees_the_password(action):
+    """The action attribute decides where the password goes.
+
+    Keycloak writes it into the page, and nothing downstream reads it before it
+    is used: the Location check runs on the *answer* to the credential POST, so
+    by then the password has already left. An action that is not Brunata's has
+    to be refused before the request, not after it.
+
+    BrunataApiError, not BrunataAuthError, for the same reason as the missing
+    form: the password was never wrong, so a reauth dialog would ask for one
+    that already works.
+    """
+    html = (
+        '<html><body><form id="kc-form-login" '
+        f'action="{action}" method="post"></form></body></html>'
+    )
+    http = FakeHttpClient(authorize=FakeResponse(url=KC_AUTHORIZE_URL, text=html))
+    client = make_client(http)
+
+    with pytest.raises(BrunataApiError, match="login form posts to"):
+        await client._async_login()
+
+    # The authorize GET and nothing else: no credential POST was made at all.
+    assert http.request_methods() == ["GET other"]
+
+
 async def test_force_clears_sso_cookies_and_skips_refresh():
     """force means the server rejected a token we believed was valid, so
     neither the SSO cookies nor the refresh token from that same session can be
