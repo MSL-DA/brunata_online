@@ -330,6 +330,30 @@ def test_a_non_finite_reading_value_is_dropped(raw_value):
     assert meters["good"].value == 42.0
 
 
+@pytest.mark.parametrize("raw_value", [True, False])
+def test_a_boolean_reading_value_is_dropped(raw_value):
+    """bool is a subclass of int, so float(True) is 1.0 and float(False) is 0.0.
+
+    Both are finite, so every check in _parse_value() passes and the meter gets
+    a reading of one or of zero. What happens next is the same split as for
+    nan above: with no previous value — first poll after setup, or a restart
+    with nothing to restore — _accept_reading() takes it and it becomes the
+    sensor's state. With a previous value it is a decrease, and the log gets a
+    warning about a reset that never happened.
+
+    _meter_type_code() and _expires_in_seconds() in the same module already
+    refuse bools by name; this is the third parser and was the one left out.
+    """
+    item = _meter_item("abc")
+    item["latestReadingValue"] = raw_value
+
+    meters = _parse([item, _meter_item("good")])
+
+    assert set(meters) == {"abc", "good"}
+    assert meters["abc"].value is None
+    assert meters["good"].value == 42.0
+
+
 def test_reading_value_as_a_numeric_string_is_accepted():
     """The unit field already arrives as a string in this payload where it was
     an integer in the old one, so a value doing the same is not far-fetched."""

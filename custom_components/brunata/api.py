@@ -205,6 +205,13 @@ KC_SCOPE = "openid offline_access"
 _KC_FORM_ACTION_RE = re.compile(
     r'id="kc-form-login"[^>]*action="([^"]+)"', re.IGNORECASE
 )
+
+# The email and password are posted to whatever address that action carries, so
+# the address is checked against this host first. See _checked_form_action().
+# Derived from KC_REALM_BASE rather than written out again: one spelling of
+# Brunata's host, and it follows the realm URL if that ever moves.
+_KC_HOST = urlparse(KC_REALM_BASE).hostname
+
 _REDIRECT_STATUSES = (301, 302, 303, 307, 308)
 
 # Renew slightly before the server's own expiry, so a slow request or a little
@@ -471,8 +478,15 @@ def _parse_value(raw: Any) -> float | None:
     two: every comparison against it is false, so _accept_reading() takes it
     whenever there is no previous value — first poll after setup, or after a
     restart with nothing to restore — and it becomes the sensor's state.
+
+    Bools are refused for the same reason _meter_type_code() refuses them:
+    float(True) is 1.0 and perfectly finite, so a `true` in the payload would
+    pass every check below and become a reading of one.
     """
     if raw is None:
+        return None
+    if isinstance(raw, bool):
+        _LOGGER.debug("Could not parse reading value %r", raw)
         return None
     try:
         value = float(raw)
@@ -967,7 +981,7 @@ class BrunataApiClient:
 
         auth = await self._async_request(
             "POST",
-            html.unescape(match.group(1)),
+            _checked_form_action(match.group(1)),
             data={
                 "username": self._email,
                 "password": self._password,
@@ -1003,6 +1017,53 @@ class BrunataApiClient:
         # four, and the one that matters to a bot-protected endpoint.
         _LOGGER.debug("Brunata login form accepted the credentials")
         return auth_code
+
+
+def _checked_form_action(raw: str) -> str:
+    """Return the login form's action URL, refusing one that is not Brunata's.
+
+    The email and password go to whatever address Keycloak wrote into the form.
+    The Location check further down runs on the answer to that POST, so by then
+    the password has already been sent; this is the only point where a wrong
+    destination can still be refused in time.
+
+    Scheme, host and port only. A path check was considered and left out: an
+    attacker who can write into the page Brunata serves is not stopped by it,
+    and it would break the login the day Keycloak is upgraded and its
+    login-actions path moves. The observed action already sits outside the
+    realm base — /iam/login-actions/... rather than under KC_REALM_BASE — so
+    the path is not stable enough to assert on.
+
+    A relative action has no hostname and is refused here. It would otherwise
+    reach httpx as a URL with no host and raise httpx.InvalidURL, which
+    _async_request() deliberately does not translate: the same event, one
+    traceback later.
+
+    BrunataApiError, not BrunataAuthError, for the same reason as the missing
+    form in _async_authorize(): nothing here says the password is wrong, and a
+    reauth dialog would ask for one that works.
+    """
+    action = html.unescape(raw)
+    parsed = urlparse(action)
+    try:
+        port = parsed.port
+    except ValueError:
+        # urlparse only validates the port when the attribute is read, so a
+        # malformed one raises here rather than above. -1 is not a port, which
+        # is the point: it fails the check below and shows up in the message.
+        port = -1
+
+    if parsed.scheme != "https" or parsed.hostname != _KC_HOST or port not in (None, 443):
+        # The scheme, host and port, never the whole URL: the action carries
+        # Keycloak's one-time session_code, and this message reaches both the
+        # log and the diagnostics download, which get attached to public
+        # issues. The port is included only when it is the thing that failed,
+        # so a rejected port cannot be mistaken for a rejected host.
+        where = f"{parsed.scheme or '?'}://{parsed.hostname or '?'}"
+        if port not in (None, 443):
+            where = f"{where}:{port}"
+        raise BrunataApiError(f"Brunata login form posts to {where} — the login flow has changed")
+    return action
 
 
 def _code_from_url(url: Any) -> str | None:
