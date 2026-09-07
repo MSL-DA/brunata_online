@@ -164,7 +164,12 @@ async def test_diagnostics_redacts_the_meter_number(
     hass: HomeAssistant, mock_brunata_client, mock_meter
 ):
     """The meter number identifies a device at an address. Redacted rather
-    than dropped, so a change to it is still visible."""
+    than dropped, so the field stays in the report while the number does not.
+
+    The substituted value is a fixed string, which is what the first assertion
+    pins: two meters are indistinguishable in a report, so nothing may be
+    built on reading a changed number out of one.
+    """
     entry = await _setup(hass, mock_brunata_client, mock_meter)
 
     result = await async_get_config_entry_diagnostics(hass, entry)
