@@ -1,0 +1,110 @@
+name: Meter support request
+description: A meter on your Brunata account gets no entity in Home Assistant
+title: "Meter support: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This integration only creates entities for the meter types it has been
+        told about: water, heat cost allocators and electricity. Brunata sends
+        the type as a number, and every other number is dropped on purpose — a
+        code being readable is not the same as knowing what the meter measures
+        or whether its value counts upward.
+
+        Adding a type is a small change. It needs two things: the number
+        Brunata sends for your meter, and one person with that meter who can
+        confirm the sensor is right afterwards. This form asks for both.
+
+        **Not this form:** a sensor that exists but has stopped updating, or
+        one that shows 0. Both are usually expected behaviour, and neither is
+        caused by an unsupported meter type — open a bug report instead.
+
+  - type: textarea
+    id: log-line
+    attributes:
+      label: The log line for the skipped meter
+      description: |
+        The integration writes one line per skipped meter, containing the
+        number that has to be added. Getting it takes a restart:
+
+        1. Settings → Devices & services → Brunata → three-dot menu →
+           *Enable debug logging*.
+        2. Restart Home Assistant. The line is written once per Home Assistant
+           start, so it was already written before logging was turned up —
+           reloading the integration is not enough.
+        3. Search the log for `meterType`.
+
+        [Debugging](https://github.com/MSL-DA/brunata_online/wiki/Debugging)
+        explains where the log is.
+
+        If there is no such line at all, the meter is probably registered as
+        dismounted in Brunata Online. Say so below instead of leaving this
+        empty — that is a different situation and a useful answer in itself.
+      placeholder: Meter 1234567 has meterType 4, which this integration does not support, ...
+    validations:
+      required: true
+
+  - type: input
+    id: measures
+    attributes:
+      label: What does the meter measure?
+      description: >
+        In plain words — district heating, gas, hot water, something else. The
+        log can give the code, but only you can say what the box on the wall
+        is.
+    validations:
+      required: true
+
+  - type: textarea
+    id: brunata-online
+    attributes:
+      label: What does Brunata Online show for this meter?
+      description: >
+        The unit, and two readings a few days apart. The unit decides what the
+        sensor is named in, and two readings say whether the value counts
+        upward or moves both ways — which decides whether Home Assistant can
+        calculate consumption from it.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: testing
+    attributes:
+      label: Can you test a pre-release?
+      description: >
+        Support for a meter type is added against a real meter, not against
+        the code table. Nobody working on this integration has yours, so
+        someone who does has to confirm the result before it is released.
+      options:
+        - "Yes"
+        - "Yes, but not right away"
+        - "No"
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Integration version
+      description: >
+        HACS shows this on the Brunata card. The supported list may have grown
+        since the version you are running.
+    validations:
+      required: true
+
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics report
+      description: |
+        Optional, but it confirms the picture: Settings → Devices & services →
+        Brunata → three-dot menu → *Download diagnostics*. Your email,
+        password and meter numbers are removed before the file is written.
+
+        Issues are public. The report keeps your meter readings and the room
+        labels you set in Brunata Online — not sensitive in the way a password
+        is, but yours. Have a look before uploading if you'd rather not
+        publish them.
+    validations:
+      required: false
