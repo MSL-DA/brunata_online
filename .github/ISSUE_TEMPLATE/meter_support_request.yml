@@ -1,46 +1,32 @@
 name: Meter support request
-description: A meter on your Brunata account gets no entity in Home Assistant
+description: A meter on your account gets no entity in Home Assistant
 title: "Meter support: "
 labels: ["enhancement"]
 body:
   - type: markdown
     attributes:
       value: |
-        This integration only creates entities for the meter types it has been
-        told about: water, heat cost allocators and electricity. Brunata sends
-        the type as a number, and every other number is dropped on purpose — a
-        code being readable is not the same as knowing what the meter measures
-        or whether its value counts upward.
+        Only water, heat cost allocators and electricity meters get entities
+        today. Brunata sends the meter type as a number, and adding one more
+        number is a small change — it just needs someone who has that meter.
 
-        Adding a type is a small change. It needs two things: the number
-        Brunata sends for your meter, and one person with that meter who can
-        confirm the sensor is right afterwards. This form asks for both.
-
-        **Not this form:** a sensor that exists but has stopped updating, or
-        one that shows 0. Both are usually expected behaviour, and neither is
-        caused by an unsupported meter type — open a bug report instead.
+        If a sensor you already have stopped updating or shows 0, use the bug
+        report instead.
 
   - type: textarea
     id: log-line
     attributes:
-      label: The log line for the skipped meter
+      label: The log line naming your meter type
       description: |
-        The integration writes one line per skipped meter, containing the
-        number that has to be added. Getting it takes a restart:
+        1. Settings → Devices & services → Brunata → three-dot menu → *Enable debug logging*
+        2. Restart Home Assistant — the line is only written at startup
+        3. Search the log for `meterType`
 
-        1. Settings → Devices & services → Brunata → three-dot menu →
-           *Enable debug logging*.
-        2. Restart Home Assistant. The line is written once per Home Assistant
-           start, so it was already written before logging was turned up —
-           reloading the integration is not enough.
-        3. Search the log for `meterType`.
+        Where the log is:
+        [Debugging](https://github.com/MSL-DA/brunata_online/wiki/Debugging).
 
-        [Debugging](https://github.com/MSL-DA/brunata_online/wiki/Debugging)
-        explains where the log is.
-
-        If there is no such line at all, the meter is probably registered as
-        dismounted in Brunata Online. Say so below instead of leaving this
-        empty — that is a different situation and a useful answer in itself.
+        No line at all? Then Brunata has probably marked the meter as
+        dismounted. Write that here instead.
       placeholder: Meter 1234567 has meterType 4, which this integration does not support, ...
     validations:
       required: true
@@ -49,22 +35,24 @@ body:
     id: measures
     attributes:
       label: What does the meter measure?
-      description: >
-        In plain words — district heating, gas, hot water, something else. The
-        log can give the code, but only you can say what the box on the wall
-        is.
+      description: Gas, district heating, hot water — whatever the box on the wall is.
     validations:
       required: true
 
-  - type: textarea
-    id: brunata-online
+  - type: input
+    id: unit
     attributes:
-      label: What does Brunata Online show for this meter?
-      description: >
-        The unit, and two readings a few days apart. The unit decides what the
-        sensor is named in, and two readings say whether the value counts
-        upward or moves both ways — which decides whether Home Assistant can
-        calculate consumption from it.
+      label: Unit shown in Brunata Online
+      placeholder: m³, kWh, GJ, ...
+    validations:
+      required: true
+
+  - type: input
+    id: readings
+    attributes:
+      label: Two readings a few days apart
+      description: Shows whether the number counts upward or moves both ways.
+      placeholder: "12 Sep: 4512.8 — 15 Sep: 4530.1"
     validations:
       required: true
 
@@ -72,10 +60,7 @@ body:
     id: testing
     attributes:
       label: Can you test a pre-release?
-      description: >
-        Support for a meter type is added against a real meter, not against
-        the code table. Nobody working on this integration has yours, so
-        someone who does has to confirm the result before it is released.
+      description: Nobody here has your meter, so it has to be confirmed on yours.
       options:
         - "Yes"
         - "Yes, but not right away"
@@ -87,9 +72,7 @@ body:
     id: version
     attributes:
       label: Integration version
-      description: >
-        HACS shows this on the Brunata card. The supported list may have grown
-        since the version you are running.
+      description: HACS shows this on the Brunata card.
     validations:
       required: true
 
@@ -97,14 +80,9 @@ body:
     id: diagnostics
     attributes:
       label: Diagnostics report
-      description: |
-        Optional, but it confirms the picture: Settings → Devices & services →
-        Brunata → three-dot menu → *Download diagnostics*. Your email,
-        password and meter numbers are removed before the file is written.
-
-        Issues are public. The report keeps your meter readings and the room
-        labels you set in Brunata Online — not sensitive in the way a password
-        is, but yours. Have a look before uploading if you'd rather not
-        publish them.
+      description: >
+        Optional. Brunata → three-dot menu → *Download diagnostics*. Your
+        email, password and meter numbers are removed; your readings and room
+        labels are not, and issues are public.
     validations:
       required: false
