@@ -6,53 +6,31 @@ body:
   - type: markdown
     attributes:
       value: |
-        Only water, heat cost allocators and electricity meters get entities
-        today. Brunata sends the meter type as a number, and adding one more
-        number is a small change — it just needs someone who has that meter.
-
-        If a sensor you already have stopped updating or shows 0, use the bug
-        report instead.
+        Only water, heat cost allocator and electricity meters get entities.
+        Adding another type needs the log line below, and someone with that
+        meter to confirm it.
 
   - type: textarea
     id: log-line
     attributes:
-      label: The log line naming your meter type
+      label: Log line naming the meter type
       description: |
-        1. Settings → Devices & services → Brunata → three-dot menu → *Enable debug logging*
-        2. Restart Home Assistant — the line is only written at startup
-        3. Search the log for `meterType`
-
-        Where the log is:
-        [Debugging](https://github.com/MSL-DA/brunata_online/wiki/Debugging).
-
-        No line at all? Then Brunata has probably marked the meter as
-        dismounted. Write that here instead.
+        Enable debug logging on the integration, restart Home Assistant, then
+        search the log for `meterType`.
       placeholder: Meter 1234567 has meterType 4, which this integration does not support, ...
     validations:
       required: true
 
-  - type: input
-    id: measures
+  - type: textarea
+    id: meter
     attributes:
-      label: What does the meter measure?
-      description: Gas, district heating, hot water — whatever the box on the wall is.
-    validations:
-      required: true
-
-  - type: input
-    id: unit
-    attributes:
-      label: Unit shown in Brunata Online
-      placeholder: m³, kWh, GJ, ...
-    validations:
-      required: true
-
-  - type: input
-    id: readings
-    attributes:
-      label: Two readings a few days apart
-      description: Shows whether the number counts upward or moves both ways.
-      placeholder: "12 Sep: 4512.8 — 15 Sep: 4530.1"
+      label: The meter
+      description: >
+        What it measures, the unit shown in Brunata Online, and two readings
+        a few days apart.
+      placeholder: |
+        Gas meter, unit m³
+        12 Sep: 4512.8 — 15 Sep: 4530.1
     validations:
       required: true
 
@@ -60,10 +38,8 @@ body:
     id: testing
     attributes:
       label: Can you test a pre-release?
-      description: Nobody here has your meter, so it has to be confirmed on yours.
       options:
         - "Yes"
-        - "Yes, but not right away"
         - "No"
     validations:
       required: true
@@ -72,17 +48,5 @@ body:
     id: version
     attributes:
       label: Integration version
-      description: HACS shows this on the Brunata card.
     validations:
       required: true
-
-  - type: textarea
-    id: diagnostics
-    attributes:
-      label: Diagnostics report
-      description: >
-        Optional. Brunata → three-dot menu → *Download diagnostics*. Your
-        email, password and meter numbers are removed; your readings and room
-        labels are not, and issues are public.
-    validations:
-      required: false
