@@ -258,8 +258,8 @@ async def test_sensor_reset_accepted_when_first_reading_arrives_late(mock_meter)
     cached value is never lowered the sensor then stayed frozen at the
     pre-reset value for the rest of the year.
 
-    Brunata publishes one reading per meter per day, around 02:00, whether or
-    not the value moved. The rule under test does not depend on that — it
+    How often Brunata publishes a reading is set by its metering hardware and
+    varies with consumption. The rule under test does not depend on that — it
     compares calendar years, not intervals — which is why a mid-January date is
     accepted here.
     """
