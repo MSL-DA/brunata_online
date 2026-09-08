@@ -283,9 +283,9 @@ class BrunataSensor(
         # _accept_reading().
         self._decrease_warned = False
         # Cache the last known good reading so the sensor keeps its value —
-        # and stays available — between the infrequent API updates instead of
-        # going unavailable, which would break statistics rows. Updated only
-        # from _apply_latest_reading(), never from a property.
+        # and stays available — across the polls that carry no new reading
+        # instead of going unavailable, which would break statistics rows.
+        # Updated only from _apply_latest_reading(), never from a property.
         self._attr_native_value = None
         # Kept as an ISO string for the state attribute, and as a date object
         # for the year comparison in _is_annual_reset().
@@ -468,8 +468,10 @@ class BrunataSensor(
     def _apply_latest_reading(self) -> None:
         """Fold the coordinator's latest reading into the cached state.
 
-        A fresh reading can arrive hourly or as rarely as once a day. When
-        there is none, the cached value is left alone, so the sensor never goes
+        The poll runs hourly, but a fresh reading appears only as often as the
+        meter publishes one, which is set by Brunata's metering hardware and
+        can be anything from a couple of hours to a day apart. When there is
+        none, the cached value is left alone, so the sensor never goes
         unknown/unavailable and statistics stay intact.
         """
         meter = (self.coordinator.data or {}).get(self._meter_id)
@@ -689,11 +691,12 @@ class BrunataSensor(
         the year with it, freezing the sensor at the pre-reset value until the
         new period happens to exceed it.
 
-        Brunata publishes one reading per meter per day, around 02:00, whether
-        or not the value moved, so the reset is visible within a day of it
-        happening. The rule does not depend on that: it compares calendar
-        years, not intervals, so it holds whatever the reporting cadence turns
-        out to be.
+        How often a meter publishes is set by Brunata's metering hardware, not
+        by this integration, and it varies: readings observed on one account
+        arrived every couple of hours while consumption was happening and once
+        a day, around 02:00, while it was not. Another account may differ. The
+        rule does not depend on any of that — it compares calendar years, not
+        intervals — so it holds whatever the cadence turns out to be.
 
         The December/January window below is only a fallback for when the
         previous reading date is unknown, and it is consulted *only* then.
