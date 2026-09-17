@@ -1023,8 +1023,9 @@ def test_unparseable_mounting_date_is_not_fatal():
 
 
 def test_decimals_and_transmitting_are_carried_through():
-    """decimals drives the displayed precision; Brunata states it per meter
-    rather than leaving it to be guessed from the unit."""
+    """decimals is carried through as Brunata sends it. sensor.py uses it as
+    the displayed precision for every meter except heat cost allocators, where
+    Brunata's 0 does not match the one decimal in the reading."""
     meter = _parse([_meter_item("abc")])["abc"]
 
     assert meter.decimals == 3
