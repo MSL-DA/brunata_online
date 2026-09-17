@@ -11,5 +11,5 @@
 # nothing to catch it. Point at this file instead. The lint toolchain is
 # pinned separately in requirements_lint.txt precisely because it *is*
 # ordinary — do not merge the two files.
-homeassistant==2026.9.1
+homeassistant==2026.9.2
 pytest-homeassistant-custom-component
