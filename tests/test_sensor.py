@@ -139,16 +139,16 @@ async def test_sensor_allocator_unit_is_passed_through_verbatim(mock_meter):
 
 
 async def test_sensor_display_precision_comes_from_the_api(mock_meter):
-    """Brunata states the precision it displays itself — 3 for water, 0 for
-    heat cost allocators — so the sensor shows what the portal shows instead
-    of a number guessed from the unit."""
+    """Brunata states a precision per meter, and outside heat cost allocators
+    the sensor uses it — 3 for water matches the three decimals in the reading.
+    Allocators are covered by test_heat_cost_allocators_show_one_decimal."""
     coordinator = MagicMock()
     coordinator.data = {"12345": mock_meter}
 
     # The meter type is not part of this: only the unit and Brunata's own
     # decimals reach suggested_display_precision. kWh is here because UNIT_MAP
     # can express it, not because any meter type reaching this code reports it.
-    for raw_unit, decimals in (("units", 0), ("m3", 3), ("kWh", 2)):
+    for raw_unit, decimals in (("m3", 3), ("kWh", 2)):
         entity = _make_entity(
             coordinator,
             replace(mock_meter, unit=raw_unit, decimals=decimals),
@@ -166,8 +166,10 @@ async def test_sensor_display_precision_falls_back_to_the_unit(mock_meter):
     coordinator = MagicMock()
     coordinator.data = {"12345": mock_meter}
 
+    # Dal is in Brunata's table and in no UNIT_MAP entry, so it reaches the
+    # last branch. Allocator units never do: they are decided before decimals.
     for raw_unit, expected_precision in (
-        ("units", 0),
+        ("Dal", 0),
         ("m3", 3),
         ("l", 3),
         ("kWh", 2),
@@ -177,6 +179,27 @@ async def test_sensor_display_precision_falls_back_to_the_unit(mock_meter):
             replace(mock_meter, unit=raw_unit, decimals=None),
         )
         assert entity.suggested_display_precision == expected_precision
+
+
+@pytest.mark.parametrize("decimals", [0, None])
+@pytest.mark.parametrize("raw_unit", ["units", "Doprimo units"])
+async def test_heat_cost_allocators_show_one_decimal(mock_meter, raw_unit, decimals):
+    """Brunata sends decimals 0 for heat cost allocators, but the reading
+    carries one decimal (110.9), so allocator units always show one.
+
+    decimals 0 is what Brunata sends; None is the case where it sends nothing.
+    Doprimo units stands for the vendor-specific spellings, which carry the
+    same marker as the plain units.
+    """
+    coordinator = MagicMock()
+    coordinator.data = {"12345": mock_meter}
+
+    entity = _make_entity(
+        coordinator,
+        replace(mock_meter, unit=raw_unit, decimals=decimals, value=110.9),
+    )
+
+    assert entity.suggested_display_precision == 1
 
 
 @pytest.mark.parametrize(
@@ -258,8 +281,8 @@ async def test_sensor_reset_accepted_when_first_reading_arrives_late(mock_meter)
     cached value is never lowered the sensor then stayed frozen at the
     pre-reset value for the rest of the year.
 
-    Brunata publishes one reading per meter per day, around 02:00, whether or
-    not the value moved. The rule under test does not depend on that — it
+    How often Brunata publishes a reading is set by its metering hardware and
+    varies with consumption. The rule under test does not depend on that — it
     compares calendar years, not intervals — which is why a mid-January date is
     accepted here.
     """

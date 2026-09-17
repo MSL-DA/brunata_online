@@ -292,7 +292,9 @@ class BrunataMeter:
     # When Brunata installed the physical device. A change is a replacement
     # stated as fact, rather than inferred from a falling value.
     mounting_date: datetime | None = None
-    # Digits Brunata itself displays: 3 for water, 0 for heat cost allocators.
+    # Number of decimals as Brunata states it: 3 for water, 0 for heat cost
+    # allocators. The 0 does not match allocator readings, which carry one
+    # decimal, so BrunataSensor shows those with one regardless.
     decimals: int | None = None
     # Whether the meter is currently sending readings.
     transmitting: bool | None = None
