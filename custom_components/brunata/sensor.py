@@ -334,11 +334,15 @@ class BrunataSensor(
             if self._cumulative
             else SensorStateClass.MEASUREMENT
         )
-        # Brunata states the precision it displays itself: 3 digits for water,
-        # 0 for heat cost allocators. Using its number avoids guessing per unit
-        # and follows automatically if a meter type is added. Display only —
-        # native_value and Long Term Statistics keep the full float.
-        if meter.decimals is not None:
+        # Display only — native_value and Long Term Statistics keep the full
+        # float. Allocator units come first because Brunata's decimals does not
+        # describe their readings: it sends 0 while latestReadingValue carries
+        # one decimal, e.g. 110.9. For water the two agree — 3, and three
+        # decimals in the value — so every other meter keeps Brunata's number,
+        # and the unit decides only when decimals is missing.
+        if ALLOCATOR_UNIT_MARKER in raw_unit.lower():
+            self._attr_suggested_display_precision = 1
+        elif meter.decimals is not None:
             self._attr_suggested_display_precision = meter.decimals
         elif unit in VOLUME_UNITS:
             self._attr_suggested_display_precision = 3
