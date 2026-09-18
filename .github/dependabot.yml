@@ -20,39 +20,16 @@ updates:
     commit-message:
       prefix: "ci"
 
-  # pip covers requirements_lint.txt, which is where the Ruff pin now lives. It
-  # used to be a `pip install ruff==...` argument inside lint.yml, which
-  # Dependabot cannot see at all, so the pin simply aged.
-  #
-  # It also covers requirements_test.txt, where homeassistant is pinned
-  # directly (see that file). A pull request for it therefore reads
-  # "Bump homeassistant from one release to the next" — the version you would
-  # actually recognise — instead of a pytest-homeassistant-custom-component
-  # build number. No version number is written out here: requirements_test.txt
-  # owns that one, and a copy of it here would go stale at the next merge with
-  # nothing to catch it.
-  #
-  # pytest-latest.yml already reports separately when a newer Home Assistant
-  # breaks something; this is what turns that report into a ready pull
-  # request. Merge it when you want to move the floor, leave it otherwise — it
-  # is not required to pass.
-  #
-  # The schedule runs daily so that cooldown below is the only thing deciding
-  # when a release becomes a pull request. On a weekly schedule the two
-  # interacted: a patch released on a Friday would sit until the following
-  # Monday no matter what cooldown said. Days where nothing has matured cost
-  # around twenty seconds and open nothing.
-  #
-  # Home Assistant releases a new minor on the first Wednesday of the month and
-  # patches on Fridays. Dependabot compares against the pin rather than reading
-  # the version string, so a .0 lands as major or minor and everything after it
-  # lands as patch. default-days therefore holds the monthly release back three
-  # days; semver-patch-days lets the Friday patches through the same night.
+  # Covers requirements_lint.txt (the Ruff pin) and requirements_test.txt,
+  # where homeassistant is pinned directly. cooldown is written out here
+  # because it would otherwise be inherited from a repository setting, visible
+  # only in the Dependabot job log.
   - package-ecosystem: "pip"
     directory: "/"
     target-branch: "beta"
     schedule:
-      interval: "daily"
+      interval: "weekly"
+      day: "monday"
       time: "05:00"
       timezone: "Europe/Copenhagen"
     cooldown:
