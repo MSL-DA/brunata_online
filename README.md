@@ -29,8 +29,9 @@ Built for [Brunata Online](https://online.brunata.com) accounts. If Brunata Onli
 
 ## 📦 Installation
 
-### HACS (Recommended)
 **Requires Home Assistant 2025.3 or newer.**
+
+### HACS (Recommended)
 
 1. Open **HACS** in Home Assistant
 2. Click the three-dot menu (top right) → **Custom Repositories**
