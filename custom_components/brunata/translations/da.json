@@ -41,6 +41,9 @@
     "sensor": {
       "consumption": {
         "name": "Forbrug"
+      },
+      "reading_time": {
+        "name": "Seneste aflæsning"
       }
     }
   }
