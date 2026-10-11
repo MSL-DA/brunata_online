@@ -16,12 +16,20 @@ from homeassistant.const import UnitOfEnergy, UnitOfVolume
 from homeassistant.core import HomeAssistant, State
 from pytest_homeassistant_custom_component.common import MockConfigEntry, mock_restore_cache
 
-from custom_components.brunata.api import BASE_URL, SUPPORTED_METER_TYPES, ParseReport
+from homeassistant.util import dt as dt_util
+
+from custom_components.brunata.api import (
+    BASE_URL,
+    SUPPORTED_METER_TYPES,
+    BrunataConnectionError,
+    ParseReport,
+)
 from custom_components.brunata.const import DOMAIN
 from custom_components.brunata.sensor import (
     ANNUAL_RESET_METER_TYPES,
     BrunataRestoredData,
     BrunataSensor,
+    _consumption_shows_reset,
     _is_cumulative_unit,
 )
 
@@ -1025,6 +1033,199 @@ async def test_rejected_decrease_is_logged_once_per_run(mock_meter, caplog):
         entity._apply_latest_reading()
 
     assert caplog.text.count("reported a decrease") == 2
+
+
+# --- reset dates other than 1 January -------------------------------------
+#
+# Issue #88: an account whose heat cost allocators are zeroed on 1 June. The
+# calendar-year rule cannot see that reset, so the sensor asks Brunata for its
+# own daily consumption over the fall. The readings below are the ones in the
+# issue: 761 on 31 May, 0 on 1 June.
+
+
+@pytest.mark.parametrize(
+    ("days", "new_value", "expected"),
+    [
+        # The maintainer's 1 January 2026 reset, read off the live endpoint:
+        # a meter with no consumption either side, and one with some.
+        ([0.0, 0.0], 0.0, True),
+        ([6.0, 7.0], 5.0, True),
+        # More on the meter than was used since the period began.
+        ([6.0, 7.0], 20.0, False),
+        # A fall Brunata did not treat as a reset shows as a negative day.
+        ([3.0, -758.0], 0.0, False),
+        # Days Brunata could not compute are left out of the sum.
+        ([None, 4.0], 4.0, True),
+        ([None, 4.0], 5.0, False),
+        # No figures is no evidence.
+        ([None, None], 0.0, False),
+        ([], 0.0, False),
+        (None, 0.0, False),
+    ],
+)
+def test_consumption_shows_reset(days, new_value, expected):
+    assert _consumption_shows_reset(days, new_value) is expected
+
+
+def _june_allocator(mock_meter, hass, days):
+    """An allocator at 761 on 31 May, attached to hass, with Brunata answering
+    `days` (or raising it) when asked about its consumption."""
+    meter = replace(
+        mock_meter,
+        meter_type="Radiator",
+        meter_type_code=1,
+        unit="units",
+        allocation_unit="O",
+    )
+    coordinator = MagicMock()
+    coordinator.data = {
+        "12345": replace(meter, value=761.0, reading_date=date(2026, 5, 31))
+    }
+    if isinstance(days, Exception):
+        coordinator.client.async_get_daily_consumption = AsyncMock(side_effect=days)
+    else:
+        coordinator.client.async_get_daily_consumption = AsyncMock(return_value=days)
+
+    entity = _make_entity(coordinator, meter)
+    entity.hass = hass
+    entity.async_write_ha_state = MagicMock()
+    entity._apply_latest_reading()
+    assert entity.native_value == 761.0
+    return entity, coordinator, meter
+
+
+async def test_a_reset_on_another_date_is_accepted_when_brunata_confirms_it(
+    hass: HomeAssistant, mock_meter
+):
+    entity, coordinator, meter = _june_allocator(mock_meter, hass, [0.0, 0.0])
+
+    coordinator.data = {
+        "12345": replace(meter, value=0.0, reading_date=date(2026, 6, 1))
+    }
+    entity._apply_latest_reading()
+    # Held back while Brunata is asked.
+    assert entity.native_value == 761.0
+
+    await hass.async_block_till_done(wait_background_tasks=True)
+
+    assert entity.native_value == 0.0
+    assert entity.extra_state_attributes["reading_date"] == "2026-06-01"
+    entity.async_write_ha_state.assert_called_once()
+    # Whole local days, from the day of the last accepted reading to the end
+    # of the day of the fall.
+    coordinator.client.async_get_daily_consumption.assert_awaited_once_with(
+        "12345",
+        "O",
+        dt_util.start_of_local_day(date(2026, 5, 31)),
+        dt_util.start_of_local_day(date(2026, 6, 2)),
+    )
+
+
+async def test_a_fall_brunata_does_not_confirm_is_rejected_and_asked_once(
+    hass: HomeAssistant, mock_meter, caplog
+):
+    entity, coordinator, meter = _june_allocator(
+        mock_meter, hass, [3.0, -758.0]
+    )
+
+    with caplog.at_level(logging.WARNING):
+        for _ in range(3):
+            coordinator.data = {
+                "12345": replace(meter, value=6.0, reading_date=date(2026, 6, 1))
+            }
+            entity._apply_latest_reading()
+            await hass.async_block_till_done(wait_background_tasks=True)
+
+    assert entity.native_value == 761.0
+    assert caplog.text.count("reported a decrease") == 1
+    # The same fall from the same baseline is not asked about every poll.
+    assert coordinator.client.async_get_daily_consumption.await_count == 1
+
+
+async def test_a_failed_question_is_asked_again_at_the_next_poll(
+    hass: HomeAssistant, mock_meter, caplog
+):
+    entity, coordinator, meter = _june_allocator(
+        mock_meter, hass, BrunataConnectionError("down")
+    )
+
+    with caplog.at_level(logging.WARNING):
+        for _ in range(2):
+            coordinator.data = {
+                "12345": replace(meter, value=0.0, reading_date=date(2026, 6, 1))
+            }
+            entity._apply_latest_reading()
+            await hass.async_block_till_done(wait_background_tasks=True)
+
+    assert entity.native_value == 761.0
+    # Not an answer, so not a warning either.
+    assert "reported a decrease" not in caplog.text
+    assert coordinator.client.async_get_daily_consumption.await_count == 2
+
+
+async def test_a_confirmed_reset_also_covers_later_readings(
+    hass: HomeAssistant, mock_meter
+):
+    """A newer reading may be in the coordinator by the time the answer
+    arrives. It is past the same reset, so the same answer covers it."""
+    entity, coordinator, meter = _june_allocator(mock_meter, hass, [0.0, 0.0])
+
+    coordinator.data = {
+        "12345": replace(meter, value=0.0, reading_date=date(2026, 6, 1))
+    }
+    entity._apply_latest_reading()
+    coordinator.data = {
+        "12345": replace(meter, value=1.0, reading_date=date(2026, 6, 2))
+    }
+
+    await hass.async_block_till_done(wait_background_tasks=True)
+
+    assert entity.native_value == 1.0
+
+
+async def test_an_allocator_without_an_allocation_unit_is_not_asked_about(
+    hass: HomeAssistant, mock_meter, caplog
+):
+    """Without allocationUnit the request cannot be made, so the fall is
+    rejected with the warning straight away, as before."""
+    entity, coordinator, meter = _june_allocator(mock_meter, hass, [0.0, 0.0])
+    meter = replace(meter, allocation_unit=None)
+
+    with caplog.at_level(logging.WARNING):
+        coordinator.data = {
+            "12345": replace(meter, value=0.0, reading_date=date(2026, 6, 1))
+        }
+        entity._apply_latest_reading()
+        await hass.async_block_till_done(wait_background_tasks=True)
+
+    assert entity.native_value == 761.0
+    assert caplog.text.count("reported a decrease") == 1
+    coordinator.client.async_get_daily_consumption.assert_not_awaited()
+
+
+async def test_a_water_meter_that_falls_is_not_asked_about(
+    hass: HomeAssistant, mock_meter
+):
+    """Only heat cost allocators are reset once a year. A water meter that
+    falls without being replaced is a glitch, as before."""
+    meter = replace(mock_meter, allocation_unit="K")
+    coordinator = MagicMock()
+    coordinator.data = {
+        "12345": replace(meter, value=312.5, reading_date=date(2026, 5, 31))
+    }
+    coordinator.client.async_get_daily_consumption = AsyncMock(return_value=[0.0])
+    entity = _make_entity(coordinator, meter)
+    entity.hass = hass
+    entity._apply_latest_reading()
+
+    coordinator.data = {
+        "12345": replace(meter, value=0.0, reading_date=date(2026, 6, 1))
+    }
+    entity._apply_latest_reading()
+    await hass.async_block_till_done(wait_background_tasks=True)
+
+    assert entity.native_value == 312.5
+    coordinator.client.async_get_daily_consumption.assert_not_awaited()
 
 
 # --- placement -----------------------------------------------------------
