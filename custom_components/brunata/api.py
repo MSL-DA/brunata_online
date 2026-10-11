@@ -288,7 +288,14 @@ class BrunataMeter:
     # way the allowlist does: as not one of ours.
     meter_type_code: int | None = None
     value: float | None = None
+    # The day of the reading. Every rule in sensor.py that compares readings
+    # works on this, and so does the reading_date attribute.
     reading_date: date | None = None
+    # The same latestReadingDate with its time and offset kept, e.g.
+    # 2026-10-11T02:13:00+02:00. Shown by the "Latest reading" timestamp
+    # sensor and used for nothing else. None unless the offset was there:
+    # Home Assistant rejects a timestamp sensor value without a time zone.
+    reading_time: datetime | None = None
     # The customer's own label from Brunata's UI, e.g. "Koldt vand".
     placement: str | None = None
     # When Brunata installed the physical device. A change is a replacement
@@ -440,6 +447,18 @@ def parse_timestamp(raw: Any) -> datetime | None:
         except ValueError:
             _LOGGER.debug("Could not parse timestamp %r", raw)
     return None
+
+
+def _aware_or_none(value: datetime | None) -> datetime | None:
+    """Return a timestamp only if it carries a time zone.
+
+    Brunata's timestamps have always carried an offset. One without would be
+    read as naive, and Home Assistant raises on a naive value in a timestamp
+    sensor, so it is dropped here rather than guessed at.
+    """
+    if value is None or value.tzinfo is None:
+        return None
+    return value
 
 
 def _expires_in_seconds(raw: Any) -> float | None:
@@ -1370,6 +1389,9 @@ def _parse_meters(
             unit=unit,
             value=value,
             reading_date=parse_reading_date(item.get("latestReadingDate")),
+            reading_time=_aware_or_none(
+                parse_timestamp(item.get("latestReadingDate"))
+            ),
             placement=placement if isinstance(placement, str) and placement else None,
             mounting_date=parse_timestamp(item.get("mountingDate")),
             # Three things have to hold before this becomes a display

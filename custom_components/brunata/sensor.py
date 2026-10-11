@@ -13,7 +13,7 @@ from homeassistant.components.sensor import (
     SensorEntity,
     SensorStateClass,
 )
-from homeassistant.const import UnitOfEnergy, UnitOfVolume
+from homeassistant.const import EntityCategory, UnitOfEnergy, UnitOfVolume
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
@@ -275,6 +275,7 @@ async def async_setup_entry(
                 _LOGGER.debug("Creating BrunataSensor for meter %s", meter_id)
                 known_meter_ids.add(meter_id)
                 new_entities.append(BrunataSensor(coordinator, meter))
+                new_entities.append(BrunataReadingTimeSensor(coordinator, meter))
         if new_entities:
             _LOGGER.debug("Adding %s new entities", len(new_entities))
             async_add_entities(new_entities)
@@ -961,10 +962,7 @@ class BrunataSensor(
         """
         if self._attr_native_value is None:
             return False
-        data = self.coordinator.data
-        if data is None or self._meter_id in data:
-            return True
-        return self._meter_id in self.coordinator.last_parse.unresolved_unit_meter_ids
+        return _meter_still_reported(self.coordinator, self._meter_id)
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -977,3 +975,82 @@ class BrunataSensor(
         if self._transmitting is not None:
             attributes["transmitting"] = self._transmitting
         return attributes
+
+
+def _meter_still_reported(
+    coordinator: BrunataDataUpdateCoordinator, meter_id: str
+) -> bool:
+    """Return True while Brunata still lists this meter.
+
+    Shared by both sensors on a meter, so they go unavailable together and for
+    the same reasons — see BrunataSensor.available for what those are. No data
+    yet counts as still reported; a meter skipped for a unit that did not
+    resolve this poll does too.
+    """
+    data = coordinator.data
+    if data is None or meter_id in data:
+        return True
+    return meter_id in coordinator.last_parse.unresolved_unit_meter_ids
+
+
+class BrunataReadingTimeSensor(
+    CoordinatorEntity[BrunataDataUpdateCoordinator], SensorEntity
+):
+    """When Brunata's latest reading for a meter was taken (issue #89).
+
+    The consumption sensor's reading_date attribute carries only the day, and
+    it stays that way so templates already using it keep working. This sensor
+    carries the full latestReadingDate — time and offset — so a reading taken
+    at 23:50 and polled after midnight can be told apart from one taken in the
+    morning.
+
+    It shows the latest reading Brunata reported, whether or not the
+    consumption sensor accepted its value. That is the question it answers:
+    when did the meter last report.
+
+    A diagnostic entity on the meter's existing device. No restore: the first
+    refresh completes before the platform is set up, so the value is there
+    from the start, and a timestamp read back from the state machine would say
+    nothing the next poll does not.
+    """
+
+    _attr_has_entity_name = True
+    _attr_translation_key = "reading_time"
+    _attr_device_class = SensorDeviceClass.TIMESTAMP
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(
+        self, coordinator: BrunataDataUpdateCoordinator, meter: BrunataMeter
+    ) -> None:
+        """Initialize the sensor."""
+        super().__init__(coordinator)
+        self._meter_id = meter.meter_id
+        # Its own unique id, next to the consumption sensor's. Spelled out for
+        # the same reason that one is: see BrunataSensor.__init__.
+        self._attr_unique_id = f"brunata_{self._meter_id}_reading_time"
+        # Identifiers only. The consumption sensor owns the device's name,
+        # model and serial; repeating them here would give the device registry
+        # two sources for the same fields.
+        self._attr_device_info = dr.DeviceInfo(
+            identifiers={(DOMAIN, f"{DEVICE_ID_PREFIX}{self._meter_id}")}
+        )
+        self._attr_native_value: datetime | None = meter.reading_time
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        """Follow the latest reading time, keeping the last one known.
+
+        A poll without the meter, or without a usable time, leaves the value
+        alone, the same way the consumption sensor keeps its reading.
+        """
+        meter = (self.coordinator.data or {}).get(self._meter_id)
+        if meter is not None and meter.reading_time is not None:
+            self._attr_native_value = meter.reading_time
+        super()._handle_coordinator_update()
+
+    @property
+    def available(self) -> bool:
+        """Available on the same terms as the consumption sensor."""
+        if self._attr_native_value is None:
+            return False
+        return _meter_still_reported(self.coordinator, self._meter_id)
