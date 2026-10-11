@@ -1033,6 +1033,27 @@ def test_decimals_and_transmitting_are_carried_through():
     assert meter.transmitting is True
 
 
+def test_the_reading_time_keeps_the_time_and_offset():
+    """reading_date keeps only the day (issue #89). reading_time is the same
+    field with nothing thrown away."""
+    meter = _parse([_meter_item("abc")])["abc"]
+
+    assert meter.reading_date == date(2026, 8, 23)
+    assert meter.reading_time == datetime(
+        2026, 8, 23, 8, 53, tzinfo=timezone(timedelta(hours=2))
+    )
+
+
+@pytest.mark.parametrize("raw", ["2026-08-23", "2026-08-23T08:53:00", "garbled", 5])
+def test_a_reading_time_without_an_offset_is_dropped(raw):
+    """Home Assistant raises on a timestamp sensor value without a time zone,
+    so a time Brunata sent without one is not passed on. The day still is."""
+    item = _meter_item("abc")
+    item["latestReadingDate"] = raw
+
+    assert _parse([item])["abc"].reading_time is None
+
+
 @pytest.mark.parametrize(
     ("raw", "expected"), [("K", "K"), (" O ", "O"), ("", None), (None, None), (7, None)]
 )
