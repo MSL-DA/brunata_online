@@ -12,8 +12,9 @@ from homeassistant.components.sensor import (
     SensorDeviceClass,
     SensorStateClass,
 )
-from homeassistant.const import UnitOfEnergy, UnitOfVolume
+from homeassistant.const import EntityCategory, UnitOfEnergy, UnitOfVolume
 from homeassistant.core import HomeAssistant, State
+from homeassistant.helpers import entity_registry as er
 from pytest_homeassistant_custom_component.common import MockConfigEntry, mock_restore_cache
 
 from homeassistant.util import dt as dt_util
@@ -96,6 +97,99 @@ async def test_sensor_setup(hass: HomeAssistant, mock_brunata_client, mock_meter
     # Always an ISO string, whether the value came from the API or from a
     # restored state after a restart.
     assert state.attributes["reading_date"] == "2024-01-01"
+
+
+# --- latest reading time (issue #89) ---------------------------------------
+
+_READ_AT = datetime(2026, 10, 10, 23, 50, tzinfo=UTC)
+
+
+async def _setup_reading_time(hass, mock_brunata_client, meter):
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={"email": "test@example.com", "password": "password123"},
+    )
+    entry.add_to_hass(hass)
+    mock_brunata_client.async_get_meters = AsyncMock(return_value={"12345": meter})
+    await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    registry = er.async_get(hass)
+    entity_id = registry.async_get_entity_id(
+        SENSOR_DOMAIN, DOMAIN, "brunata_12345_reading_time"
+    )
+    assert entity_id is not None
+    return entry, registry, entity_id
+
+
+async def test_each_meter_gets_a_reading_time_sensor(
+    hass: HomeAssistant, mock_brunata_client, mock_meter
+):
+    """The full timestamp, as a diagnostic entity on the meter's own device,
+    next to the consumption sensor rather than instead of its attribute."""
+    meter = replace(mock_meter, reading_time=_READ_AT)
+    _, registry, entity_id = await _setup_reading_time(
+        hass, mock_brunata_client, meter
+    )
+
+    state = hass.states.get(entity_id)
+    assert state.state == "2026-10-10T23:50:00+00:00"
+    assert state.attributes["device_class"] == SensorDeviceClass.TIMESTAMP
+    assert state.attributes["friendly_name"] == "Water (12345) Latest reading"
+
+    entry = registry.async_get(entity_id)
+    assert entry.entity_category is EntityCategory.DIAGNOSTIC
+    # Enabled from the start.
+    assert entry.disabled_by is None
+
+    consumption_id = registry.async_get_entity_id(
+        SENSOR_DOMAIN, DOMAIN, "brunata_12345_consumption"
+    )
+    assert registry.async_get(consumption_id).device_id == entry.device_id
+    # The day-only attribute is unchanged.
+    assert hass.states.get(consumption_id).attributes["reading_date"] == "2024-01-01"
+
+
+async def test_the_reading_time_follows_new_readings_and_keeps_the_last(
+    hass: HomeAssistant, mock_brunata_client, mock_meter
+):
+    meter = replace(mock_meter, reading_time=_READ_AT)
+    entry, _, entity_id = await _setup_reading_time(
+        hass, mock_brunata_client, meter
+    )
+    coordinator = entry.runtime_data
+
+    later = datetime(2026, 10, 11, 1, 53, tzinfo=UTC)
+    mock_brunata_client.async_get_meters = AsyncMock(
+        return_value={"12345": replace(meter, reading_time=later)}
+    )
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+    assert hass.states.get(entity_id).state == "2026-10-11T01:53:00+00:00"
+
+    # A poll without a usable time leaves the last one in place.
+    mock_brunata_client.async_get_meters = AsyncMock(
+        return_value={"12345": replace(meter, reading_time=None)}
+    )
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+    assert hass.states.get(entity_id).state == "2026-10-11T01:53:00+00:00"
+
+
+async def test_the_reading_time_goes_unavailable_with_its_meter(
+    hass: HomeAssistant, mock_brunata_client, mock_meter
+):
+    """Both sensors on a meter go unavailable together, for the same reason."""
+    meter = replace(mock_meter, reading_time=_READ_AT)
+    entry, _, entity_id = await _setup_reading_time(
+        hass, mock_brunata_client, meter
+    )
+
+    mock_brunata_client.async_get_meters = AsyncMock(return_value={})
+    await entry.runtime_data.async_refresh()
+    await hass.async_block_till_done()
+
+    assert hass.states.get(entity_id).state == "unavailable"
 
 
 async def test_sensor_unit_is_normalised(mock_meter):
