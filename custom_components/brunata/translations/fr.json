@@ -41,6 +41,9 @@
     "sensor": {
       "consumption": {
         "name": "Consommation"
+      },
+      "reading_time": {
+        "name": "Dernier relevé"
       }
     }
   }

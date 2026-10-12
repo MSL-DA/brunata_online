@@ -41,6 +41,9 @@
     "sensor": {
       "consumption": {
         "name": "Forbruk"
+      },
+      "reading_time": {
+        "name": "Siste avlesning"
       }
     }
   }

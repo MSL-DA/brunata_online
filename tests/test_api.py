@@ -7,7 +7,7 @@ the 429 back-off ended up being dead code for months: it looked correct in
 review and nothing exercised it.
 """
 
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 
 import logging
 import re
@@ -25,6 +25,7 @@ from custom_components.brunata.api import (
     BrunataApiError,
     BrunataAuthError,
     BrunataConnectionError,
+    _parse_daily_consumption,
     _parse_meters,
     _payload,
 )
@@ -1030,6 +1031,163 @@ def test_decimals_and_transmitting_are_carried_through():
 
     assert meter.decimals == 3
     assert meter.transmitting is True
+
+
+def test_the_reading_time_keeps_the_time_and_offset():
+    """reading_date keeps only the day (issue #89). reading_time is the same
+    field with nothing thrown away."""
+    meter = _parse([_meter_item("abc")])["abc"]
+
+    assert meter.reading_date == date(2026, 8, 23)
+    assert meter.reading_time == datetime(
+        2026, 8, 23, 8, 53, tzinfo=timezone(timedelta(hours=2))
+    )
+
+
+@pytest.mark.parametrize("raw", ["2026-08-23", "2026-08-23T08:53:00", "garbled", 5])
+def test_a_reading_time_without_an_offset_is_dropped(raw):
+    """Home Assistant raises on a timestamp sensor value without a time zone,
+    so a time Brunata sent without one is not passed on. The day still is."""
+    item = _meter_item("abc")
+    item["latestReadingDate"] = raw
+
+    assert _parse([item])["abc"].reading_time is None
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"), [("K", "K"), (" O ", "O"), ("", None), (None, None), (7, None)]
+)
+def test_allocation_unit_is_carried_through(raw, expected):
+    """The consumption call selects meters by allocationUnit, so it has to
+    survive the parse. Anything that is not a usable string is None, which
+    sensor.py reads as "cannot ask"."""
+    item = _meter_item("abc")
+    item["allocationUnit"] = raw
+
+    assert _parse([item])["abc"].allocation_unit == expected
+
+
+# --- /consumer/consumption -------------------------------------------------
+
+_CET = timezone(timedelta(hours=1))
+
+
+def _consumption_payload():
+    """Shaped like the live endpoint: every meter in the group, one line each,
+    and one day more than was asked for."""
+
+    def day(year, month, day_of_month, consumption):
+        start = datetime(year, month, day_of_month, tzinfo=_CET)
+        return {
+            "fromDate": start.isoformat(),
+            "toDate": (start + timedelta(days=1)).isoformat(),
+            "consumption": consumption,
+        }
+
+    return {
+        "startDate": "2025-12-31T00:00:00+01:00",
+        "endDate": "2026-01-02T00:00:00+01:00",
+        "interval": "D",
+        "consumptionLines": [
+            {"meter": {"meterId": 111}, "consumptionValues": [day(2025, 12, 31, 9)]},
+            {
+                "meter": {"meterId": 4711},
+                "consumptionValues": [
+                    day(2025, 12, 31, 6),
+                    day(2026, 1, 1, 7),
+                    day(2026, 1, 2, 6),
+                    {"fromDate": "garbled", "consumption": 99},
+                ],
+            },
+        ],
+    }
+
+
+def test_daily_consumption_is_picked_out_by_meter_and_period():
+    days = _parse_daily_consumption(
+        _consumption_payload(),
+        "4711",
+        datetime(2025, 12, 31, tzinfo=_CET),
+        datetime(2026, 1, 2, tzinfo=_CET),
+    )
+
+    # The day starting at the end of the period, and the unreadable one, are
+    # left out.
+    assert days == [6.0, 7.0]
+
+
+def test_daily_consumption_keeps_a_null_day_as_none():
+    payload = _consumption_payload()
+    payload["consumptionLines"][1]["consumptionValues"][0]["consumption"] = None
+
+    days = _parse_daily_consumption(
+        payload,
+        "4711",
+        datetime(2025, 12, 31, tzinfo=_CET),
+        datetime(2026, 1, 2, tzinfo=_CET),
+    )
+
+    assert days == [None, 7.0]
+
+
+def test_daily_consumption_for_a_meter_not_in_the_answer_is_none():
+    assert (
+        _parse_daily_consumption(
+            _consumption_payload(),
+            "999",
+            datetime(2025, 12, 31, tzinfo=_CET),
+            datetime(2026, 1, 2, tzinfo=_CET),
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize("payload", [[], {"consumptionLines": None}, "x"])
+def test_an_unusable_consumption_payload_is_an_api_error(payload):
+    with pytest.raises(BrunataApiError):
+        _parse_daily_consumption(
+            payload,
+            "1",
+            datetime(2025, 12, 31, tzinfo=_CET),
+            datetime(2026, 1, 2, tzinfo=_CET),
+        )
+
+
+async def test_daily_consumption_is_requested_the_way_the_page_requests_it():
+    """Parameters as Brunata's own consumption page sends them, read off the
+    browser's network inspector."""
+    calls = []
+
+    class FakeHttp:
+        async def request(self, method, url, **kwargs):
+            calls.append((method, url, kwargs))
+            return FakeResponse(200, json_data=_consumption_payload())
+
+    client = BrunataApiClient("user@example.com", "s3cret", FakeHttp())
+
+    async def _fake_login(*, force=False):
+        client._access_token = "T"
+        client._expires_at = time.time() + 300
+
+    client._async_login = _fake_login
+
+    days = await client.async_get_daily_consumption(
+        "4711",
+        "O",
+        datetime(2025, 12, 31, tzinfo=_CET),
+        datetime(2026, 1, 2, tzinfo=_CET),
+    )
+
+    assert days == [6.0, 7.0]
+    method, url, kwargs = calls[0]
+    assert method == "GET"
+    assert url == f"{API_URL}/consumer/consumption"
+    assert kwargs["params"] == {
+        "startdate": "2025-12-31T00:00:00.000+01:00",
+        "enddate": "2026-01-02T00:00:00.000+01:00",
+        "interval": "D",
+        "allocationunit": "O",
+    }
 
 
 @pytest.mark.parametrize("decimals", [None, "3", 1.5, True, False])

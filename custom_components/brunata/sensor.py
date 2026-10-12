@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any
 
 from homeassistant.components.sensor import (
@@ -12,16 +13,18 @@ from homeassistant.components.sensor import (
     SensorEntity,
     SensorStateClass,
 )
-from homeassistant.const import UnitOfEnergy, UnitOfVolume
+from homeassistant.const import EntityCategory, UnitOfEnergy, UnitOfVolume
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.restore_state import ExtraStoredData, RestoreEntity
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.util import dt as dt_util
 
 from . import BrunataConfigEntry, BrunataDataUpdateCoordinator
 from .api import (
     BASE_URL,
+    BrunataError,
     BrunataMeter,
     format_date,
     parse_reading_date,
@@ -31,8 +34,11 @@ from .const import DEVICE_ID_PREFIX, DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
-# Meter types Brunata zeroes on a schedule: heat cost allocators, every
-# 1 January. A decrease around new year therefore needs no further evidence.
+# Meter types Brunata zeroes once a year: heat cost allocators. A decrease
+# across the turn of the calendar year needs no further evidence; one at any
+# other time is checked against Brunata's own consumption figures, because the
+# reset date follows the building's billing period and differs between
+# accounts — 1 January on the maintainer's, 1 June on another (issue #88).
 #
 # Matched on the numeric meterType, not the name it resolves to. The name comes
 # from a locale table Brunata owns, fetched in whatever language LOCALE asks
@@ -47,6 +53,35 @@ _LOGGER = logging.getLogger(__name__)
 #
 #   1 = heat cost allocator (radiator). Read off live account data.
 ANNUAL_RESET_METER_TYPES = frozenset({1})
+
+
+def _consumption_shows_reset(days: list[float | None] | None, new_value: float) -> bool:
+    """Return True if Brunata's daily consumption explains a fall as a reset.
+
+    `days` is Brunata's consumption for every day from the one the last
+    accepted reading fell on to the one the falling reading fell on — see
+    BrunataApiClient.async_get_daily_consumption(). Brunata computes those
+    figures across its own annual reset, so across a real reset they stay
+    ordinary and positive; a fall Brunata did not treat as a reset would show
+    up as a negative day.
+
+    Two things must hold:
+
+    1. No day is negative.
+    2. The new reading is no larger than the consumption over the period.
+       After a reset the meter has counted from zero, so it cannot show more
+       than was used since — and the period starts no later than the reset.
+
+    A day Brunata sent as null is left out of the sum. That can only make the
+    sum smaller, so it can only make rule 2 stricter. No days with a figure at
+    all is no evidence, and no evidence is not a reset.
+    """
+    if not days:
+        return False
+    known = [day for day in days if day is not None]
+    if not known or any(day < 0 for day in known):
+        return False
+    return new_value <= sum(known)
 
 
 # Keys are entries in Brunata's measurementUnit table, lowercased and stripped,
@@ -240,6 +275,7 @@ async def async_setup_entry(
                 _LOGGER.debug("Creating BrunataSensor for meter %s", meter_id)
                 known_meter_ids.add(meter_id)
                 new_entities.append(BrunataSensor(coordinator, meter))
+                new_entities.append(BrunataReadingTimeSensor(coordinator, meter))
         if new_entities:
             _LOGGER.debug("Adding %s new entities", len(new_entities))
             async_add_entities(new_entities)
@@ -282,6 +318,16 @@ class BrunataSensor(
         # Whether the current run of rejected decreases has been logged. See
         # _accept_reading().
         self._decrease_warned = False
+        # The question to Brunata about a falling allocator reading, while it
+        # is in flight. At most one per meter. See _async_check_reset().
+        self._reset_check_task: asyncio.Task[None] | None = None
+        # Brunata's answers, each tied to the baseline it was given. Confirmed
+        # is (baseline day, baseline value, reading day of the fall); declined
+        # is (baseline day, baseline value, reading day, reading value). A
+        # declined fall is not asked about again until the reading changes, so
+        # a persistent glitch costs one request, not one per poll.
+        self._reset_confirmed: tuple[date, float, date] | None = None
+        self._reset_declined: tuple[date, float, date, float] | None = None
         # Cache the last known good reading so the sensor keeps its value —
         # and stays available — across the polls that carry no new reading
         # instead of going unavailable, which would break statistics rows.
@@ -320,8 +366,8 @@ class BrunataSensor(
         else:
             self._attr_icon = "mdi:gauge"
 
-        # Consumption readings climb until the meter is zeroed — every
-        # 1 January for a heat cost allocator, and whenever the physical device
+        # Consumption readings climb until the meter is zeroed — once a year
+        # for a heat cost allocator, and whenever the physical device
         # is replaced for any meter. TOTAL_INCREASING is built for exactly
         # that: HA computes hourly sums and already knows how to handle a drop
         # back to zero. Anything outside water, energy and heat cost allocators
@@ -437,6 +483,13 @@ class BrunataSensor(
         # value is in place as the baseline.
         self._apply_latest_reading()
 
+    async def async_will_remove_from_hass(self) -> None:
+        """Abandon a question to Brunata that nobody is left to act on."""
+        if self._reset_check_task is not None:
+            self._reset_check_task.cancel()
+            self._reset_check_task = None
+        await super().async_will_remove_from_hass()
+
     @property
     def extra_restore_state_data(self) -> BrunataRestoredData:
         """Persist the decrease guard's baseline metadata across a restart.
@@ -515,8 +568,11 @@ class BrunataSensor(
         if meter.value is None or not self._accept_reading(meter):
             return
 
-        # A reading got through, so the next rejection is news again.
+        # A reading got through, so the next rejection is news again, and any
+        # answer from Brunata belonged to the baseline that has just moved.
         self._decrease_warned = False
+        self._reset_confirmed = None
+        self._reset_declined = None
         self._attr_native_value = meter.value
         self._meter_no = meter.meter_no
         self._mounting_date = meter.mounting_date
@@ -593,8 +649,9 @@ class BrunataSensor(
     def _accept_reading(self, meter: BrunataMeter) -> bool:
         """Decide whether a reading should replace the cached value.
 
-        An increase is always accepted. A decrease is believed in exactly two
-        cases, both of which Brunata states outright:
+        An increase is always accepted. A decrease is believed in exactly three
+        cases, all of them resting on something Brunata states rather than on
+        the shape of the readings:
 
         1. The mounting date or the meter number changed — the physical device
            was replaced, so the new one legitimately starts near zero. This
@@ -602,18 +659,22 @@ class BrunataSensor(
            replaced eventually, roughly every 8-10 years, heat cost allocators
            included; the check below is deliberately not conditioned on meter
            type, and it is tested first.
-        2. It is a heat cost allocator around new year. Those are zeroed on
-           1 January, every year. This one is on top of case 1 for allocators,
-           not instead of it.
+        2. It is a heat cost allocator and the reading is in a later calendar
+           year than the last accepted one. Accounts reset on 1 January pass
+           here without a further request.
+        3. It is a heat cost allocator and Brunata's own daily consumption
+           over the fall shows a reset — see _consumption_shows_reset(). This
+           covers an account whose billing period resets the allocators on any
+           other date; 1 June has been reported. Brunata cannot be asked from
+           here, since this runs synchronously inside a coordinator update, so
+           the reading is held back while _async_check_reset() asks, and
+           accepted when the answer is yes.
 
         Anything else is discarded as a glitch: accepting one under
         TOTAL_INCREASING would record a false consumption spike on the way up.
 
-        Both signals in case 1 are things Brunata states outright, rather than
-        anything inferred from the shape of the readings. The trade-off is that
-        a reset Brunata reports without touching either field is rejected
-        indefinitely. No such case has been observed, and the warning below
-        makes it visible if one appears.
+        The trade-off is that a reset none of the three recognises is rejected
+        indefinitely. The warning below makes it visible if one appears.
         """
         previous = self._attr_native_value
         value = meter.value
@@ -663,30 +724,182 @@ class BrunataSensor(
             )
             return True
 
-        # Logged once per run of rejections, not once per poll. The cached
-        # value is never lowered, so a rejected decrease is rejected again
-        # every hour for as long as it persists — potentially forever. The flag
-        # is cleared in _apply_latest_reading() when a reading is accepted.
-        if not self._decrease_warned:
-            self._decrease_warned = True
-            _LOGGER.warning(
-                "Meter %s reported a decrease (%s -> %s on %s) that is neither "
-                "a replacement nor an annual reset — keeping the previous "
-                "value. If the meter really was reset, check it in Brunata "
-                "Online. Further rejections will not be logged until a reading "
-                "is accepted again.",
+        if self._resets_annually and self._reset_is_confirmed(meter.reading_date):
+            _LOGGER.info(
+                "Meter %s annual reset confirmed by Brunata's consumption: "
+                "%s -> %s (reading date %s)",
                 self._meter_id,
                 previous,
                 value,
                 meter.reading_date,
             )
+            return True
+
+        if self._resets_annually and self._ask_brunata_about_reset(meter):
+            # The answer arrives later, and a "no" is logged there.
+            return False
+
+        self._warn_about_decrease(previous, value, meter.reading_date)
         return False
 
-    def _is_annual_reset(self, reading_date: date | None) -> bool:
-        """Return True if a decrease on this date is the annual 1 January reset.
+    def _warn_about_decrease(
+        self, previous: float, value: float, reading_date: date | None
+    ) -> None:
+        """Log a rejected decrease, once per run of rejections.
 
-        Heat cost allocators are zeroed on 1 January, but the first reading
-        published afterwards is not necessarily dated 1 January. The reliable
+        Once per run, not once per poll: the cached value is never lowered, so
+        a rejected decrease is rejected again every hour for as long as it
+        persists — potentially forever. The flag is cleared in
+        _apply_latest_reading() when a reading is accepted.
+        """
+        if self._decrease_warned:
+            return
+        self._decrease_warned = True
+        _LOGGER.warning(
+            "Meter %s reported a decrease (%s -> %s on %s) that is neither "
+            "a replacement nor an annual reset — keeping the previous "
+            "value. If the meter really was reset, check it in Brunata "
+            "Online. Further rejections will not be logged until a reading "
+            "is accepted again.",
+            self._meter_id,
+            previous,
+            value,
+            reading_date,
+        )
+
+    def _reset_is_confirmed(self, reading_date: date | None) -> bool:
+        """Return True if Brunata has confirmed a reset this reading is past.
+
+        The confirmation is tied to the baseline it was given — the day and
+        value of the last accepted reading — and to the day of the reading
+        that fell. A later reading against the same baseline is accepted on
+        the same answer: the reset it confirmed is behind that one too.
+        """
+        confirmed = self._reset_confirmed
+        if confirmed is None or reading_date is None:
+            return False
+        baseline_day, baseline_value, fall_day = confirmed
+        return (
+            baseline_day == self._last_reading_day
+            and baseline_value == self._attr_native_value
+            and reading_date >= fall_day
+        )
+
+    def _ask_brunata_about_reset(self, meter: BrunataMeter) -> bool:
+        """Start asking Brunata whether a fall is the reset, if that is possible.
+
+        Returns True when a question is in flight — just started, or already
+        running — so the caller stays quiet and the answer does the logging.
+        Returns False when there is nothing to ask, so the caller warns as
+        before:
+
+        * Brunata already said no to exactly this fall from this baseline.
+        * The entity is not attached to Home Assistant, so there is nothing to
+          run the request on.
+        * A date is missing on either side, or the reading is older than the
+          baseline. The question is a period of days, and without both ends
+          there is no period.
+        * Brunata did not send the allocationUnit the request needs.
+        """
+        baseline_day = self._last_reading_day
+        baseline_value = self._attr_native_value
+        reading_day = meter.reading_date
+        if (
+            self.hass is None
+            or baseline_day is None
+            or baseline_value is None
+            or reading_day is None
+            or reading_day < baseline_day
+            or meter.value is None
+            or not meter.allocation_unit
+        ):
+            return False
+
+        question = (baseline_day, baseline_value, reading_day, meter.value)
+        if self._reset_declined == question:
+            return False
+        if self._reset_check_task is not None:
+            return True
+
+        _LOGGER.debug(
+            "Meter %s fell from %s to %s on %s; asking Brunata whether that "
+            "was the annual reset",
+            self._meter_id,
+            baseline_value,
+            meter.value,
+            reading_day,
+        )
+        # Not eager: the request would otherwise start inside this
+        # synchronous update, and the answer could re-enter
+        # _apply_latest_reading() before the call that asked has returned.
+        self._reset_check_task = self.hass.async_create_background_task(
+            self._async_check_reset(question, meter.allocation_unit),
+            name=f"brunata reset check {self._meter_id}",
+            eager_start=False,
+        )
+        return True
+
+    async def _async_check_reset(
+        self, question: tuple[date, float, date, float], allocation_unit: str
+    ) -> None:
+        """Ask Brunata for its consumption over a fall, and act on the answer.
+
+        The period runs from the start of the day of the last accepted reading
+        to the end of the day of the fall, in Home Assistant's local time —
+        whole days, because that is Brunata's resolution. A period that starts
+        a little before the reset can only add consumption, which never turns
+        a real reset into a "no".
+
+        A failed request is not an answer. Nothing is recorded, and the next
+        poll asks again.
+        """
+        baseline_day, baseline_value, reading_day, value = question
+        try:
+            days = await self.coordinator.client.async_get_daily_consumption(
+                self._meter_id,
+                allocation_unit,
+                dt_util.start_of_local_day(baseline_day),
+                dt_util.start_of_local_day(reading_day + timedelta(days=1)),
+            )
+        except BrunataError as err:
+            _LOGGER.debug(
+                "Meter %s: could not ask Brunata about the fall, will ask "
+                "again at the next poll: %s",
+                self._meter_id,
+                err,
+            )
+            return
+        finally:
+            self._reset_check_task = None
+
+        if (self._last_reading_day, self._attr_native_value) != (
+            baseline_day,
+            baseline_value,
+        ):
+            # A reading was accepted while the question was out, so the answer
+            # is about a baseline that no longer exists.
+            return
+
+        if _consumption_shows_reset(days, value):
+            self._reset_confirmed = (baseline_day, baseline_value, reading_day)
+            self._apply_latest_reading()
+            self.async_write_ha_state()
+            return
+
+        self._reset_declined = question
+        self._warn_about_decrease(baseline_value, value, reading_day)
+
+    def _is_annual_reset(self, reading_date: date | None) -> bool:
+        """Return True if a decrease on this date is across a 1 January reset.
+
+        This is the rule for accounts whose allocators are zeroed on 1 January.
+        Accounts with another reset date are covered by Brunata's consumption
+        instead — see _consumption_shows_reset() — and this rule answering no
+        for them is what hands the decision over.
+
+        Heat cost allocators on such an account are zeroed on 1 January, but
+        the first reading published afterwards is not necessarily dated
+        1 January. The reliable
         signal is therefore the calendar year, not the day: a reading dated in
         a later year than the last accepted one is on the far side of a
         1 January, whenever it arrives. Matching only (12, 31) and (1, 1) would
@@ -749,10 +962,7 @@ class BrunataSensor(
         """
         if self._attr_native_value is None:
             return False
-        data = self.coordinator.data
-        if data is None or self._meter_id in data:
-            return True
-        return self._meter_id in self.coordinator.last_parse.unresolved_unit_meter_ids
+        return _meter_still_reported(self.coordinator, self._meter_id)
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -765,3 +975,82 @@ class BrunataSensor(
         if self._transmitting is not None:
             attributes["transmitting"] = self._transmitting
         return attributes
+
+
+def _meter_still_reported(
+    coordinator: BrunataDataUpdateCoordinator, meter_id: str
+) -> bool:
+    """Return True while Brunata still lists this meter.
+
+    Shared by both sensors on a meter, so they go unavailable together and for
+    the same reasons — see BrunataSensor.available for what those are. No data
+    yet counts as still reported; a meter skipped for a unit that did not
+    resolve this poll does too.
+    """
+    data = coordinator.data
+    if data is None or meter_id in data:
+        return True
+    return meter_id in coordinator.last_parse.unresolved_unit_meter_ids
+
+
+class BrunataReadingTimeSensor(
+    CoordinatorEntity[BrunataDataUpdateCoordinator], SensorEntity
+):
+    """When Brunata's latest reading for a meter was taken (issue #89).
+
+    The consumption sensor's reading_date attribute carries only the day, and
+    it stays that way so templates already using it keep working. This sensor
+    carries the full latestReadingDate — time and offset — so a reading taken
+    at 23:50 and polled after midnight can be told apart from one taken in the
+    morning.
+
+    It shows the latest reading Brunata reported, whether or not the
+    consumption sensor accepted its value. That is the question it answers:
+    when did the meter last report.
+
+    A diagnostic entity on the meter's existing device. No restore: the first
+    refresh completes before the platform is set up, so the value is there
+    from the start, and a timestamp read back from the state machine would say
+    nothing the next poll does not.
+    """
+
+    _attr_has_entity_name = True
+    _attr_translation_key = "reading_time"
+    _attr_device_class = SensorDeviceClass.TIMESTAMP
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(
+        self, coordinator: BrunataDataUpdateCoordinator, meter: BrunataMeter
+    ) -> None:
+        """Initialize the sensor."""
+        super().__init__(coordinator)
+        self._meter_id = meter.meter_id
+        # Its own unique id, next to the consumption sensor's. Spelled out for
+        # the same reason that one is: see BrunataSensor.__init__.
+        self._attr_unique_id = f"brunata_{self._meter_id}_reading_time"
+        # Identifiers only. The consumption sensor owns the device's name,
+        # model and serial; repeating them here would give the device registry
+        # two sources for the same fields.
+        self._attr_device_info = dr.DeviceInfo(
+            identifiers={(DOMAIN, f"{DEVICE_ID_PREFIX}{self._meter_id}")}
+        )
+        self._attr_native_value: datetime | None = meter.reading_time
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        """Follow the latest reading time, keeping the last one known.
+
+        A poll without the meter, or without a usable time, leaves the value
+        alone, the same way the consumption sensor keeps its reading.
+        """
+        meter = (self.coordinator.data or {}).get(self._meter_id)
+        if meter is not None and meter.reading_time is not None:
+            self._attr_native_value = meter.reading_time
+        super()._handle_coordinator_update()
+
+    @property
+    def available(self) -> bool:
+        """Available on the same terms as the consumption sensor."""
+        if self._attr_native_value is None:
+            return False
+        return _meter_still_reported(self.coordinator, self._meter_id)

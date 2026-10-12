@@ -1,9 +1,11 @@
 """Client for the Brunata Online API.
 
 Everything the integration needs from Brunata lives here and has no third-party
-package behind it: the Keycloak login, and the single
-``/consumer/metersforconsumer`` call Brunata's own readings page uses, which
-carries each meter's reading together with its placement label.
+package behind it: the Keycloak login, the ``/consumer/metersforconsumer`` call
+Brunata's own readings page uses, which carries each meter's reading together
+with its placement label, and the ``/consumer/consumption`` call that is made
+only when a heat cost allocator's reading falls — see
+async_get_daily_consumption().
 
 The HTTP client is built and owned here, deliberately *not* taken from
 ``homeassistant.helpers.httpx_client`` — see ``async_create()``, which also
@@ -286,7 +288,14 @@ class BrunataMeter:
     # way the allowlist does: as not one of ours.
     meter_type_code: int | None = None
     value: float | None = None
+    # The day of the reading. Every rule in sensor.py that compares readings
+    # works on this, and so does the reading_date attribute.
     reading_date: date | None = None
+    # The same latestReadingDate with its time and offset kept, e.g.
+    # 2026-10-11T02:13:00+02:00. Shown by the "Latest reading" timestamp
+    # sensor and used for nothing else. None unless the offset was there:
+    # Home Assistant rejects a timestamp sensor value without a time zone.
+    reading_time: datetime | None = None
     # The customer's own label from Brunata's UI, e.g. "Koldt vand".
     placement: str | None = None
     # When Brunata installed the physical device. A change is a replacement
@@ -298,6 +307,11 @@ class BrunataMeter:
     decimals: int | None = None
     # Whether the meter is currently sending readings.
     transmitting: bool | None = None
+    # Brunata's allocationUnit, e.g. "O" for heat cost allocators and "K"/"W"
+    # for cold and hot water. Not shown anywhere: it is the one parameter
+    # /consumer/consumption needs to select a meter's group, and the call does
+    # not take a meter id. See async_get_daily_consumption().
+    allocation_unit: str | None = None
 
 
 class ParseReport(NamedTuple):
@@ -433,6 +447,18 @@ def parse_timestamp(raw: Any) -> datetime | None:
         except ValueError:
             _LOGGER.debug("Could not parse timestamp %r", raw)
     return None
+
+
+def _aware_or_none(value: datetime | None) -> datetime | None:
+    """Return a timestamp only if it carries a time zone.
+
+    Brunata's timestamps have always carried an offset. One without would be
+    read as naive, and Home Assistant raises on a naive value in a timestamp
+    sensor, so it is dropped here rather than guessed at.
+    """
+    if value is None or value.tzinfo is None:
+        return None
+    return value
 
 
 def _expires_in_seconds(raw: Any) -> float | None:
@@ -660,6 +686,48 @@ class BrunataApiClient:
         self._last_parse_report = parsed.report
         return parsed.meters
 
+    async def async_get_daily_consumption(
+        self,
+        meter_id: str,
+        allocation_unit: str,
+        start: datetime,
+        end: datetime,
+    ) -> list[float | None] | None:
+        """Return Brunata's own consumption for one meter, one entry per day.
+
+        Only the days that begin at or after `start` and before `end` are
+        returned, in Brunata's order. An entry is None where Brunata has no
+        figure for that day; it sends null for days it could not compute, and
+        that is not the same as zero. The whole result is None when Brunata's
+        answer does not contain the meter at all.
+
+        This is how sensor.py asks whether a fall in a heat cost allocator's
+        reading was the annual reset. Brunata zeroes allocators on a date set
+        by the building's billing period, which is not the same everywhere
+        and is not in any payload. Brunata's own consumption figures, however,
+        are computed across that reset: on the maintainer's account the day of
+        the 1 January 2026 reset shows ordinary positive consumption, not a
+        fall the size of the year's total.
+
+        The endpoint is the one Brunata's consumption page calls, read off the
+        browser's network inspector. It takes no meter id. It returns every
+        meter in one allocationUnit group, so the meter is picked out of the
+        answer by meterId.
+
+        The timestamps are sent the way the page sends them: local time with
+        milliseconds and an offset, e.g. 2026-09-11T00:00:00.000+02:00.
+        """
+        response = await self._async_authenticated_get(
+            f"{API_URL}/consumer/consumption",
+            params={
+                "startdate": start.isoformat(timespec="milliseconds"),
+                "enddate": end.isoformat(timespec="milliseconds"),
+                "interval": "D",
+                "allocationunit": allocation_unit,
+            },
+        )
+        return _parse_daily_consumption(_payload(response), meter_id, start, end)
+
     async def _async_ensure_lookup_tables(self) -> None:
         """Fetch the locale resource once per client, or fail the update.
 
@@ -722,7 +790,9 @@ class BrunataApiClient:
 
     # --- HTTP ---------------------------------------------------------------
 
-    async def _async_authenticated_get(self, url: str) -> httpx.Response:
+    async def _async_authenticated_get(
+        self, url: str, params: dict[str, str] | None = None
+    ) -> httpx.Response:
         """GET an API endpoint, retrying once with a brand-new login on 401/403.
 
         A cached token can look locally valid while the server no longer
@@ -731,12 +801,12 @@ class BrunataApiClient:
         fresh login. Only a 401 on *that* attempt means the credentials are no
         longer accepted.
 
-        Shared by both endpoints on purpose. Confined to the meters call, a
+        Shared by every endpoint on purpose. Confined to the meters call, a
         stale token on the locale resource would surface as "invalid JSON" —
         and since the tables are fetched once per client, that would repeat on
         every poll until something else happened to fix it.
         """
-        response = await self._async_get(url, force_login=False)
+        response = await self._async_get(url, force_login=False, params=params)
         if response.status_code not in (401, 403):
             return response
 
@@ -745,7 +815,7 @@ class BrunataApiClient:
             "fresh login",
             response.status_code,
         )
-        response = await self._async_get(url, force_login=True)
+        response = await self._async_get(url, force_login=True, params=params)
 
         if response.status_code in (401, 403):
             raise BrunataAuthError(
@@ -754,12 +824,19 @@ class BrunataApiClient:
             )
         return response
 
-    async def _async_get(self, url: str, *, force_login: bool) -> httpx.Response:
+    async def _async_get(
+        self,
+        url: str,
+        *,
+        force_login: bool,
+        params: dict[str, str] | None = None,
+    ) -> httpx.Response:
         """Log in if needed, then GET the URL with the API's expected headers."""
         await self._async_login(force=force_login)
         return await self._async_request(
             "GET",
             url,
+            params=params,
             headers={
                 "Authorization": f"{self._token_type} {self._access_token}",
                 "Referer": REFERER_URL,
@@ -1141,6 +1218,63 @@ def _payload(response: httpx.Response) -> Any:
     return payload
 
 
+def _parse_daily_consumption(
+    payload: Any, meter_id: str, start: datetime, end: datetime
+) -> list[float | None] | None:
+    """Pick one meter's daily figures out of a /consumer/consumption payload.
+
+    The payload shape, read off the live endpoint:
+
+        {"consumptionLines": [
+            {"meter": {"meterId": 4711, ...},
+             "consumptionValues": [
+                 {"fromDate": "2026-01-01T00:00:00+01:00",
+                  "toDate": "2026-01-02T00:00:00+01:00",
+                  "consumption": 7},
+                 ...]},
+            ...]}
+
+    Days are filtered by fromDate rather than trusted to match the request:
+    the live endpoint has been seen to return one day more than was asked for.
+    A day whose fromDate cannot be read is dropped for the same reason — it
+    cannot be placed inside or outside the period.
+
+    An unusable payload raises BrunataApiError, like every other parser here.
+    A usable payload without the meter returns None: the call worked, it just
+    has nothing to say about this meter.
+    """
+    if not isinstance(payload, dict):
+        raise BrunataApiError(
+            f"Expected a consumption object, got {type(payload).__name__}"
+        )
+    lines = payload.get("consumptionLines")
+    if not isinstance(lines, list):
+        raise BrunataApiError("Brunata consumption payload carried no consumptionLines")
+
+    for line in lines:
+        if not isinstance(line, dict):
+            continue
+        meter = line.get("meter")
+        if not isinstance(meter, dict) or str(meter.get("meterId")) != meter_id:
+            continue
+
+        values = line.get("consumptionValues")
+        if not isinstance(values, list):
+            return None
+
+        days: list[float | None] = []
+        for value in values:
+            if not isinstance(value, dict):
+                continue
+            from_date = parse_timestamp(value.get("fromDate"))
+            if from_date is None or not start <= from_date < end:
+                continue
+            days.append(_parse_value(value.get("consumption")))
+        return days
+
+    return None
+
+
 def _parse_meters(
     payload: Any,
     *,
@@ -1231,6 +1365,7 @@ def _parse_meters(
         decimals = item.get("decimals")
         placement = item.get("placement")
         transmitting = item.get("transmitting")
+        allocation_unit = item.get("allocationUnit")
 
         _LOGGER.debug(
             "Item %s: meterId=%r meterType=%r unit=%r decimals=%r "
@@ -1254,6 +1389,9 @@ def _parse_meters(
             unit=unit,
             value=value,
             reading_date=parse_reading_date(item.get("latestReadingDate")),
+            reading_time=_aware_or_none(
+                parse_timestamp(item.get("latestReadingDate"))
+            ),
             placement=placement if isinstance(placement, str) and placement else None,
             mounting_date=parse_timestamp(item.get("mountingDate")),
             # Three things have to hold before this becomes a display
@@ -1275,6 +1413,11 @@ def _parse_meters(
                 else None
             ),
             transmitting=transmitting if isinstance(transmitting, bool) else None,
+            allocation_unit=(
+                allocation_unit.strip()
+                if isinstance(allocation_unit, str) and allocation_unit.strip()
+                else None
+            ),
         )
 
     _LOGGER.debug("Parsed %s meters from Brunata", len(meters))
