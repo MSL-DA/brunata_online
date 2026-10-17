@@ -70,6 +70,7 @@ ISSUE_TRACKER_URL = "https://github.com/MSL-DA/brunata_online/issues"
 #   1 = heat cost allocator (radiator)
 #   2 = water
 #   5 = electricity
+#   6 = energy (heat meter)
 #
 # How those numbers are known, because it matters: Brunata's own meterType
 # table is returned by the locale resource, and a debug log from a live account
@@ -85,16 +86,22 @@ ISSUE_TRACKER_URL = "https://github.com/MSL-DA/brunata_online/issues"
 # which is a different table entirely. A meter type is added by reading the
 # meterType table, not by reasoning from a unit.
 #
-# The same table gives 6 = "Energy", and it is deliberately *not* listed. A
-# code being readable is not a reason to surface a meter type nobody has asked
-# for: energy meters appear to be sold to housing associations rather than to
-# private customers, so the first person to want one can say so and be the
-# person it gets tested against. Adding it is one number and one line in the
-# README. Leaving it out costs nothing until then.
+# The same table gives 6 = "Energy". It was left out until somebody had such a
+# meter, and issue #93 is that somebody: the user reports a missing heating
+# meter, and the log dropped exactly one meter that was still mounted, with
+# meterType 6. Nothing here was reasoned from a unit.
+#
+# What issue #93 does not show is the unit, because the allowlist drops a meter
+# before its unit is read. No special handling is needed for that: sensor.py
+# decides device class and state class from the resolved unit alone, so an
+# energy unit in UNIT_MAP gives an ENERGY sensor that only counts up, and
+# anything else gets the same cautious default as any unrecognised unit. A
+# heat meter is zeroed only when it is replaced, which _accept_reading()
+# already recognises; it is not in ANNUAL_RESET_METER_TYPES.
 #
 # _log_unsupported_meter() names the code of anything dropped, so the list is
 # extended by reading that line from a user's log, not by inference.
-SUPPORTED_METER_TYPES = frozenset({1, 2, 5})
+SUPPORTED_METER_TYPES = frozenset({1, 2, 5, 6})
 
 # Index 0 of Brunata's measurementUnit table is the literal string "undefined":
 # Brunata saying it has not stated a unit, which is the same position as a code
