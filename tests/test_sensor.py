@@ -525,6 +525,64 @@ async def test_every_annually_reset_type_is_a_supported_type():
     assert ANNUAL_RESET_METER_TYPES <= SUPPORTED_METER_TYPES
 
 
+# Every energy unit in Brunata's measurementUnit table, spelled exactly as the
+# table spells it. Issue #93 did not show which one a heat meter reports — the
+# allowlist dropped the meter before its unit was read — so all of them are
+# checked rather than one being picked.
+_BRUNATA_ENERGY_UNITS = (
+    ("Wh", UnitOfEnergy.WATT_HOUR),
+    ("kWh", UnitOfEnergy.KILO_WATT_HOUR),
+    ("MWh", UnitOfEnergy.MEGA_WATT_HOUR),
+    ("J", UnitOfEnergy.JOULE),
+    ("kJ", UnitOfEnergy.KILO_JOULE),
+    ("MJ", UnitOfEnergy.MEGA_JOULE),
+    ("GJ", UnitOfEnergy.GIGA_JOULE),
+    ("Kcal", UnitOfEnergy.KILO_CALORIE),
+    ("Mcal", UnitOfEnergy.MEGA_CALORIE),
+    ("GCal", UnitOfEnergy.GIGA_CALORIE),
+)
+
+
+@pytest.mark.parametrize(("raw_unit", "expected_unit"), _BRUNATA_ENERGY_UNITS)
+async def test_heat_meter_in_an_energy_unit_is_an_energy_sensor(
+    mock_meter, raw_unit, expected_unit
+):
+    """A heat meter (meterType 6, issue #93) in any energy unit Brunata can
+    send becomes an energy sensor that only counts up.
+
+    It is not reset once a year the way a heat cost allocator is: like water
+    and electricity it starts from zero only when the meter is replaced, which
+    _accept_reading() recognises on its own.
+    """
+    meter = replace(
+        mock_meter,
+        meter_type="Energy",
+        meter_type_code=6,
+        unit=raw_unit,
+        decimals=None,
+    )
+    entity = _make_entity(MagicMock(), meter)
+
+    assert entity.native_unit_of_measurement == expected_unit
+    assert entity.device_class == SensorDeviceClass.ENERGY
+    assert entity.state_class == SensorStateClass.TOTAL_INCREASING
+    assert entity.suggested_display_precision == 2
+    assert entity._resets_annually is False
+
+
+async def test_heat_meter_in_btu_gets_the_cautious_default(mock_meter):
+    """Btu is the one energy unit in Brunata's table that Home Assistant has
+    no constant for. A heat meter reporting it gets the same treatment as any
+    unrecognised unit: no device class, and not summed into statistics. See
+    _is_cumulative_unit()."""
+    meter = replace(mock_meter, meter_type="Energy", meter_type_code=6, unit="Btu")
+    entity = _make_entity(MagicMock(), meter)
+
+    assert entity.native_unit_of_measurement == "Btu"
+    assert entity.device_class is None
+    assert entity.state_class == SensorStateClass.MEASUREMENT
+
+
 async def test_january_window_is_not_consulted_once_a_date_is_known(mock_meter):
     """The other half: with a baseline in hand, only the year rule applies.
 
