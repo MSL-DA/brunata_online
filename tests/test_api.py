@@ -482,19 +482,19 @@ def test_one_unusable_unit_does_not_cost_the_other_meters():
     assert sorted(_parse([bad, good])) == ["good"]
 
 
-@pytest.mark.parametrize("code", [1, 2, 5])
+@pytest.mark.parametrize("code", [1, 2, 5, 6])
 def test_supported_meter_types_are_parsed(code):
-    """The three codes on the allowlist: 1 = heat cost allocator (radiator),
-    2 = water, 5 = electricity. All three are read off Brunata's own meterType
-    table rather than guessed, and all three have produced a working entity —
-    see SUPPORTED_METER_TYPES."""
+    """The four codes on the allowlist: 1 = heat cost allocator (radiator),
+    2 = water, 5 = electricity, 6 = energy (heat meter). All four are read off
+    Brunata's own meterType table rather than guessed, and each was added
+    because a real meter of that type turned up — see SUPPORTED_METER_TYPES."""
     item = _meter_item("abc")
     item["meterType"] = code
 
     assert "abc" in _parse([item])
 
 
-@pytest.mark.parametrize("code", [1, 2, 5])
+@pytest.mark.parametrize("code", [1, 2, 5, 6])
 def test_the_numeric_meter_type_is_carried_alongside_its_name(code):
     """sensor.py decides the 1 January reset from this number.
 
@@ -557,12 +557,12 @@ def test_the_allowlist_is_what_the_table_says_it_is():
     verified against real entities, which is what makes 5 a reading rather
     than the guess issue #39 refused to make.
 
-    Index 6 is asserted too, and is deliberately absent from the allowlist.
-    Knowing what a code means and choosing to surface it are separate
-    decisions, and this test holds both: the reading is recorded so nobody has
-    to find it again, and energy stays out until somebody has such a meter.
+    Index 6 was asserted here for a long time while staying off the
+    allowlist: knowing what a code means and choosing to surface it are
+    separate decisions. Issue #93 made the second one — a user with a heating
+    meter whose log showed meterType 6 being dropped.
     """
-    assert SUPPORTED_METER_TYPES == frozenset({1, 2, 5})
+    assert SUPPORTED_METER_TYPES == frozenset({1, 2, 5, 6})
     assert METER_TYPES[1] == "Radiator"
     assert METER_TYPES[2] == "Water"
     # Brunata's own entry has a trailing space. The fixture keeps it so the
@@ -570,7 +570,6 @@ def test_the_allowlist_is_what_the_table_says_it_is():
     # invented one.
     assert METER_TYPES[5] == "Electricity "
     assert METER_TYPES[6] == "Energy"
-    assert 6 not in SUPPORTED_METER_TYPES
 
     electricity = _meter_item("abc")
     electricity["meterType"] = 5
@@ -579,14 +578,23 @@ def test_the_allowlist_is_what_the_table_says_it_is():
     assert meter.meter_type == "Electricity"
     assert meter.unit == "kWh"
 
+    # GJ is one of the energy units in the table, picked for the check; which
+    # unit a heat meter actually reports is not known from issue #93.
+    heat = _meter_item("def")
+    heat["meterType"] = 6
+    heat["unit"] = 4
+    meter = _parse([heat])["def"]
+    assert meter.meter_type == "Energy"
+    assert meter.meter_type_code == 6
+    assert meter.unit == "GJ"
+
 
 # 12 and 13 are the smoke and leakage detectors, named explicitly because
-# they are the reason this boundary exists at all. 6 is energy: the table
-# names it, but it stays off the allowlist until somebody actually has one
-# — see SUPPORTED_METER_TYPES. 4 is gas and 3 is temperature: real types
-# Brunata can report that this integration has not been built for. 27 is
-# the last named entry in the table, -1 and 99 are outside it.
-@pytest.mark.parametrize("code", [0, 3, 4, 6, 9, 12, 13, 17, 27, -1, 99])
+# they are the reason this boundary exists at all. 4 is gas and 3 is
+# temperature: real types Brunata can report that this integration has not
+# been built for. 27 is the last named entry in the table, -1 and 99 are
+# outside it.
+@pytest.mark.parametrize("code", [0, 3, 4, 9, 12, 13, 17, 27, -1, 99])
 def test_unsupported_meter_types_never_become_entities(code):
     """The safety boundary. Brunata's portal can carry leak and smoke
     detectors, and this integration polls once an hour over a cloud API — up
@@ -599,10 +607,10 @@ def test_unsupported_meter_types_never_become_entities(code):
     moment to think very hard about why.
 
     Everything in this list is a code the table names or leaves empty, and
-    none of it is a guess: 3 is temperature, 4 is gas, 6 is energy, 12 and 13
-    are the detectors, and 20-26 are unfilled slots. Knowing what a code means
-    and choosing to surface it are separate decisions — 6 is the clearest
-    case, and it stays out until somebody actually has such a meter."""
+    none of it is a guess: 3 is temperature, 4 is gas, 12 and 13 are the
+    detectors, and 20-26 are unfilled slots. Knowing what a code means and
+    choosing to surface it are separate decisions; a type is added when
+    somebody actually has such a meter, as 6 was in issue #93."""
     item = _meter_item("abc")
     item["meterType"] = code
 
