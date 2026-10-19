@@ -26,7 +26,7 @@ Built for [Brunata Online](https://online.brunata.com) accounts. If Brunata Onli
 - Polls Brunata Online once an hour at a fixed time between xx:58:30 and xx:59:29. This time is automatically chosen when the integration is installed and remains the same afterwards. How often a *new* reading actually appears depends on the meter's own reporting interval, not on this schedule.
 
 > [!NOTE]
-> If you have a meter that isn't supported, please [open an issue](https://github.com/MSL-DA/brunata_online/issues).
+> If you have a meter that isn't supported, please [open an issue](https://github.com/MSL-DA/brunata_online/issues/new?template=bug_report.yml).
 
 ---
 
