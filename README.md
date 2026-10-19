@@ -34,7 +34,7 @@ Built for [Brunata Online](https://online.brunata.com) accounts. If Brunata Onli
 ### HACS (Recommended)
 
 1. Open **HACS** in Home Assistant
-2. Search for **Brunata** in HACS and click **⋮ → Download**
+2. Search for **Brunata** in HACS and click **⋮ Download**
 3. Restart Home Assistant
 
 ### Manual Installation
