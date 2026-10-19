@@ -34,15 +34,8 @@ Built for [Brunata Online](https://online.brunata.com) accounts. If Brunata Onli
 ### HACS (Recommended)
 
 1. Open **HACS** in Home Assistant
-2. Click the three-dot menu (top right) → **Custom Repositories**
-3. Add this repository:
-```
-https://github.com/MSL-DA/brunata_online
-```
-4. Set category to: **Integration**
-5. Click **Add**
-6. Search for **Brunata** in HACS and click **Download**
-7. Restart Home Assistant
+2. Search for **Brunata** in HACS and click **⋮ Download**
+3. Restart Home Assistant
 
 ### Manual Installation
 
