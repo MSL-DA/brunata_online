@@ -235,7 +235,7 @@ async def test_sensor_allocator_unit_is_passed_through_verbatim(mock_meter):
         assert entity.native_unit_of_measurement == raw_unit
         assert entity.device_class is None
 
-    # A meter with no usable unit no longer reaches this module at all: api.py
+    # A meter with no usable unit no longer reaches this module at all: api/parse.py
     # drops it rather than filling one in. See
     # test_a_meter_whose_unit_cannot_be_resolved_is_skipped in test_api.py.
 
@@ -611,7 +611,7 @@ async def test_annual_reset_follows_the_code_not_the_resolved_name(
     """meterType 1 is zeroed on 1 January whatever the lookup table calls it.
 
     The rule used to match the substring "radiator" in the resolved name. That
-    name is a translation Brunata owns, fetched in the language api.py's LOCALE
+    name is a translation Brunata owns, fetched in the language api/const.py's LOCALE
     asks for — so relabelling the entry, or ever changing the locale, would
     have turned the rule off with nothing failing. And because the cached value
     is never lowered, the rejected 1 January decrease would take every reading
@@ -1034,13 +1034,13 @@ def test_a_mapped_unit_counts_up_whatever_brunata_spelled_it(canonical):
         ("Btu", False),
         ("m³ per hour", False),
         # Entries from the parts of the table this integration never sees,
-        # because api.py filters on meter type before a unit is read at all.
+        # because api/parse.py filters on meter type before a unit is read at all.
         # They are here to pin this function's behaviour on any string, not to
         # suggest a supported meter could arrive carrying one.
         ("°C", False),
         ("%", False),
         ("ppm", False),
-        # Nothing at all. api.py drops a meter whose unit did not resolve, so
+        # Nothing at all. api/parse.py drops a meter whose unit did not resolve, so
         # this should not reach the function — the safe answer is still False.
         ("", False),
     ],
@@ -1526,7 +1526,7 @@ async def test_device_model_follows_a_meter_type_that_resolves_later(
     """A meter type that could not be resolved has to stop showing a raw code.
 
     Brunata sends the meter type as a number looked up in a table it serves.
-    api.py falls back to the raw number when that lookup fails, deliberately:
+    api/parse.py falls back to the raw number when that lookup fails, deliberately:
     the type reaches the device name and the `model` field on the device page
     and nothing else, since every decision is made on meter_type_code.
 
@@ -1602,7 +1602,7 @@ async def test_a_meter_that_disappears_from_the_payload_goes_unavailable(mock_me
 async def test_a_meter_skipped_for_an_unusable_unit_stays_available(mock_meter):
     """Missing from the payload is not the same as gone.
 
-    api.py drops a meter whose unit code did not resolve, so it cannot become
+    api/parse.py drops a meter whose unit code did not resolve, so it cannot become
     an entity carrying "8" where the user had "m³" — Home Assistant would treat
     that as a different measurement and discard the statistics behind the old
     one, permanently. But the meter is still on the wall.
@@ -1624,7 +1624,7 @@ async def test_a_meter_skipped_for_an_unusable_unit_stays_available(mock_meter):
     assert entity.available is True
 
     # The unit stopped resolving: the meter is gone from the payload, but
-    # api.py says it is only skipped.
+    # api/parse.py says it is only skipped.
     coordinator.data = {}
     coordinator.last_parse = ParseReport(frozenset({"12345"}), 1)
 

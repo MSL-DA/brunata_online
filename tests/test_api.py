@@ -25,10 +25,9 @@ from custom_components.brunata.api import (
     BrunataApiError,
     BrunataAuthError,
     BrunataConnectionError,
-    _parse_daily_consumption,
-    _parse_meters,
-    _payload,
 )
+from custom_components.brunata.api.http import _payload
+from custom_components.brunata.api.parse import _parse_daily_consumption, _parse_meters
 
 
 class FakeResponse:
@@ -291,9 +290,10 @@ def test_malformed_entries_are_skipped_not_fatal():
 @pytest.mark.parametrize("raw_value", ["12,5", "n/a", "", {}, []])
 def test_unparseable_reading_value_costs_one_meter_not_all_of_them(raw_value):
     """A bare float() would raise straight out of _parse_meters(), past every
-    error type api.py defines, and reach DataUpdateCoordinator as an unexpected
-    exception — so one bad row would cost every meter that update. Every other
-    field in the payload already degrades to None; this one has to as well."""
+    error type errors.py defines, and reach DataUpdateCoordinator as an
+    unexpected exception — so one bad row would cost every meter that update.
+    Every other field in the payload already degrades to None; this one has to
+    as well."""
     item = _meter_item("abc")
     item["latestReadingValue"] = raw_value
 
@@ -747,7 +747,7 @@ def test_a_skipped_meter_type_is_logged_once_per_run(caplog):
     item = _meter_item("logged-once-type")
     item["meterType"] = 13
 
-    with caplog.at_level(logging.INFO, logger="custom_components.brunata.api"):
+    with caplog.at_level(logging.INFO, logger="custom_components.brunata.api.parse"):
         _parse([item])
         _parse([item])
         _parse([item])
@@ -761,7 +761,7 @@ def test_a_skipped_unit_is_logged_once_per_run(caplog):
     item = _meter_item("logged-once-unit")
     item["unit"] = 99
 
-    with caplog.at_level(logging.WARNING, logger="custom_components.brunata.api"):
+    with caplog.at_level(logging.WARNING, logger="custom_components.brunata.api.parse"):
         _parse([item])
         _parse([item])
         _parse([item])
@@ -848,9 +848,9 @@ def test_an_empty_payload_parses_to_a_successful_update_with_no_meters():
         httpx.ReadTimeout("too slow"),
         httpx.RemoteProtocolError("garbled"),
         # The two RequestError adds over TransportError. Caught as
-        # TransportError only, these escaped api.py untranslated and reached
-        # the coordinator as unexpected exceptions with a traceback instead of
-        # as a clean retry.
+        # TransportError only, these escaped the client untranslated and
+        # reached the coordinator as unexpected exceptions with a traceback
+        # instead of as a clean retry.
         httpx.TooManyRedirects("redirect loop"),
         httpx.DecodingError("bad content-encoding"),
     ],

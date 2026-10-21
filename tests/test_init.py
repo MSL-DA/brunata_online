@@ -239,7 +239,7 @@ async def test_a_meter_skipped_for_an_unusable_unit_is_not_removable(
 ):
     """It is missing from the payload, but it is not gone.
 
-    api.py drops a meter whose unit did not resolve so it cannot become an
+    api/parse.py drops a meter whose unit did not resolve so it cannot become an
     entity carrying a raw code as its unit — but the meter is still on the
     wall, and Brunata is still listing it. Offering to delete it would take
     the entity and its long term statistics with it for a fault that clears
@@ -552,7 +552,7 @@ async def test_a_rate_limit_longer_than_a_day_is_capped(
     tops out at 999999999 days, so an earlier version — which built
     timedelta(seconds=err.retry_after) and only then compared it against the
     ceiling — raised OverflowError inside the except block that exists to
-    translate this error, and it escaped as an unexpected exception. api.py's
+    translate this error, and it escaped as an unexpected exception. api/http.py's
     guard does not catch these: every one of them is finite.
 
     1e12 is kept because it is the one that fits in a timedelta, so it would
