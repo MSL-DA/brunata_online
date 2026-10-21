@@ -31,20 +31,34 @@ PLATFORMS: list[Platform] = [Platform.SENSOR]
 
 type BrunataConfigEntry = ConfigEntry[BrunataDataUpdateCoordinator]
 
-# The poll lands somewhere in 58:30-59:29, so every install has at least 31
+# The poll lands somewhere in 59:15-59:44, so every install has at least 16
 # seconds left before the hour rolls over. That margin is for the request
 # itself to finish, not for a retry — there is none. Measured round trips are
-# 0.2-1.6 s, so it is generous; it is cheap and it means a slow response still
-# lands its reading in the hour it was taken.
+# 0.2-1.6 s, so it is ample for the ordinary case.
+#
+# Sixteen and not fifteen on purpose: it has to stay longer than
+# REQUEST_TIMEOUT, so a request started at the last possible second and running
+# into the timeout still ends inside the hour. A poll that has to log in first
+# makes three more requests and has never fitted that bound, at this window or
+# at the wider one before it. A reading that lands after the hour is booked by
+# Home Assistant in the following hour, which is the error this margin exists
+# to bound. Shorten the window further and that stops holding; shortening
+# REQUEST_TIMEOUT instead would only move the problem into the request.
+#
+# The spread is also what keeps installs off each other: 30 distinct poll
+# seconds rather than every instance hitting Brunata in the same one. That is
+# its only purpose — see async_should_poll() on why the schedule itself is
+# fixed.
 #
 # The spread must not push the last possible poll past 59:59.
-# _jittered_poll_time() carries seconds into minutes, so a spread of 120 would
-# hand async_track_time_change() a minute of 60, which is not a clock time and
-# fails at registration — the integration would load and then never poll.
+# _jittered_poll_time() carries seconds into minutes, so a spread that reaches
+# into the next minute would hand async_track_time_change() a minute of 60,
+# which is not a clock time and fails at registration — the integration would
+# load and then never poll.
 # test_the_poll_window_stays_inside_the_hour holds the three constants to that.
-_POLL_WINDOW_BASE_MINUTE = 58
-_POLL_WINDOW_BASE_SECOND = 30
-_POLL_WINDOW_SPREAD_SECONDS = 60
+_POLL_WINDOW_BASE_MINUTE = 59
+_POLL_WINDOW_BASE_SECOND = 15
+_POLL_WINDOW_SPREAD_SECONDS = 30
 
 # How long to stay away after an HTTP 429 with no usable Retry-After.
 #
@@ -86,7 +100,7 @@ def _entry_jitter_seconds(entry_id: str) -> int:
 
 
 def _jittered_poll_time(entry_id: str) -> tuple[int, int]:
-    """Return (minute, second) somewhere in the 58:30-59:29 window."""
+    """Return (minute, second) somewhere in the 59:15-59:44 window."""
     total_second = _POLL_WINDOW_BASE_SECOND + _entry_jitter_seconds(entry_id)
     minute = _POLL_WINDOW_BASE_MINUTE + total_second // 60
     second = total_second % 60
