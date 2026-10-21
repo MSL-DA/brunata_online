@@ -427,16 +427,33 @@ def _parse_meters(
         transmitting = item.get("transmitting")
         allocation_unit = item.get("allocationUnit")
 
+        # The reading and its timestamp are written out, not reduced to
+        # "has reading=True". The question a debug log is read to answer when a
+        # sensor looks stuck is whether Brunata sent anything new since the
+        # last poll, and a boolean cannot answer it: a meter reporting the same
+        # value for six hours and a meter reporting a new one every hour look
+        # identical. Two polls of this line side by side answer it.
+        #
+        # `value` is the parsed reading rather than the raw field, because that
+        # is what becomes the sensor's state. A raw value this integration
+        # refused — a bool, a non-finite number — is already logged by
+        # _parse_value(), so the pair still distinguishes "Brunata sent
+        # nothing" from "Brunata sent something unusable".
+        #
+        # latestReadingDate is logged raw, with its time and offset: the day
+        # alone is what every reset rule compares on, but the time is what
+        # tells two readings on the same day apart.
         _LOGGER.debug(
             "Item %s: meterId=%r meterType=%r unit=%r decimals=%r "
-            "transmitting=%r has reading=%s",
+            "transmitting=%r value=%r latestReadingDate=%r",
             index,
             raw_id,
             item.get("meterType"),
             item.get("unit"),
             decimals,
             transmitting,
-            value is not None,
+            value,
+            item.get("latestReadingDate"),
         )
 
         meters[str(raw_id)] = BrunataMeter(
