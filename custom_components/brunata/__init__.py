@@ -197,7 +197,7 @@ async def async_remove_config_entry_device(
       update was the only way `data` could be empty. It is not: an empty
       payload succeeds. raw_item_count is what distinguishes "Brunata listed
       meters and this one was not among them" from "Brunata listed nothing".
-    * *The unit did not resolve.* api.py drops such a meter so it cannot become
+    * *The unit did not resolve.* api/parse.py drops such a meter so it cannot become
       an entity carrying a raw code as its unit, but the meter is still on the
       wall. It is counted as present here.
 
@@ -365,7 +365,7 @@ class BrunataDataUpdateCoordinator(DataUpdateCoordinator[dict[str, BrunataMeter]
                 # days, and any Retry-After at or above 8.64e13 seconds raised
                 # OverflowError right here — inside the very except block that
                 # exists to translate this error, so it escaped as an
-                # unexpected exception. api.py already rejects inf and nan; a
+                # unexpected exception. api/http.py already rejects inf and nan; a
                 # finite number too large for a timedelta is the other half of
                 # the same guard, and it belongs here because how long we are
                 # willing to stay away is this module's decision.
