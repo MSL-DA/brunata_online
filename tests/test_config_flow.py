@@ -768,7 +768,7 @@ async def test_reconfigure_counts_a_meter_with_an_unresolved_unit_as_present(
     """A meter Brunata reported but whose unit code did not resolve is still on
     the wall.
 
-    api.py drops it from the parsed result so it cannot become an entity
+    api/parse.py drops it from the parsed result so it cannot become an entity
     carrying a raw number as its unit, and it names it in the parse report
     instead. Reading only the parsed meters here would call it gone and block a
     move that was legitimate.
