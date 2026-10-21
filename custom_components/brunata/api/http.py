@@ -1,8 +1,10 @@
-"""Reading an HTTP response from Brunata.
+"""Sending a request to Brunata and reading what comes back.
 
-The status codes that have their own meaning, the error body Brunata sends
-with HTTP 200, and the Retry-After header. Everything here works on a response
-that has already arrived; sending the request is the client's job.
+async_request() is the one place a transport failure becomes
+BrunataConnectionError, and both BrunataApiClient and BrunataAuth go through
+it. The rest works on a response that has already arrived: the status codes
+that have their own meaning, the error body Brunata sends with HTTP 200, and
+the Retry-After header.
 """
 
 from __future__ import annotations
@@ -13,7 +15,7 @@ from typing import Any
 
 import httpx
 
-from .errors import BrunataApiError, BrunataAuthError
+from .errors import BrunataApiError, BrunataAuthError, BrunataConnectionError
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -83,3 +85,39 @@ def _payload(response: httpx.Response) -> Any:
         raise BrunataApiError(f"Brunata returned error {code}: {message}", status)
 
     return payload
+
+
+async def async_request(
+    client: httpx.AsyncClient, method: str, url: str, **kwargs: Any
+) -> httpx.Response:
+    """Perform a request, mapping transport failures to our own error.
+
+    httpx.RequestError, not httpx.TransportError. Read off httpx's own
+    exception hierarchy rather than inferred from the names:
+
+        RequestError
+          + TransportError
+            - TimeoutException, NetworkError, ProtocolError,
+              ProxyError, UnsupportedProtocol
+          + DecodingError
+          + TooManyRedirects
+        HTTPStatusError
+        InvalidURL          <- outside RequestError
+
+    RequestError adds exactly two cases over TransportError, and both mean
+    the same thing as the rest: the request produced no usable response.
+    TooManyRedirects can only reach us from _async_authorize(), the one
+    call made with follow_redirects=True, and DecodingError from a broken
+    content-encoding somewhere in the path. Caught as TransportError only,
+    both escaped this module untranslated and reached the coordinator as
+    unexpected exceptions with a traceback, instead of as the clean retry
+    that keeps the last known values.
+
+    Not httpx.HTTPError: InvalidURL sits outside RequestError, so a URL
+    this integration built wrong keeps failing loudly instead of being
+    disguised as a network problem.
+    """
+    try:
+        return await client.request(method, url, **kwargs)
+    except httpx.RequestError as err:
+        raise BrunataConnectionError(f"Cannot reach Brunata: {err}") from err
