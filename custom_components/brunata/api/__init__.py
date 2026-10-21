@@ -16,10 +16,15 @@ The modules, and the order they depend on each other in:
     const      Addresses, headers, fixed values. Imports nothing.
     errors     The four error types. Imports nothing.
     models     BrunataMeter and the parse records. Imports nothing.
-    http       Reading a response that has arrived. Imports errors.
-    auth       The parts of the login that need no network.
-    parse      Payloads to objects, lookup tables, dates.
-    client     BrunataApiClient — the only module that makes requests.
+    http       Sending a request, and reading what comes back.
+    parse      Payloads to objects, lookup tables, dates. No network.
+    auth       BrunataAuth — the Keycloak login and the tokens.
+    client     BrunataApiClient — fetching Brunata's data.
+
+BrunataApiClient holds a BrunataAuth and asks it for an Authorization header;
+it never reads a token itself. Both are given the same HTTP client, because
+Keycloak's SSO cookies live on it — the client owns and closes it, the login
+only borrows it.
 
 What this file exports is the package's public surface: the rest of the
 integration imports from ``.api`` and nothing deeper. The underscored names in
