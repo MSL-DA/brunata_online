@@ -1,23 +1,45 @@
-"""The parts of the Keycloak login that are not requests.
+"""The Keycloak login: the flow, the tokens, and the checks around them.
 
-The login flow itself is driven by BrunataApiClient, which owns the HTTP
-client and the tokens. What lives here is everything that flow needs but can
-decide without the network: the regular expression that finds the login form,
-the check on where that form posts to, reading the authorization code back out
-of a redirect, and reading a token lifetime.
+BrunataAuth owns one account's credentials and the tokens minted for them, and
+is the only thing in the package that talks to Keycloak. BrunataApiClient holds
+one and asks it for an Authorization header; it never reads a token itself.
+
+Three requests at most, and usually none:
+
+    a usable access token          no request at all
+    an expired one, refresh held   one POST to the token endpoint
+    neither, or a forced login      authorize, credentials, code exchange
+
+The free functions below are the parts the flow needs but can decide without
+the network — finding the login form, checking where it posts to, reading the
+authorization code back out of a redirect, and reading a token lifetime.
 """
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import html
 import logging
 import math
 import re
+import secrets
+import time
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
-from .const import KC_REALM_BASE
-from .errors import BrunataApiError
+import httpx
+
+from .const import (
+    KC_AUTHORIZE_URL,
+    KC_CLIENT_ID,
+    KC_REALM_BASE,
+    KC_REDIRECT_URI,
+    KC_SCOPE,
+    KC_TOKEN_URL,
+)
+from .errors import BrunataApiError, BrunataAuthError
+from .http import _payload, async_request
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -124,3 +146,278 @@ def _checked_form_action(raw: str) -> str:
 def _code_from_url(url: Any) -> str | None:
     """Pull the OAuth authorization code out of a redirect URL."""
     return parse_qs(urlparse(str(url)).query).get("code", [None])[0]
+class BrunataAuth:
+    """Holds one account's credentials and the tokens minted for them."""
+
+    def __init__(self, email: str, password: str, http_client: httpx.AsyncClient) -> None:
+        """Take the HTTP client rather than build one.
+
+        The client is owned by BrunataApiClient, which closes it on unload.
+        This class only borrows it — and it has to be the same one, because
+        Keycloak's SSO cookies live on it and a forced login clears them.
+        """
+        self._email = email
+        self._password = password
+        self._client = http_client
+
+        self._access_token: str | None = None
+        self._token_type: str = "Bearer"
+        self._refresh_token: str | None = None
+        self._expires_at: float = 0.0
+
+    # --- What the rest of the package uses ----------------------------------
+
+    async def async_authorization(self, *, force: bool = False) -> str:
+        """Ensure a usable token and return the Authorization header value.
+
+        The finished header rather than the token and its type separately, so
+        the two are read in one place and cannot be paired up wrongly
+        somewhere else.
+
+        `force` means the server rejected a token this class believed was
+        good. See async_ensure_token().
+        """
+        await self.async_ensure_token(force=force)
+        return f"{self._token_type} {self._access_token}"
+
+    def diagnostics(self) -> dict[str, Any]:
+        """Report whether tokens are held, for the diagnostics download.
+
+        Whether, never which. An access token is a working credential, and
+        diagnostics files get attached to public issues.
+        """
+        return {
+            "has_access_token": self._access_token is not None,
+            "has_refresh_token": self._refresh_token is not None,
+        }
+
+    async def _async_request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
+        """Perform a request on the borrowed HTTP client.
+
+        The translation of a transport failure into BrunataConnectionError
+        lives in http.async_request(), because this class and
+        BrunataApiClient both need it and neither should reach into the other
+        for it.
+        """
+        return await async_request(self._client, method, url, **kwargs)
+
+    # --- The flow -----------------------------------------------------------
+
+    @property
+    def _token_is_usable(self) -> bool:
+        return bool(self._access_token) and time.time() < self._expires_at
+
+    def _store_tokens(self, payload: Any) -> None:
+        """Record a token response.
+
+        Every field is replaced rather than merged. Merging let an old expiry
+        survive a response that carried none, so an expired token could be
+        reported as usable and the login it needed was skipped.
+
+        The payload is checked for being a JSON object first, the same check
+        _async_ensure_lookup_tables() makes on the locale resource and for the
+        same reason. _payload() reads the status and looks for an error body,
+        but a body that is a list, a string or a bare null passes through it
+        untouched — and .get() on one of those raises AttributeError, which is
+        not a type either caller catches. It escaped _async_login(), escaped
+        async_get_meters() and reached the coordinator as an unexpected
+        exception with a traceback instead of a clean retry.
+
+        The traceback is the smaller half. It escaped from inside
+        _async_try_refresh() *before* the return that falls back to a full
+        login, so the same rejected refresh token was replayed every hour
+        until the entry was reloaded. BrunataApiError is the type both callers
+        already know what to do with.
+        """
+        if not isinstance(payload, dict):
+            raise BrunataApiError(
+                "Brunata returned a token response that is not an object: "
+                f"{type(payload).__name__}"
+            )
+
+        access_token = payload.get("access_token")
+        if not access_token:
+            raise BrunataApiError("Brunata returned no access token")
+
+        self._access_token = access_token
+        self._token_type = payload.get("token_type") or "Bearer"
+        self._refresh_token = payload.get("refresh_token")
+
+        expires_in = _expires_in_seconds(payload.get("expires_in"))
+        self._expires_at = (
+            time.time() + expires_in - _EXPIRY_MARGIN_SECONDS
+            if expires_in is not None
+            else 0.0
+        )
+
+    def _clear_tokens(self) -> None:
+        self._access_token = None
+        self._refresh_token = None
+        self._expires_at = 0.0
+
+    async def async_ensure_token(self, *, force: bool = False) -> None:
+        """Ensure a usable access token, doing as little work as possible."""
+        if not force:
+            if self._token_is_usable:
+                return
+            if await self._async_try_refresh():
+                return
+        else:
+            # The server rejected a token we believed was good. Keycloak's SSO
+            # cookies live on this same client, so keeping them would just mint
+            # another token from the very session that was refused — and the
+            # refresh token from that session is no better.
+            self._clear_tokens()
+            self._client.cookies.clear()
+
+        await self._async_browser_login()
+
+    async def _async_try_refresh(self) -> bool:
+        """Redeem the refresh token. Returns False to fall back to a login.
+
+        We request the offline_access scope, so Keycloak issues one. Using it
+        turns a renewal into a single POST instead of a three-request browser
+        login, which is faster and far less likely to trip bot protection.
+        """
+        if not self._refresh_token:
+            return False
+
+        response = await self._async_request(
+            "POST",
+            KC_TOKEN_URL,
+            data={
+                "grant_type": "refresh_token",
+                "client_id": KC_CLIENT_ID,
+                "refresh_token": self._refresh_token,
+            },
+            follow_redirects=False,
+        )
+        if response.status_code != 200:
+            _LOGGER.debug(
+                "Brunata refresh token rejected (%s) — falling back to a full login",
+                response.status_code,
+            )
+            return False
+
+        try:
+            self._store_tokens(_payload(response))
+        except BrunataApiError:
+            return False
+
+        _LOGGER.debug("Brunata access token renewed via refresh token")
+        return True
+
+    async def _async_browser_login(self) -> None:
+        """Run the OAuth 2.0 Authorization Code + PKCE flow by hand."""
+        # secrets.token_urlsafe uses only the unreserved characters RFC 7636
+        # allows, and always lands inside its 43-128 character range.
+        code_verifier = secrets.token_urlsafe(64)
+        code_challenge = (
+            base64.urlsafe_b64encode(hashlib.sha256(code_verifier.encode()).digest())
+            .decode()
+            .rstrip("=")
+        )
+
+        auth_code = await self._async_authorize(code_challenge)
+        response = await self._async_request(
+            "POST",
+            KC_TOKEN_URL,
+            data={
+                "grant_type": "authorization_code",
+                "client_id": KC_CLIENT_ID,
+                "redirect_uri": KC_REDIRECT_URI,
+                "code": auth_code,
+                "code_verifier": code_verifier,
+            },
+            follow_redirects=False,
+        )
+        if response.status_code != 200:
+            self._clear_tokens()
+            raise BrunataAuthError(
+                f"Brunata rejected the authorization code ({response.status_code})"
+            )
+
+        try:
+            self._store_tokens(_payload(response))
+        except BrunataApiError as err:
+            self._clear_tokens()
+            raise BrunataAuthError(str(err)) from err
+
+    async def _async_authorize(self, code_challenge: str) -> str:
+        """Obtain an authorization code, logging in if we have to."""
+        page = await self._async_request(
+            "GET",
+            KC_AUTHORIZE_URL,
+            params={
+                "client_id": KC_CLIENT_ID,
+                "redirect_uri": KC_REDIRECT_URI,
+                "scope": KC_SCOPE,
+                "response_type": "code",
+                "code_challenge": code_challenge,
+                "code_challenge_method": "S256",
+            },
+            follow_redirects=True,
+        )
+        if page.status_code >= 400:
+            raise BrunataApiError(
+                f"Brunata authorize endpoint returned {page.status_code}",
+                page.status_code,
+            )
+
+        # A live Keycloak SSO session redirects straight to the redirect URI
+        # with ?code=... and renders no form. That is success: treating the
+        # missing form as an error would prompt for credentials that work.
+        if auth_code := _code_from_url(page.url):
+            _LOGGER.debug("Brunata SSO session still active — no login form needed")
+            return auth_code
+
+        # Not a BrunataAuthError. Nothing here says the credentials are wrong;
+        # it says Keycloak rendered something this code no longer recognises.
+        # An auth error would open reauth and ask for a password that is
+        # perfectly valid, and the next attempt would fail in the same place.
+        # An API error becomes UpdateFailed, so HA retries and the log says
+        # what actually broke.
+        match = _KC_FORM_ACTION_RE.search(page.text)
+        if not match:
+            raise BrunataApiError(
+                "Brunata login form not found — the login flow has changed"
+            )
+
+        auth = await self._async_request(
+            "POST",
+            _checked_form_action(match.group(1)),
+            data={
+                "username": self._email,
+                "password": self._password,
+                "credentialId": "",
+            },
+            follow_redirects=False,
+        )
+        # On success Keycloak issues a redirect; on failure it re-renders the
+        # form with an error message.
+        if auth.status_code not in _REDIRECT_STATUSES:
+            raise BrunataAuthError(
+                "Brunata rejected the login — check the email and password"
+            )
+
+        # Both mean the credentials were accepted — Keycloak issued a redirect
+        # — and that what came back is not the shape this code expects. Same
+        # reasoning as the missing form above: an API error, not a prompt for
+        # credentials that already worked.
+        location = auth.headers.get("Location", "")
+        if not location.startswith(KC_REDIRECT_URI):
+            raise BrunataApiError(f"Unexpected redirect after login: {location}")
+
+        auth_code = _code_from_url(location)
+        if not auth_code:
+            raise BrunataApiError("Brunata returned no authorization code")
+
+        # Logged because the alternative routes each say so — the refresh
+        # ("access token renewed via refresh token") and the SSO shortcut
+        # ("SSO session still active"). Without this line a full login was the
+        # only path that produced no output at all, so a log could not tell
+        # "the refresh token is working" from "we log in from scratch every
+        # hour" — which is the difference between two requests per poll and
+        # four, and the one that matters to a bot-protected endpoint.
+        _LOGGER.debug("Brunata login form accepted the credentials")
+        return auth_code

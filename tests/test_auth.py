@@ -1,4 +1,4 @@
-"""Tests for the Keycloak login that replaces brunata_api's own.
+"""Tests for BrunataAuth, the Keycloak login.
 
 This is the most fragile code in the integration: it drives a browser login
 flow by hand, depends on the shape of Keycloak's HTML and redirects, and runs
@@ -20,10 +20,10 @@ from custom_components.brunata.api import (
     KC_CLIENT_ID,
     KC_REDIRECT_URI,
     KC_TOKEN_URL,
-    BrunataApiClient,
     BrunataApiError,
     BrunataAuthError,
 )
+from custom_components.brunata.api.auth import BrunataAuth
 
 LOGIN_FORM_HTML = (
     '<html><body><form id="kc-form-login" onsubmit="return true;" '
@@ -100,14 +100,14 @@ class FakeHttpClient:
         ]
 
 
-def make_client(http, *, access_token=None, refresh_token=None, expires_at=0.0):
-    """Build a BrunataApiClient wired to a fake HTTP client."""
-    client = BrunataApiClient("user@example.com", "s3cret", http)
-    client._access_token = access_token
-    client._token_type = "Bearer"
-    client._refresh_token = refresh_token
-    client._expires_at = expires_at
-    return client
+def make_auth(http, *, access_token=None, refresh_token=None, expires_at=0.0):
+    """Build a BrunataAuth wired to a fake HTTP client."""
+    auth = BrunataAuth("user@example.com", "s3cret", http)
+    auth._access_token = access_token
+    auth._token_type = "Bearer"
+    auth._refresh_token = refresh_token
+    auth._expires_at = expires_at
+    return auth
 
 
 def _authorize_with_form():
@@ -130,22 +130,43 @@ def _token_ok(payload=None):
 
 
 async def test_usable_token_skips_the_network_entirely():
-    """_async_login is called before every request; without the reuse check
-    each one would trigger a full browser login."""
+    """async_ensure_token() is called before every request; without the reuse
+    check each one would trigger a full browser login."""
     http = FakeHttpClient()
-    client = make_client(http, access_token="still-good", expires_at=time.time() + 300)
+    auth = make_auth(http, access_token="still-good", expires_at=time.time() + 300)
 
-    await client._async_login()
+    await auth.async_ensure_token()
+    assert http.requests == []
+
+
+async def test_the_authorization_header_carries_the_token_type_keycloak_sent():
+    """The header pairs the token with its type, and the type is not a constant.
+
+    _store_tokens() reads token_type off the response and falls back to
+    "Bearer" only when it is absent, so that is the one place the name
+    belongs. Writing it into the header instead would send "Bearer" on a token
+    Keycloak had typed differently, every request would come back 401, and
+    nothing in the log would say why.
+
+    Nothing held that in place: hardcoding "Bearer" in async_authorization()
+    left every other test in this file and in test_api.py green.
+    """
+    http = FakeHttpClient()
+    auth = make_auth(http, access_token="still-good", expires_at=time.time() + 300)
+    auth._token_type = "DPoP"
+
+    assert await auth.async_authorization() == "DPoP still-good"
+    # The token was usable, so the header cost no request.
     assert http.requests == []
 
 
 async def test_expired_token_is_not_reused():
     http = FakeHttpClient(token_posts=[_token_ok()])
-    client = make_client(
+    auth = make_auth(
         http, access_token="expired", refresh_token="r", expires_at=time.time() - 1
     )
 
-    await client._async_login()
+    await auth.async_ensure_token()
     assert http.request_methods() == ["POST token"]
 
 
@@ -153,14 +174,14 @@ async def test_refresh_token_avoids_the_browser_flow():
     """An expired access token with a live refresh token costs one POST, not a
     three-request login."""
     http = FakeHttpClient(token_posts=[_token_ok()])
-    client = make_client(http, refresh_token="old-refresh")
+    auth = make_auth(http, refresh_token="old-refresh")
 
-    await client._async_login()
+    await auth.async_ensure_token()
     assert http.request_methods() == ["POST token"]
     grant = http.requests[0][2]
     assert grant["grant_type"] == "refresh_token"
     assert grant["refresh_token"] == "old-refresh"
-    assert client._access_token == "new-access-token"
+    assert auth._access_token == "new-access-token"
 
 
 async def test_rejected_refresh_token_falls_back_to_full_login():
@@ -171,9 +192,9 @@ async def test_rejected_refresh_token_falls_back_to_full_login():
         form_post=_successful_form_post(),
         token_posts=[FakeResponse(status_code=400, json_data={}), _token_ok()],
     )
-    client = make_client(http, refresh_token="revoked")
+    auth = make_auth(http, refresh_token="revoked")
 
-    await client._async_login()
+    await auth.async_ensure_token()
     assert http.request_methods() == [
         "POST token",  # refresh attempt, rejected
         "GET other",   # authorize
@@ -193,9 +214,9 @@ async def test_live_sso_session_is_not_an_auth_failure():
     http = FakeHttpClient(
         authorize=_authorize_with_sso_redirect("sso-123"), token_posts=[_token_ok()]
     )
-    client = make_client(http)
+    auth = make_auth(http)
 
-    await client._async_login()
+    await auth.async_ensure_token()
     # No credential POST: the form was never needed.
     assert http.request_methods() == ["GET other", "POST token"]
     assert http.requests[-1][2]["code"] == "sso-123"
@@ -207,9 +228,9 @@ async def test_normal_login_posts_credentials_and_exchanges_the_code():
         form_post=_successful_form_post("form-abc"),
         token_posts=[_token_ok()],
     )
-    client = make_client(http)
+    auth = make_auth(http)
 
-    await client._async_login()
+    await auth.async_ensure_token()
 
     credentials = http.requests[1][2]
     assert credentials["username"] == "user@example.com"
@@ -232,8 +253,8 @@ async def test_normal_login_posts_credentials_and_exchanges_the_code():
         # Brunata's host over https, but a port nothing there listens on.
         "https://online.brunata.com:8443/iam/login-actions/authenticate?session_code=abc",
         # Relative. Reaches httpx as a URL with no host, where it raises
-        # httpx.InvalidURL — which _async_request() deliberately does not
-        # translate, so it would arrive as a traceback instead of this.
+        # httpx.InvalidURL — which http.async_request() deliberately does
+        # not translate, so it would arrive as a traceback instead of this.
         "/iam/login-actions/authenticate?session_code=abc",
     ],
 )
@@ -254,10 +275,10 @@ async def test_a_login_form_pointing_elsewhere_never_sees_the_password(action):
         f'action="{action}" method="post"></form></body></html>'
     )
     http = FakeHttpClient(authorize=FakeResponse(url=KC_AUTHORIZE_URL, text=html))
-    client = make_client(http)
+    auth = make_auth(http)
 
     with pytest.raises(BrunataApiError, match="login form posts to"):
-        await client._async_login()
+        await auth.async_ensure_token()
 
     # The authorize GET and nothing else: no credential POST was made at all.
     assert http.request_methods() == ["GET other"]
@@ -272,14 +293,14 @@ async def test_force_clears_sso_cookies_and_skips_refresh():
         form_post=_successful_form_post(),
         token_posts=[_token_ok()],
     )
-    client = make_client(
+    auth = make_auth(
         http,
         access_token="rejected",
         refresh_token="same-session",
         expires_at=time.time() + 300,
     )
 
-    await client._async_login(force=True)
+    await auth.async_ensure_token(force=True)
     assert http.cookies.cleared is True
     # No refresh attempt: the first request is the authorize GET.
     assert http.request_methods()[0] == "GET other"
@@ -291,12 +312,12 @@ async def test_wrong_credentials_raise_auth_error():
         authorize=_authorize_with_form(),
         form_post=FakeResponse(status_code=200, text=LOGIN_FORM_HTML),
     )
-    client = make_client(http)
+    auth = make_auth(http)
 
     # The message matters: a later guard would also reject this, but with an
     # error about the redirect target rather than the credentials.
     with pytest.raises(BrunataAuthError, match="check the email and password"):
-        await client._async_login()
+        await auth.async_ensure_token()
 
 
 async def test_missing_login_form_is_not_a_credentials_error():
@@ -310,10 +331,10 @@ async def test_missing_login_form_is_not_a_credentials_error():
     http = FakeHttpClient(
         authorize=FakeResponse(url=KC_AUTHORIZE_URL, text="<html></html>")
     )
-    client = make_client(http)
+    auth = make_auth(http)
 
     with pytest.raises(BrunataApiError):
-        await client._async_login()
+        await auth.async_ensure_token()
 
 
 async def test_unexpected_redirect_target_is_not_a_credentials_error():
@@ -325,10 +346,10 @@ async def test_unexpected_redirect_target_is_not_a_credentials_error():
             status_code=302, headers={"Location": "https://elsewhere.example/?code=x"}
         ),
     )
-    client = make_client(http)
+    auth = make_auth(http)
 
     with pytest.raises(BrunataApiError):
-        await client._async_login()
+        await auth.async_ensure_token()
 
 
 async def test_redirect_without_code_is_not_a_credentials_error():
@@ -339,10 +360,10 @@ async def test_redirect_without_code_is_not_a_credentials_error():
             headers={"Location": f"{KC_REDIRECT_URI}?error=access_denied"},
         ),
     )
-    client = make_client(http)
+    auth = make_auth(http)
 
     with pytest.raises(BrunataApiError):
-        await client._async_login()
+        await auth.async_ensure_token()
 
 
 async def test_token_endpoint_without_access_token_clears_state():
@@ -353,12 +374,12 @@ async def test_token_endpoint_without_access_token_clears_state():
     )
     # No refresh token, so the browser login runs and its token exchange is
     # the response under test.
-    client = make_client(http, access_token="stale")
+    auth = make_auth(http, access_token="stale")
 
     with pytest.raises(BrunataAuthError):
-        await client._async_login()
-    assert client._access_token is None
-    assert client._refresh_token is None
+        await auth.async_ensure_token()
+    assert auth._access_token is None
+    assert auth._refresh_token is None
 
 
 @pytest.mark.parametrize("payload", [[], "an error page", 42, None])
@@ -368,8 +389,8 @@ async def test_a_token_response_that_is_not_an_object_is_refused(payload):
     It reads the status and looks for an error body, but a list, a string or a
     bare null passes it untouched — and .get() on one of those raises
     AttributeError, which is not a type either caller of _store_tokens()
-    catches. It escaped _async_login(), escaped async_get_meters() and reached
-    the coordinator as an unexpected exception with a traceback.
+    catches. It escaped async_ensure_token(), escaped async_get_meters() and
+    reached the coordinator as an unexpected exception with a traceback.
 
     Not far-fetched: a gateway, a captive portal or a bot-protection page can
     answer 200 with perfectly valid JSON that is not the token object.
@@ -377,10 +398,10 @@ async def test_a_token_response_that_is_not_an_object_is_refused(payload):
     resource; the two tests below are what the type of error buys.
     """
     http = FakeHttpClient()
-    client = make_client(http)
+    auth = make_auth(http)
 
     with pytest.raises(BrunataApiError, match="not an object"):
-        client._store_tokens(payload)
+        auth._store_tokens(payload)
 
 
 async def test_a_refresh_answered_with_the_wrong_shape_falls_back_to_a_full_login():
@@ -397,9 +418,9 @@ async def test_a_refresh_answered_with_the_wrong_shape_falls_back_to_a_full_logi
         form_post=_successful_form_post(),
         token_posts=[FakeResponse(json_data=[]), _token_ok()],
     )
-    client = make_client(http, refresh_token="old-refresh")
+    auth = make_auth(http, refresh_token="old-refresh")
 
-    await client._async_login()
+    await auth.async_ensure_token()
 
     assert http.request_methods() == [
         "POST token",  # refresh attempt, answered with a list
@@ -407,7 +428,7 @@ async def test_a_refresh_answered_with_the_wrong_shape_falls_back_to_a_full_logi
         "POST other",  # credentials
         "POST token",  # code exchange
     ]
-    assert client._access_token == "new-access-token"
+    assert auth._access_token == "new-access-token"
 
 
 async def test_a_token_exchange_answered_with_the_wrong_shape_clears_state():
@@ -419,12 +440,12 @@ async def test_a_token_exchange_answered_with_the_wrong_shape_clears_state():
         form_post=_successful_form_post(),
         token_posts=[FakeResponse(json_data=["not", "an", "object"])],
     )
-    client = make_client(http, access_token="stale")
+    auth = make_auth(http, access_token="stale")
 
     with pytest.raises(BrunataAuthError):
-        await client._async_login()
-    assert client._access_token is None
-    assert client._refresh_token is None
+        await auth.async_ensure_token()
+    assert auth._access_token is None
+    assert auth._refresh_token is None
 
 
 async def test_expiry_is_derived_from_expires_in_only():
@@ -433,13 +454,13 @@ async def test_expiry_is_derived_from_expires_in_only():
     one's lifetime — otherwise a dead token is treated as good and the login it
     needed is skipped."""
     http = FakeHttpClient()
-    client = make_client(http)
+    auth = make_auth(http)
 
-    client._store_tokens({"access_token": "A", "expires_in": TOKEN_LIFETIME_SECONDS})
-    assert client._token_is_usable is True
+    auth._store_tokens({"access_token": "A", "expires_in": TOKEN_LIFETIME_SECONDS})
+    assert auth._token_is_usable is True
 
-    client._store_tokens({"access_token": "B"})
-    assert client._token_is_usable is False
+    auth._store_tokens({"access_token": "B"})
+    assert auth._token_is_usable is False
 
 
 @pytest.mark.parametrize("expires_in", ["one hour", "", [], {}, True, False, float("inf")])
@@ -448,9 +469,9 @@ async def test_an_unreadable_expires_in_does_not_escape_the_login(expires_in):
 
     A string that is not a number raised ValueError and a list raised
     TypeError. Both callers catch only BrunataApiError around that call, so
-    either one went straight out of _async_login(), out of async_get_meters()
-    and into the coordinator as an unexpected exception rather than as a clean
-    retry or reauth.
+    either one went straight out of async_ensure_token(), out of
+    async_get_meters() and into the coordinator as an unexpected exception
+    rather than as a clean retry or reauth.
 
     The right answer is the one an absent expires_in already gets: no usable
     expiry, so the token is not reused and the next request logs in again.
@@ -460,19 +481,19 @@ async def test_an_unreadable_expires_in_does_not_escape_the_login(expires_in):
     would otherwise be read as a one-second lifetime.
     """
     http = FakeHttpClient()
-    client = make_client(http)
+    auth = make_auth(http)
 
-    client._store_tokens({"access_token": "A", "expires_in": expires_in})
+    auth._store_tokens({"access_token": "A", "expires_in": expires_in})
 
-    assert client._access_token == "A"
-    assert client._token_is_usable is False
+    assert auth._access_token == "A"
+    assert auth._token_is_usable is False
 
 
 async def test_expiry_has_a_safety_margin():
     """A token expiring in a second must not be sent on a request that takes
     longer than that to complete."""
     http = FakeHttpClient()
-    client = make_client(http)
+    auth = make_auth(http)
 
-    client._store_tokens({"access_token": "A", "expires_in": 1})
-    assert client._token_is_usable is False
+    auth._store_tokens({"access_token": "A", "expires_in": 1})
+    assert auth._token_is_usable is False
