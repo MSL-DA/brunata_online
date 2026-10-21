@@ -146,7 +146,7 @@ ENERGY_UNITS = (
 # "undefined" entry. Either one would stand in for a unit Brunata had not
 # given us, producing a plausible-looking sensor carrying a unit nobody had
 # read — which Home Assistant treats as a different measurement, discarding the
-# history behind it. api.py drops such a meter instead, so anything reaching
+# history behind it. api/parse.py drops such a meter instead, so anything reaching
 # this module has a unit that resolved.
 ALLOCATOR_UNIT_MARKER = "unit"
 
@@ -193,7 +193,7 @@ def _as_date(value: date | datetime | str | None) -> date | None:
     be parsed back; anything unparseable disables the year rule and falls back
     to the December/January window.
 
-    The string case is api.py's parser, not a second copy of it: the restore
+    The string case is api/parse.py's parser, not a second copy of it: the restore
     store holds what we serialised from the API's own values, so there is one
     spelling of a Brunata date and one place that knows it. api.format_date()
     is the other direction of the same rule.
@@ -340,7 +340,7 @@ class BrunataSensor(
         self._attr_has_entity_name = True
         self._attr_translation_key = "consumption"
 
-        # api.py has already resolved the unit against Brunata's table and
+        # api/parse.py has already resolved the unit against Brunata's table and
         # dropped the meter if it could not, so this is a real unit name.
         raw_unit = meter.unit.strip()
         unit = UNIT_MAP.get(raw_unit.lower())
@@ -602,7 +602,7 @@ class BrunataSensor(
         poll. That split is what a user notices: the attribute says "Kitchen"
         and the device is still called "Water - Living room".
 
-        `model` carries the meter type, shown on the device page. api.py falls
+        `model` carries the meter type, shown on the device page. api/parse.py falls
         back to the raw code when Brunata's meter type table cannot resolve it,
         on the stated grounds that a device called "2" fixes itself once the
         table answers again. That only held for the name: the model was written
@@ -951,7 +951,7 @@ class BrunataSensor(
         the sensor keeps its value. reading_date is what tells you how fresh
         that value is.
 
-        Absence from the payload is not the same as being gone, though. api.py
+        Absence from the payload is not the same as being gone, though. api/parse.py
         also drops a meter whose unit it could not name this poll — rightly,
         because an entity carrying a raw code as its unit loses its statistics
         permanently — but that meter is still on the wall. Going unavailable
