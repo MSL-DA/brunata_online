@@ -349,11 +349,11 @@ def test_the_poll_window_stays_inside_the_hour():
     """The three constants have to be picked together, and nothing said so.
 
     _jittered_poll_time() carries seconds into minutes: base second plus the
-    jitter, divided by sixty, added to the base minute. With the spread at 60
-    the last possible poll is 59:29. Widen the spread to 120 and it becomes
-    60:29 — not a clock time. async_track_time_change() rejects it, the
-    listener is never registered, and the integration loads and then simply
-    never polls, with nothing in the log pointing at the cause.
+    jitter, divided by sixty, added to the base minute. With the base second at
+    15 and the spread at 30 the last possible poll is 59:44. Widen the spread
+    to 60 and it becomes 60:14 — not a clock time. async_track_time_change()
+    rejects it, the listener is never registered, and the integration loads and
+    then simply never polls, with nothing in the log pointing at the cause.
 
     Every jitter the spread can produce is walked rather than the sample real
     entry ids happen to give, and _jittered_poll_time() is called rather than
@@ -374,8 +374,8 @@ def test_the_poll_window_stays_inside_the_hour():
 
     # The window _jittered_poll_time()'s own docstring advertises. If the
     # constants move, that line moves with them.
-    assert times[0] == (58, 30)
-    assert times[-1] == (59, 29)
+    assert times[0] == (59, 15)
+    assert times[-1] == (59, 44)
 
 
 async def test_polling_is_driven_by_the_wall_clock(
@@ -384,7 +384,7 @@ async def test_polling_is_driven_by_the_wall_clock(
     """The coordinator has no update_interval on purpose.
 
     async_track_time_change ties polling to the wall clock at a per-entry
-    jittered (minute, second) in the 58:30-59:29 window, so it lands 30-90
+    jittered (minute, second) in the 59:15-59:44 window, so it lands 16-45
     seconds before each new hour no matter when Home Assistant last started or
     the integration was last reloaded, while different installs land at
     different seconds. The margin is for the request itself to finish inside
