@@ -34,21 +34,23 @@ Built for [Brunata Online](https://online.brunata.com) accounts. If Brunata Onli
 
 **Requires Home Assistant 2025.3 or newer.**
 
-### HACS (Recommended)
+### Marketplace — Home Assistant 2026.11 or newer
+
+1. Open [Brunata in the Marketplace](https://my.home-assistant.io/redirect/marketplace_repository/?owner=MSL-DA&repository=brunata_online&category=integration), or go to **Settings** → **Marketplace** and search for **Brunata**
+2. Install the integration
+3. Restart Home Assistant if you are asked to
+
+### HACS — Home Assistant 2026.10 or older
 
 1. Open **HACS** in Home Assistant
 2. Search for **Brunata** in HACS and click **⋮ Download**
 3. Restart Home Assistant
 
-### Manual Installation
-
-1. Download the `brunata` folder from `custom_components/`
-2. Copy it to your Home Assistant's `custom_components/` directory
-3. Restart Home Assistant
-
 ---
 
 ## ⚙️ Configuration
+
+Installing the integration does not set it up. Add your account afterwards:
 
 1. Go to **Settings** → **Devices & Services**
 2. Click **Add Integration**
