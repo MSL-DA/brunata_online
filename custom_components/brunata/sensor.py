@@ -277,6 +277,16 @@ async def async_setup_entry(
         reading — and the meter's id is recorded as registered whether or not
         both are later accepted by Home Assistant, which is what stops a second
         entity with the same unique id being offered on the next poll.
+
+        "Registered" means registered by *this* run of the platform.
+        known_meter_ids is an in-memory set on the coordinator, so it is empty
+        again after every restart and every reload of the entry, and the first
+        call then treats every meter on the account as one to register. That
+        creates nothing: Home Assistant matches each entity's unique id against
+        the entity registry, so the existing entities and their long term
+        statistics are picked up as they were. The set exists to keep the
+        *second* call of a given run from offering the same meters again, not
+        to remember anything across runs.
         """
         # `or {}` as in _apply_latest_reading(): the two places that read
         # coordinator.data should make the same assumption about it.
@@ -301,8 +311,12 @@ async def async_setup_entry(
                 )
             )
 
+        # "not yet registered", not "new": after a restart or a reload that is
+        # every meter on the account, and reading the line as a statement about
+        # the account rather than about this run is the obvious wrong
+        # conclusion to draw from it.
         _LOGGER.debug(
-            "Registering %s entities for %s meter(s) not seen before: %s",
+            "Registering %s entities for %s meter(s) not yet registered: %s",
             len(entities),
             len(unseen),
             ", ".join(meter_id for meter_id, _ in unseen),
@@ -456,9 +470,10 @@ class BrunataSensor(
             serial_number=meter.meter_no,
         )
         _LOGGER.debug(
-            "Initialized BrunataSensor for meter %s (%s)",
+            "Consumption entity built for meter %s (%s), shown as %r",
             self._meter_id,
-            meter.meter_type,
+            self._device_model,
+            self._device_name,
         )
 
     async def async_added_to_hass(self) -> None:
