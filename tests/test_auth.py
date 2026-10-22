@@ -16,10 +16,10 @@ import time
 import pytest
 
 from custom_components.brunata.api import (
-    KC_AUTHORIZE_URL,
-    KC_CLIENT_ID,
-    KC_REDIRECT_URI,
-    KC_TOKEN_URL,
+    AUTHORIZE_URL,
+    CLIENT_ID,
+    REDIRECT_URI,
+    TOKEN_URL,
     BrunataApiError,
     BrunataAuthError,
 )
@@ -84,7 +84,7 @@ class FakeHttpClient:
         if method == "GET":
             assert self._authorize is not None, "unexpected authorize request"
             return self._authorize
-        if url == KC_TOKEN_URL:
+        if url == TOKEN_URL:
             assert self._token_posts, "unexpected token request"
             return self._token_posts.pop(0)
         assert self._form_post is not None, "unexpected credential POST"
@@ -95,7 +95,7 @@ class FakeHttpClient:
 
     def request_methods(self):
         return [
-            f"{m} {'token' if url == KC_TOKEN_URL else 'other'}"
+            f"{m} {'token' if url == TOKEN_URL else 'other'}"
             for m, url, _ in self.requests
         ]
 
@@ -111,17 +111,17 @@ def make_auth(http, *, access_token=None, refresh_token=None, expires_at=0.0):
 
 
 def _authorize_with_form():
-    return FakeResponse(url=f"{KC_AUTHORIZE_URL}?client_id={KC_CLIENT_ID}", text=LOGIN_FORM_HTML)
+    return FakeResponse(url=f"{AUTHORIZE_URL}?client_id={CLIENT_ID}", text=LOGIN_FORM_HTML)
 
 
 def _authorize_with_sso_redirect(code="sso-code"):
     """Keycloak short-circuits straight to the redirect URI when SSO is live."""
-    return FakeResponse(url=f"{KC_REDIRECT_URI}?code={code}&state=xyz", text="")
+    return FakeResponse(url=f"{REDIRECT_URI}?code={code}&state=xyz", text="")
 
 
 def _successful_form_post(code="form-code"):
     return FakeResponse(
-        status_code=302, headers={"Location": f"{KC_REDIRECT_URI}?code={code}"}
+        status_code=302, headers={"Location": f"{REDIRECT_URI}?code={code}"}
     )
 
 
@@ -274,7 +274,7 @@ async def test_a_login_form_pointing_elsewhere_never_sees_the_password(action):
         '<html><body><form id="kc-form-login" '
         f'action="{action}" method="post"></form></body></html>'
     )
-    http = FakeHttpClient(authorize=FakeResponse(url=KC_AUTHORIZE_URL, text=html))
+    http = FakeHttpClient(authorize=FakeResponse(url=AUTHORIZE_URL, text=html))
     auth = make_auth(http)
 
     with pytest.raises(BrunataApiError, match="login form posts to"):
@@ -329,7 +329,7 @@ async def test_missing_login_form_is_not_a_credentials_error():
     BrunataApiError becomes UpdateFailed, which retries and says what broke.
     """
     http = FakeHttpClient(
-        authorize=FakeResponse(url=KC_AUTHORIZE_URL, text="<html></html>")
+        authorize=FakeResponse(url=AUTHORIZE_URL, text="<html></html>")
     )
     auth = make_auth(http)
 
@@ -357,7 +357,7 @@ async def test_redirect_without_code_is_not_a_credentials_error():
         authorize=_authorize_with_form(),
         form_post=FakeResponse(
             status_code=302,
-            headers={"Location": f"{KC_REDIRECT_URI}?error=access_denied"},
+            headers={"Location": f"{REDIRECT_URI}?error=access_denied"},
         ),
     )
     auth = make_auth(http)

@@ -31,32 +31,50 @@ from urllib.parse import parse_qs, urlparse
 import httpx
 
 from .const import (
-    KC_AUTHORIZE_URL,
-    KC_CLIENT_ID,
-    KC_REALM_BASE,
-    KC_REDIRECT_URI,
-    KC_SCOPE,
-    KC_TOKEN_URL,
+    AUTH_SCOPE,
+    AUTHORIZE_URL,
+    CLIENT_ID,
+    OIDC_BASE_URL,
+    REDIRECT_URI,
+    TOKEN_URL,
 )
 from .errors import BrunataApiError, BrunataAuthError
 from .http import _payload, async_request
 
 _LOGGER = logging.getLogger(__name__)
 
-# Keycloak renders the login form as <form id="kc-form-login" ... action="...">
-_KC_FORM_ACTION_RE = re.compile(
-    r'id="kc-form-login"[^>]*action="([^"]+)"', re.IGNORECASE
+# Where the login page keeps the address it wants the credentials posted to.
+#
+# The id is the server's, and the only part of the page this code depends on.
+# Anchored on the opening <form> tag so the id cannot be matched on some other
+# element that happens to carry it, and either quote style is accepted because
+# nothing guarantees the page keeps using double quotes. The attribute order is
+# the one the page has always served; if that ever changes this stops matching,
+# and _async_authorize() reports a changed flow rather than a bad password.
+_LOGIN_FORM_ACTION_RE = re.compile(
+    r"""<form[^>]*\bid=["']kc-form-login["'][^>]*\baction=["']([^"']+)["']""",
+    re.IGNORECASE,
 )
 
 
 # The email and password are posted to whatever address that action carries, so
 # the address is checked against this host first. See _checked_form_action().
-# Derived from KC_REALM_BASE rather than written out again: one spelling of
-# Brunata's host, and it follows the realm URL if that ever moves.
-_KC_HOST = urlparse(KC_REALM_BASE).hostname
+# Taken from OIDC_BASE_URL rather than written out again: one spelling of
+# Brunata's host, and it follows the provider if that ever moves.
+_AUTH_HOST = urlparse(OIDC_BASE_URL).hostname
 
 
-_REDIRECT_STATUSES = (301, 302, 303, 307, 308)
+# How the server answers the credential POST when it has accepted the login: a
+# redirect carrying the authorization code. Every HTTP redirect status except
+# 300 (Multiple Choices) and 304 (Not Modified), neither of which carries a
+# Location for a code to be read out of.
+#
+# Deliberately a status check and not httpx's own Response.is_redirect, which
+# additionally requires a Location header to be present. A redirect without one
+# has to fall through to the Location check further down, because that is the
+# branch that reports a changed flow; is_redirect would send it to the branch
+# that asks the user for a password which was never wrong.
+_LOGIN_ACCEPTED_STATUSES = frozenset({301, 302, 303, 307, 308})
 
 
 # Renew slightly before the server's own expiry, so a slow request or a little
@@ -108,7 +126,7 @@ def _checked_form_action(raw: str) -> str:
     attacker who can write into the page Brunata serves is not stopped by it,
     and it would break the login the day Keycloak is upgraded and its
     login-actions path moves. The observed action already sits outside the
-    realm base — /iam/login-actions/... rather than under KC_REALM_BASE — so
+    realm base — /iam/login-actions/... rather than under OIDC_BASE_URL — so
     the path is not stable enough to assert on.
 
     A relative action has no hostname and is refused here. It would otherwise
@@ -130,7 +148,7 @@ def _checked_form_action(raw: str) -> str:
         # is the point: it fails the check below and shows up in the message.
         port = -1
 
-    if parsed.scheme != "https" or parsed.hostname != _KC_HOST or port not in (None, 443):
+    if parsed.scheme != "https" or parsed.hostname != _AUTH_HOST or port not in (None, 443):
         # The scheme, host and port, never the whole URL: the action carries
         # Keycloak's one-time session_code, and this message reaches both the
         # log and the diagnostics download, which get attached to public
@@ -284,10 +302,10 @@ class BrunataAuth:
 
         response = await self._async_request(
             "POST",
-            KC_TOKEN_URL,
+            TOKEN_URL,
             data={
                 "grant_type": "refresh_token",
-                "client_id": KC_CLIENT_ID,
+                "client_id": CLIENT_ID,
                 "refresh_token": self._refresh_token,
             },
             follow_redirects=False,
@@ -321,11 +339,11 @@ class BrunataAuth:
         auth_code = await self._async_authorize(code_challenge)
         response = await self._async_request(
             "POST",
-            KC_TOKEN_URL,
+            TOKEN_URL,
             data={
                 "grant_type": "authorization_code",
-                "client_id": KC_CLIENT_ID,
-                "redirect_uri": KC_REDIRECT_URI,
+                "client_id": CLIENT_ID,
+                "redirect_uri": REDIRECT_URI,
                 "code": auth_code,
                 "code_verifier": code_verifier,
             },
@@ -347,11 +365,11 @@ class BrunataAuth:
         """Obtain an authorization code, logging in if we have to."""
         page = await self._async_request(
             "GET",
-            KC_AUTHORIZE_URL,
+            AUTHORIZE_URL,
             params={
-                "client_id": KC_CLIENT_ID,
-                "redirect_uri": KC_REDIRECT_URI,
-                "scope": KC_SCOPE,
+                "client_id": CLIENT_ID,
+                "redirect_uri": REDIRECT_URI,
+                "scope": AUTH_SCOPE,
                 "response_type": "code",
                 "code_challenge": code_challenge,
                 "code_challenge_method": "S256",
@@ -377,7 +395,7 @@ class BrunataAuth:
         # perfectly valid, and the next attempt would fail in the same place.
         # An API error becomes UpdateFailed, so HA retries and the log says
         # what actually broke.
-        match = _KC_FORM_ACTION_RE.search(page.text)
+        match = _LOGIN_FORM_ACTION_RE.search(page.text)
         if not match:
             raise BrunataApiError(
                 "Brunata login form not found — the login flow has changed"
@@ -395,7 +413,7 @@ class BrunataAuth:
         )
         # On success Keycloak issues a redirect; on failure it re-renders the
         # form with an error message.
-        if auth.status_code not in _REDIRECT_STATUSES:
+        if auth.status_code not in _LOGIN_ACCEPTED_STATUSES:
             raise BrunataAuthError(
                 "Brunata rejected the login — check the email and password"
             )
@@ -405,7 +423,7 @@ class BrunataAuth:
         # reasoning as the missing form above: an API error, not a prompt for
         # credentials that already worked.
         location = auth.headers.get("Location", "")
-        if not location.startswith(KC_REDIRECT_URI):
+        if not location.startswith(REDIRECT_URI):
             raise BrunataApiError(f"Unexpected redirect after login: {location}")
 
         auth_code = _code_from_url(location)
