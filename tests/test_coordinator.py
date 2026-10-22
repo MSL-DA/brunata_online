@@ -1,6 +1,6 @@
 """Tests for how the coordinator translates API errors.
 
-The fetching and parsing now live in api.py; all the coordinator does is map
+The fetching and parsing live in the api package; all the coordinator does is map
 the API layer's error types onto Home Assistant's. That mapping is what decides
 whether the user gets a re-authentication prompt, a quiet retry, or sensors
 frozen at their last value, so each branch is checked here.

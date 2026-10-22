@@ -105,7 +105,7 @@ def test_declared_minimum_is_not_newer_than_the_tested_version():
 
 
 def test_no_external_requirements():
-    """The Brunata client is vendored in api.py. Reintroducing an external
+    """The Brunata client is vendored in the api package. Reintroducing an external
     dependency means reintroducing a third party who can break the integration
     at runtime — if it is ever added back, pin it exactly and say so here."""
     assert MANIFEST["requirements"] == []
@@ -122,7 +122,7 @@ def test_manifest_and_hacs_agree_on_the_name():
 
 
 def test_the_issue_tracker_url_is_the_one_the_manifest_declares():
-    """api.py prints this URL in two log lines asking users to report a meter.
+    """api/parse.py prints this URL in two log lines asking users to report a meter.
 
     It is the same address as manifest.json's issue_tracker, written out a
     second time — so if the repository ever moves, one of them follows and the

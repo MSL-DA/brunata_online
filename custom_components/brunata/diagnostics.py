@@ -10,7 +10,7 @@ below are the ones that have actually been needed to diagnose faults in this
 integration — the lookup tables, the numeric meter type code, the resolved
 unit, and the coordinator's last error.
 
-The unit is a resolved name rather than the raw index. api.py skips any meter
+The unit is a resolved name rather than the raw index. api/parse.py skips any meter
 whose unit does not resolve, so a raw code cannot reach a BrunataMeter at all.
 meter_type_code is the one field that is the number Brunata sent.
 """
@@ -63,7 +63,7 @@ def _meter_diagnostics(meter: BrunataMeter) -> dict[str, Any]:
 def _api_status(err: BaseException | None) -> int | None:
     """Find the HTTP status behind a coordinator failure.
 
-    The coordinator never holds api.py's exception. _async_update_data()
+    The coordinator never holds the api package's own exception. _async_update_data()
     translates it — `raise UpdateFailed(str(err)) from err` — so last_exception
     is the translated one and ours is its __cause__. Reading the attribute off
     last_exception directly returns None every time, which is why the chain is

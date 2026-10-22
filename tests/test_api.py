@@ -25,10 +25,22 @@ from custom_components.brunata.api import (
     BrunataApiError,
     BrunataAuthError,
     BrunataConnectionError,
-    _parse_daily_consumption,
-    _parse_meters,
-    _payload,
 )
+from custom_components.brunata.api.http import _payload
+from custom_components.brunata.api.parse import _parse_daily_consumption, _parse_meters
+
+
+def _mark_logged_in(client, *, token="T", token_type="Bearer"):
+    """Give the client a token good for the next five minutes.
+
+    The tokens live on BrunataAuth rather than on the client, so a test that
+    only needs to get past the login check reaches through to it here instead
+    of in nine separate places. What BrunataAuth itself does is tested in
+    test_auth.py.
+    """
+    client._auth._access_token = token
+    client._auth._token_type = token_type
+    client._auth._expires_at = time.time() + 300
 
 
 class FakeResponse:
@@ -291,9 +303,10 @@ def test_malformed_entries_are_skipped_not_fatal():
 @pytest.mark.parametrize("raw_value", ["12,5", "n/a", "", {}, []])
 def test_unparseable_reading_value_costs_one_meter_not_all_of_them(raw_value):
     """A bare float() would raise straight out of _parse_meters(), past every
-    error type api.py defines, and reach DataUpdateCoordinator as an unexpected
-    exception — so one bad row would cost every meter that update. Every other
-    field in the payload already degrades to None; this one has to as well."""
+    error type errors.py defines, and reach DataUpdateCoordinator as an
+    unexpected exception — so one bad row would cost every meter that update.
+    Every other field in the payload already degrades to None; this one has to
+    as well."""
     item = _meter_item("abc")
     item["latestReadingValue"] = raw_value
 
@@ -747,7 +760,7 @@ def test_a_skipped_meter_type_is_logged_once_per_run(caplog):
     item = _meter_item("logged-once-type")
     item["meterType"] = 13
 
-    with caplog.at_level(logging.INFO, logger="custom_components.brunata.api"):
+    with caplog.at_level(logging.INFO, logger="custom_components.brunata.api.parse"):
         _parse([item])
         _parse([item])
         _parse([item])
@@ -761,7 +774,7 @@ def test_a_skipped_unit_is_logged_once_per_run(caplog):
     item = _meter_item("logged-once-unit")
     item["unit"] = 99
 
-    with caplog.at_level(logging.WARNING, logger="custom_components.brunata.api"):
+    with caplog.at_level(logging.WARNING, logger="custom_components.brunata.api.parse"):
         _parse([item])
         _parse([item])
         _parse([item])
@@ -848,9 +861,9 @@ def test_an_empty_payload_parses_to_a_successful_update_with_no_meters():
         httpx.ReadTimeout("too slow"),
         httpx.RemoteProtocolError("garbled"),
         # The two RequestError adds over TransportError. Caught as
-        # TransportError only, these escaped api.py untranslated and reached
-        # the coordinator as unexpected exceptions with a traceback instead of
-        # as a clean retry.
+        # TransportError only, these escaped the client untranslated and
+        # reached the coordinator as unexpected exceptions with a traceback
+        # instead of as a clean retry.
         httpx.TooManyRedirects("redirect loop"),
         httpx.DecodingError("bad content-encoding"),
     ],
@@ -958,8 +971,7 @@ async def test_the_lookup_tables_are_loaded_before_the_meters_are_parsed():
             return FakeResponse(200, json_data=[_meter_item("abc")])
 
     client = BrunataApiClient("user@example.com", "s3cret", FakeHttp())
-    client._access_token = "T"
-    client._expires_at = time.time() + 300
+    _mark_logged_in(client)
 
     meters = await client.async_get_meters()
 
@@ -977,8 +989,7 @@ async def test_the_parse_report_describes_the_call_it_came_from():
             return FakeResponse(200, json_data=[_meter_item("abc")])
 
     client = BrunataApiClient("user@example.com", "s3cret", FakeHttp())
-    client._access_token = "T"
-    client._expires_at = time.time() + 300
+    _mark_logged_in(client)
     client._meter_types = METER_TYPES
     client._measurement_units = MEASUREMENT_UNITS
     client._lookup_tables_loaded = True
@@ -1174,10 +1185,9 @@ async def test_daily_consumption_is_requested_the_way_the_page_requests_it():
     client = BrunataApiClient("user@example.com", "s3cret", FakeHttp())
 
     async def _fake_login(*, force=False):
-        client._access_token = "T"
-        client._expires_at = time.time() + 300
+        _mark_logged_in(client)
 
-    client._async_login = _fake_login
+    client._auth.async_ensure_token = _fake_login
 
     days = await client.async_get_daily_consumption(
         "4711",
@@ -1240,9 +1250,7 @@ async def test_meters_are_fetched_from_metersforconsumer():
             return FakeResponse(200, json_data=[_meter_item("abc")])
 
     client = BrunataApiClient("user@example.com", "s3cret", FakeHttp())
-    client._access_token = "T"
-    client._token_type = "Bearer"
-    client._expires_at = time.time() + 300
+    _mark_logged_in(client)
     client._meter_types = METER_TYPES
     client._measurement_units = MEASUREMENT_UNITS
     client._lookup_tables_loaded = True
@@ -1276,10 +1284,9 @@ async def test_stale_token_on_the_locale_endpoint_retries_with_a_fresh_login():
 
     async def _fake_login(*, force=False):
         logins.append(force)
-        client._access_token = "T"
-        client._expires_at = time.time() + 300
+        _mark_logged_in(client)
 
-    client._async_login = _fake_login
+    client._auth.async_ensure_token = _fake_login
 
     await client._async_ensure_lookup_tables()
 
@@ -1307,10 +1314,9 @@ async def test_a_rejected_token_is_retried_once_with_a_fresh_login(status):
 
     async def _fake_login(*, force=False):
         logins.append(force)
-        client._access_token = "T"
-        client._expires_at = time.time() + 300
+        _mark_logged_in(client)
 
-    client._async_login = _fake_login
+    client._auth.async_ensure_token = _fake_login
 
     response = await client._async_authenticated_get(
         f"{API_URL}/consumer/metersforconsumer"
@@ -1343,10 +1349,9 @@ async def test_a_token_rejected_after_a_fresh_login_is_an_auth_error(status):
 
     async def _fake_login(*, force=False):
         logins.append(force)
-        client._access_token = "T"
-        client._expires_at = time.time() + 300
+        _mark_logged_in(client)
 
-    client._async_login = _fake_login
+    client._auth.async_ensure_token = _fake_login
 
     with pytest.raises(BrunataAuthError, match="even after a fresh login"):
         await client._async_authenticated_get(
@@ -1359,10 +1364,11 @@ async def test_a_token_rejected_after_a_fresh_login_is_an_auth_error(status):
 async def test_client_diagnostics_reports_tokens_without_quoting_them():
     """An access token is a working credential for as long as it lives, and a
     diagnostics file gets attached to public issues. The decision about what is
-    safe to publish belongs on the client, next to the fields."""
+    safe to publish belongs next to the fields: the lookup tables on the
+    client, and the two token keys on BrunataAuth, which owns the tokens."""
     client = BrunataApiClient("user@example.com", "s3cret", object())
-    client._access_token = "secret-access-token"
-    client._refresh_token = "secret-refresh-token"
+    client._auth._access_token = "secret-access-token"
+    client._auth._refresh_token = "secret-refresh-token"
     client._meter_types = ["Collector", "Radiator"]
     client._measurement_units = ["undefined", "units"]
     client._lookup_tables_loaded = True
@@ -1413,8 +1419,7 @@ async def test_empty_lookup_tables_fail_the_update_instead_of_creating_wrong_uni
             return FakeResponse(200, json_data={"mappers": mappers})
 
     client = BrunataApiClient("user@example.com", "s3cret", FakeHttp())
-    client._access_token = "T"
-    client._expires_at = time.time() + 300
+    _mark_logged_in(client)
 
     with pytest.raises(BrunataApiError, match="cannot be resolved"):
         await client._async_ensure_lookup_tables()
@@ -1438,8 +1443,7 @@ async def test_unexpected_locale_payload_is_a_clean_error(payload):
             return FakeResponse(200, json_data=payload)
 
     client = BrunataApiClient("user@example.com", "s3cret", FakeHttp())
-    client._access_token = "T"
-    client._expires_at = time.time() + 300
+    _mark_logged_in(client)
 
     with pytest.raises(BrunataApiError):
         await client._async_ensure_lookup_tables()

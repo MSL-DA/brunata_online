@@ -130,7 +130,7 @@ async def _async_missing_meters(
     validate_input() does, so a caller needs one of the two and not both.
 
     A meter Brunata skipped this poll because its unit code did not resolve
-    counts as reported. It is still on the wall — api.py drops it from the
+    counts as reported. It is still on the wall — api/parse.py drops it from the
     parsed result only so it cannot become an entity carrying a raw code as its
     unit — and treating it as gone would block a move that was legitimate.
     """
