@@ -64,17 +64,25 @@ async def _restore(entity, last_state, last_extra=None):
         await entity.async_added_to_hass()
 
 
-async def test_sensor_setup(hass: HomeAssistant, mock_brunata_client, mock_meter):
-    """Test sensor setup and state."""
+async def test_a_reported_meter_becomes_a_consumption_sensor(
+    hass: HomeAssistant, mock_brunata_client, mock_meter
+):
+    """Setting the entry up turns the one meter Brunata reports into an entity.
+
+    Found by unique id through the entity registry, the same way
+    _setup_reading_time() below finds its own entity, rather than by scanning
+    the state machine for an entity id that ends in "_consumption". The entity
+    id follows the friendly name and moves whenever the meter's placement label
+    changes in Brunata Online; the unique id is the string Home Assistant hangs
+    the entity's long term statistics on and must never move. Asserting on the
+    one that is allowed to change is how a renamed meter would fail this test
+    for no reason — or, worse, pass it by matching some other entity.
+    """
     entry = MockConfigEntry(
         domain=DOMAIN,
-        data={
-            "email": "test@example.com",
-            "password": "password123",
-        },
+        data={"email": "test@example.com", "password": "password123"},
     )
     entry.add_to_hass(hass)
-
     mock_brunata_client.async_get_meters = AsyncMock(
         return_value={"12345": mock_meter}
     )
@@ -82,13 +90,8 @@ async def test_sensor_setup(hass: HomeAssistant, mock_brunata_client, mock_meter
     await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done()
 
-    entity_id = next(
-        (
-            entity_id
-            for entity_id in hass.states.async_entity_ids(SENSOR_DOMAIN)
-            if entity_id.endswith("_consumption")
-        ),
-        None,
+    entity_id = er.async_get(hass).async_get_entity_id(
+        SENSOR_DOMAIN, DOMAIN, "brunata_12345_consumption"
     )
     assert entity_id is not None
 
