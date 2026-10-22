@@ -196,7 +196,7 @@ class BrunataConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             except InvalidAuth:
                 errors["base"] = "invalid_auth"
             except Exception:  # pylint: disable=broad-except
-                _LOGGER.exception("Unexpected error during config flow")
+                _LOGGER.exception("Unhandled error in the user step; showing 'unknown'")
                 errors["base"] = "unknown"
 
         return self.async_show_form(
@@ -263,7 +263,7 @@ class BrunataConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             except InvalidAuth:
                 errors["base"] = "invalid_auth"
             except Exception:  # pylint: disable=broad-except
-                _LOGGER.exception("Unexpected error during re-authentication")
+                _LOGGER.exception("Unhandled error in the reauth step; showing 'unknown'")
                 errors["base"] = "unknown"
 
         return self.async_show_form(
@@ -345,7 +345,7 @@ class BrunataConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             except InvalidAuth:
                 errors["base"] = "invalid_auth"
             except Exception:  # pylint: disable=broad-except
-                _LOGGER.exception("Unexpected error during reconfiguration")
+                _LOGGER.exception("Unhandled error in the reconfigure step; showing 'unknown'")
                 errors["base"] = "unknown"
             else:
                 if missing:
