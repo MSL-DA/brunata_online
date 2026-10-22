@@ -28,7 +28,7 @@ async def _setup(hass: HomeAssistant, mock_brunata_client, mock_meter):
         return_value={"12345": mock_meter}
     )
     # diagnostics.py asks the client for this rather than reading five private
-    # attributes off it; what the report may contain is decided in api.py, and
+    # attributes off it; what the report may contain is decided in api/client.py, and
     # tested there by test_client_diagnostics_reports_tokens_without_quoting_them.
     mock_brunata_client.diagnostics.return_value = {
         "lookup_tables_loaded": True,
@@ -107,7 +107,7 @@ async def test_diagnostics_reports_the_http_status_of_the_last_failure(
     """Separately from the message, so a report can be read without parsing
     prose: 429 means back off, 500 means Brunata is having a bad day.
 
-    Note what this exercises. The coordinator never holds api.py's exception —
+    Note what this exercises. The coordinator never holds the api package's own exception —
     _async_update_data() raises UpdateFailed(...) from err, so last_exception
     is the translated one and ours is its __cause__. Reading .status off
     last_exception directly returns None every time, which is what the first
