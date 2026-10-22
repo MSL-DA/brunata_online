@@ -112,103 +112,139 @@ async def test_validate_input_always_closes_the_client(
     mock_brunata_client.async_close.assert_awaited_once()
 
 
-async def test_flow_user_init(hass: HomeAssistant):
-    """Test the initialization of the form in the config flow."""
+# --- The user step ---------------------------------------------------------
+#
+# validate_input() is stubbed throughout: the real one builds an API client and
+# performs a live login, and it has its own tests above. What is under test
+# here is the dialog around it — which step is shown, what is stored, and what
+# the user is told when the login does not go through.
+
+_VALIDATE_INPUT = "custom_components.brunata.config_flow.validate_input"
+
+# What validate_input() returns for CREDENTIALS. Spelled out rather than
+# imported from _entry_title(), so a change to the title format has to be
+# agreed with the test above that asserts the format itself, instead of every
+# stub in this file silently following it.
+ENTRY_TITLE = "Brunata (test@example.com)"
+
+
+async def test_the_dialog_opens_on_the_credentials_form(hass: HomeAssistant):
+    """Adding the integration asks for credentials and nothing else.
+
+    The step id is what decides which translation strings the frontend shows,
+    so it is asserted rather than taken on trust.
+    """
     result = await hass.config_entries.flow.async_init(
         DOMAIN, context={"source": config_entries.SOURCE_USER}
     )
+
     assert result["type"] == data_entry_flow.FlowResultType.FORM
     assert result["step_id"] == "user"
+    assert not result.get("errors")
 
 
-async def test_flow_user_success(hass: HomeAssistant, mock_brunata_client):
-    """Test a successful user login."""
-    result = await hass.config_entries.flow.async_init(
+async def test_accepted_credentials_are_stored_on_a_new_entry(
+    hass: HomeAssistant, mock_brunata_client
+):
+    """A login that goes through ends the dialog and keeps what was typed.
+
+    The stored data is asserted in full: the entry is the only place the
+    password lives, and the integration cannot log in again without it.
+    """
+    form = await hass.config_entries.flow.async_init(
         DOMAIN, context={"source": config_entries.SOURCE_USER}
     )
 
-    with patch(
-        "custom_components.brunata.config_flow.validate_input",
-        return_value={"title": "test@example.com"},
-    ):
-        result2 = await hass.config_entries.flow.async_configure(
-            result["flow_id"],
-            {
-                "email": "test@example.com",
-                "password": "password123",
-            },
+    with patch(_VALIDATE_INPUT, return_value={"title": ENTRY_TITLE}):
+        result = await hass.config_entries.flow.async_configure(
+            form["flow_id"], dict(CREDENTIALS)
         )
         await hass.async_block_till_done()
 
-    assert result2["type"] == data_entry_flow.FlowResultType.CREATE_ENTRY
-    assert result2["title"] == "test@example.com"
-    assert result2["data"] == {
-        "email": "test@example.com",
-        "password": "password123",
-    }
+    assert result["type"] == data_entry_flow.FlowResultType.CREATE_ENTRY
+    assert result["title"] == ENTRY_TITLE
+    assert result["data"] == CREDENTIALS
 
 
-async def test_flow_user_invalid_auth(hass: HomeAssistant, mock_brunata_client):
-    """Test invalid authentication handling."""
-    result = await hass.config_entries.flow.async_init(
+@pytest.mark.parametrize(
+    ("raised", "shown"),
+    [
+        (InvalidAuth, "invalid_auth"),
+        (CannotConnect, "cannot_connect"),
+        (RuntimeError, "unknown"),
+    ],
+)
+async def test_a_rejected_login_leaves_the_form_open_with_a_reason(
+    hass: HomeAssistant, mock_brunata_client, raised, shown
+):
+    """Each failure has to come back as its own message on the same form.
+
+    All three paths matter and none of them were covered before. A connection
+    problem reported as "invalid_auth" sends the user off changing a password
+    that was never wrong, and an unexpected error reported as either of the
+    other two hides a bug behind advice that cannot help.
+    """
+    form = await hass.config_entries.flow.async_init(
         DOMAIN, context={"source": config_entries.SOURCE_USER}
     )
 
-    with patch(
-        "custom_components.brunata.config_flow.validate_input",
-        side_effect=InvalidAuth,
-    ):
-        result2 = await hass.config_entries.flow.async_configure(
-            result["flow_id"],
-            {
-                "email": "test@example.com",
-                "password": "wrong_password",
-            },
+    with patch(_VALIDATE_INPUT, side_effect=raised):
+        result = await hass.config_entries.flow.async_configure(
+            form["flow_id"], dict(CREDENTIALS)
         )
         await hass.async_block_till_done()
 
-    assert result2["type"] == data_entry_flow.FlowResultType.FORM
-    assert result2["errors"] == {"base": "invalid_auth"}
+    assert result["type"] == data_entry_flow.FlowResultType.FORM
+    assert result["step_id"] == "user"
+    assert result["errors"] == {"base": shown}
 
 
-async def test_flow_reauth(hass: HomeAssistant, mock_brunata_client):
-    """Test a successful re-authentication updates and reloads the entry."""
+# --- Re-authentication ------------------------------------------------------
+
+
+async def test_reauth_replaces_the_stored_password(
+    hass: HomeAssistant, mock_brunata_client
+):
+    """Re-authenticating writes the new password onto the existing entry.
+
+    The entry is reloaded on success, which is why the coordinator's update is
+    stubbed as well: without it the reload performs a real refresh and the
+    assertions below race it.
+
+    Asserted on the entry rather than on the flow result, because storing the
+    password is the entire point of the step — an abort with
+    "reauth_successful" that left the old password behind would look like a
+    success and fail on the next poll.
+    """
     entry = MockConfigEntry(
         domain=DOMAIN,
-        unique_id="test@example.com",
-        data={
-            "email": "test@example.com",
-            "password": "old_password",
-        },
+        unique_id=CREDENTIALS["email"],
+        data={"email": CREDENTIALS["email"], "password": "expired-password"},
     )
     entry.add_to_hass(hass)
 
-    result = await hass.config_entries.flow.async_init(
+    form = await hass.config_entries.flow.async_init(
         DOMAIN,
         context={"source": config_entries.SOURCE_REAUTH, "entry_id": entry.entry_id},
     )
-    assert result["type"] == data_entry_flow.FlowResultType.FORM
-    assert result["step_id"] == "reauth_confirm"
+    assert form["type"] == data_entry_flow.FlowResultType.FORM
+    assert form["step_id"] == "reauth_confirm"
 
-    with patch(
-        "custom_components.brunata.config_flow.validate_input",
-        return_value={"title": "test@example.com"},
-    ), patch(
-        "custom_components.brunata.BrunataDataUpdateCoordinator._async_update_data",
-        return_value={},
+    with (
+        patch(_VALIDATE_INPUT, return_value={"title": ENTRY_TITLE}),
+        patch(
+            "custom_components.brunata.BrunataDataUpdateCoordinator._async_update_data",
+            return_value={},
+        ),
     ):
-        result2 = await hass.config_entries.flow.async_configure(
-            result["flow_id"],
-            {
-                "email": "test@example.com",
-                "password": "new_password123",
-            },
+        result = await hass.config_entries.flow.async_configure(
+            form["flow_id"], dict(CREDENTIALS)
         )
         await hass.async_block_till_done()
 
-    assert result2["type"] == data_entry_flow.FlowResultType.ABORT
-    assert result2["reason"] == "reauth_successful"
-    assert entry.data["password"] == "new_password123"
+    assert result["type"] == data_entry_flow.FlowResultType.ABORT
+    assert result["reason"] == "reauth_successful"
+    assert entry.data["password"] == CREDENTIALS["password"]
 
 
 async def test_flow_reauth_invalid_auth(hass: HomeAssistant, mock_brunata_client):
