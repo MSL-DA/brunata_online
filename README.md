@@ -7,7 +7,7 @@
 
 # Brunata Online for Home Assistant
 
-The **Brunata Integration** for Home Assistant allows you to monitor your Brunata meters (**water**, **heat cost allocator**, **electricity** and **heat meter**) directly in your dashboard. Meters are automatically discovered and grouped under devices for easy management.
+The **Brunata Integration** for Home Assistant allows you to monitor your Brunata meters (**water**, **heat cost allocator**, **electricity** and **heat meter**) directly in your dashboard. Every meter on the account is found during setup and gets a device of its own in Home Assistant.
 
 Built for [Brunata Online](https://online.brunata.com) accounts. If Brunata Online is available in your country, this integration is expected to work.
 
@@ -21,7 +21,7 @@ Built for [Brunata Online](https://online.brunata.com) accounts. If Brunata Onli
 - Automatic discovery of all supported meters on your Brunata Online account.
 - Supports water (`m³`), electricity (`kWh`), heat cost allocator (`units`) and heat meters (energy units such as `kWh`, `MWh` or `GJ`).
 - Devices are named after the placement you set in Brunata Online, so a meter shows up as `Water - Bathroom (Cold)` rather than its bare meter ID.
-- Groups sensors under devices for easy management.
+- One device per meter, carrying that meter's sensors.
 - Standard Home Assistant device classes and state classes, with full `Long Term Statistics` support.
 - Polls Brunata Online once an hour at a fixed time between xx:59:15 and xx:59:44. This time is automatically chosen when the integration is installed and remains the same afterwards. How often a *new* reading actually appears depends on the meter's own reporting interval, not on this schedule.
 
