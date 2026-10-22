@@ -254,9 +254,9 @@ async def async_setup_entry(
     entry: BrunataConfigEntry,
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
-    """Set up Brunata sensors based on a config entry."""
-    _LOGGER.debug("Setting up Brunata sensors for entry %s", entry.entry_id)
+    """Set up the sensor platform for one Brunata account."""
     coordinator = entry.runtime_data
+    _LOGGER.debug("Brunata sensor platform starting for entry %s", entry.entry_id)
 
     # Held on the coordinator, not in a closure here, so
     # async_remove_config_entry_device() can take an id back out when the user
@@ -265,23 +265,52 @@ async def async_setup_entry(
     known_meter_ids = coordinator.known_meter_ids
 
     @callback
-    def _add_new_meters() -> None:
-        """Add sensor entities for any newly discovered meters."""
-        new_entities = []
+    def _register_unseen_meters() -> None:
+        """Build the entities for meters this entry has not registered yet.
+
+        Run once below and then after every poll, because a meter can turn up
+        long after setup: a replacement for one that was dismounted, or one
+        Brunata has only now started reporting. Meters already registered are
+        skipped, so a poll that reports nothing new does nothing at all.
+
+        Each meter gets two entities — its reading and the timestamp of that
+        reading — and the meter's id is recorded as registered whether or not
+        both are later accepted by Home Assistant, which is what stops a second
+        entity with the same unique id being offered on the next poll.
+        """
         # `or {}` as in _apply_latest_reading(): the two places that read
         # coordinator.data should make the same assumption about it.
-        for meter_id, meter in (coordinator.data or {}).items():
-            if meter_id not in known_meter_ids:
-                _LOGGER.debug("Creating BrunataSensor for meter %s", meter_id)
-                known_meter_ids.add(meter_id)
-                new_entities.append(BrunataSensor(coordinator, meter))
-                new_entities.append(BrunataReadingTimeSensor(coordinator, meter))
-        if new_entities:
-            _LOGGER.debug("Adding %s new entities", len(new_entities))
-            async_add_entities(new_entities)
+        #
+        # The id is taken from the key rather than from the meter, because the
+        # key is what known_meter_ids is compared against everywhere else.
+        unseen = [
+            (meter_id, meter)
+            for meter_id, meter in (coordinator.data or {}).items()
+            if meter_id not in known_meter_ids
+        ]
+        if not unseen:
+            return
 
-    _add_new_meters()
-    entry.async_on_unload(coordinator.async_add_listener(_add_new_meters))
+        entities: list[SensorEntity] = []
+        for meter_id, meter in unseen:
+            known_meter_ids.add(meter_id)
+            entities.extend(
+                (
+                    BrunataSensor(coordinator, meter),
+                    BrunataReadingTimeSensor(coordinator, meter),
+                )
+            )
+
+        _LOGGER.debug(
+            "Registering %s entities for %s meter(s) not seen before: %s",
+            len(entities),
+            len(unseen),
+            ", ".join(meter_id for meter_id, _ in unseen),
+        )
+        async_add_entities(entities)
+
+    _register_unseen_meters()
+    entry.async_on_unload(coordinator.async_add_listener(_register_unseen_meters))
 
 
 class BrunataSensor(
