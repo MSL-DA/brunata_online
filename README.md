@@ -7,7 +7,7 @@
 
 # Brunata Online for Home Assistant
 
-The **Brunata Integration** for Home Assistant allows you to monitor your Brunata meters (**water**, **heat cost allocator**, **electricity** and **heat meter**) directly in your dashboard. Every meter on the account is found during setup and gets a device of its own in Home Assistant.
+The **Brunata Integration** for Home Assistant allows you to monitor your Brunata meters (**water**, **electricity**, **heat cost allocator** and **heat meter**) directly in your dashboard. Every meter on the account is found during setup and gets a device of its own in Home Assistant.
 
 Built for [Brunata Online](https://online.brunata.com) accounts. If Brunata Online is available in your country, this integration is expected to work.
 
