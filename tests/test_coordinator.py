@@ -1,234 +1,94 @@
-"""Test Brunata diagnostics.
+"""Tests for how the coordinator translates API errors.
 
-The point of diagnostics is that a user can attach it to an issue without
-having to think about what is in it. That only holds if the redaction is
-verified — a leaked password in a public GitHub issue is not recoverable.
+The fetching and parsing live in the api package; all the coordinator does is map
+the API layer's error types onto Home Assistant's. That mapping is what decides
+whether the user gets a re-authentication prompt, a quiet retry, or sensors
+frozen at their last value, so each branch is checked here.
 """
 
 from unittest.mock import AsyncMock
 
+import pytest
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.helpers.update_coordinator import UpdateFailed
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.brunata.api import BrunataApiError
-from custom_components.brunata.const import DOMAIN
-from custom_components.brunata.diagnostics import (
-    async_get_config_entry_diagnostics,
+from custom_components.brunata import BrunataDataUpdateCoordinator
+from custom_components.brunata.api import (
+    BrunataApiError,
+    BrunataAuthError,
+    BrunataConnectionError,
 )
+from custom_components.brunata.const import DOMAIN
 
 
-async def _setup(hass: HomeAssistant, mock_brunata_client, mock_meter):
+@pytest.fixture
+def coordinator(hass: HomeAssistant, mock_brunata_client):
+    """A coordinator wired to the mocked client, without running setup."""
     entry = MockConfigEntry(
-        domain=DOMAIN,
-        data={"email": "test@example.com", "password": "password123"},
+        domain=DOMAIN, data={"email": "test@example.com", "password": "password123"}
     )
     entry.add_to_hass(hass)
+    return BrunataDataUpdateCoordinator(hass, entry, mock_brunata_client)
 
+
+async def test_successful_update_returns_the_meters(
+    coordinator, mock_brunata_client, mock_meter
+):
     mock_brunata_client.async_get_meters = AsyncMock(
         return_value={"12345": mock_meter}
     )
-    # diagnostics.py asks the client for this rather than reading five private
-    # attributes off it; what the report may contain is decided in api/client.py, and
-    # tested there by test_client_diagnostics_reports_tokens_without_quoting_them.
-    mock_brunata_client.diagnostics.return_value = {
-        "lookup_tables_loaded": True,
-        "meter_types": ["Collector", "Radiator", "Water"],
-        "measurement_units": ["undefined", "units", "m3"],
-        "has_access_token": True,
-        "has_refresh_token": True,
-    }
 
-    assert await hass.config_entries.async_setup(entry.entry_id)
-    await hass.async_block_till_done()
-    return entry
+    assert await coordinator._async_update_data() == {"12345": mock_meter}
 
 
-async def test_diagnostics_for_an_entry_that_never_loaded(
-    hass: HomeAssistant, mock_brunata_client
-):
-    """A report is needed most when the integration did not come up.
-
-    Without the defensive read of runtime_data, this is an AttributeError on
-    the download — a stack trace at the exact moment the user is trying to
-    tell us what went wrong. The `loaded` key is named rather than left out so
-    a reader can tell "the entry never set up" from "the report is missing a
-    section".
-    """
-    entry = MockConfigEntry(
-        domain=DOMAIN,
-        data={"email": "test@example.com", "password": "password123"},
+async def test_auth_error_triggers_reauth(coordinator, mock_brunata_client):
+    """ConfigEntryAuthFailed is what makes Home Assistant open the reauth
+    flow; UpdateFailed would just retry forever with a dead password."""
+    mock_brunata_client.async_get_meters = AsyncMock(
+        side_effect=BrunataAuthError("credentials rejected")
     )
-    entry.add_to_hass(hass)
 
-    # The premise, asserted rather than assumed: nothing has set runtime_data.
-    assert not hasattr(entry, "runtime_data")
-
-    result = await async_get_config_entry_diagnostics(hass, entry)
-
-    assert result["loaded"] is False
-    assert result["entry"]["data"]["password"] == "**REDACTED**"
-    assert "coordinator" not in result
-    assert "meters" not in result
+    with pytest.raises(ConfigEntryAuthFailed):
+        await coordinator._async_update_data()
 
 
-async def test_diagnostics_redacts_the_credentials(
-    hass: HomeAssistant, mock_brunata_client, mock_meter
+async def test_connection_error_keeps_last_known_values(
+    coordinator, mock_brunata_client, mock_meter
 ):
-    """The email and password must never reach the downloaded file."""
-    entry = await _setup(hass, mock_brunata_client, mock_meter)
-
-    result = await async_get_config_entry_diagnostics(hass, entry)
-
-    assert result["entry"]["data"]["email"] == "**REDACTED**"
-    assert result["entry"]["data"]["password"] == "**REDACTED**"
-    assert "test@example.com" not in str(result)
-    assert "password123" not in str(result)
-
-
-async def test_diagnostics_reports_the_client_state_verbatim(
-    hass: HomeAssistant, mock_brunata_client, mock_meter
-):
-    """The api section is whatever BrunataApiClient.diagnostics() returned.
-
-    That the tokens themselves never appear in it is the client's guarantee and
-    is tested there; what matters here is that this module passes the report
-    through and does not go looking for anything else on its own."""
-    entry = await _setup(hass, mock_brunata_client, mock_meter)
-
-    result = await async_get_config_entry_diagnostics(hass, entry)
-
-    assert result["api"] == mock_brunata_client.diagnostics.return_value
-    mock_brunata_client.diagnostics.assert_called_once_with()
-
-
-async def test_diagnostics_reports_the_http_status_of_the_last_failure(
-    hass: HomeAssistant, mock_brunata_client, mock_meter
-):
-    """Separately from the message, so a report can be read without parsing
-    prose: 429 means back off, 500 means Brunata is having a bad day.
-
-    Note what this exercises. The coordinator never holds the api package's own exception —
-    _async_update_data() raises UpdateFailed(...) from err, so last_exception
-    is the translated one and ours is its __cause__. Reading .status off
-    last_exception directly returns None every time, which is what the first
-    version of this did and what this test caught.
-    """
-    entry = await _setup(hass, mock_brunata_client, mock_meter)
-    coordinator = entry.runtime_data
-
-    mock_brunata_client.async_get_meters.side_effect = BrunataApiError(
-        "Brunata rate limit reached (429)", 429
+    """A short outage must not blank the sensors, or their statistics get a gap
+    for every hour Brunata is unreachable."""
+    previous = {"12345": mock_meter}
+    coordinator.data = previous
+    mock_brunata_client.async_get_meters = AsyncMock(
+        side_effect=BrunataConnectionError("down")
     )
-    await coordinator.async_refresh()
 
-    # The premise of the assertion below: what is stored is not our type.
-    assert not isinstance(coordinator.last_exception, BrunataApiError)
-
-    result = await async_get_config_entry_diagnostics(hass, entry)
-
-    assert result["coordinator"]["last_update_success"] is False
-    assert result["coordinator"]["last_exception_status"] == 429
+    assert await coordinator._async_update_data() is previous
 
 
-async def test_diagnostics_status_is_none_for_a_failure_without_one(
-    hass: HomeAssistant, mock_brunata_client, mock_meter
+async def test_connection_error_on_first_update_fails(
+    coordinator, mock_brunata_client
 ):
-    """Not every BrunataApiError has an HTTP status — a login flow that
-    changed shape has none. The key must be present and None, not missing."""
-    entry = await _setup(hass, mock_brunata_client, mock_meter)
-    coordinator = entry.runtime_data
-
-    mock_brunata_client.async_get_meters.side_effect = BrunataApiError(
-        "Brunata login form not found — the login flow has changed"
+    """With no previous data there is nothing to keep, so the failure has to be
+    surfaced — otherwise setup would 'succeed' with zero sensors."""
+    coordinator.data = None
+    mock_brunata_client.async_get_meters = AsyncMock(
+        side_effect=BrunataConnectionError("down")
     )
-    await coordinator.async_refresh()
 
-    result = await async_get_config_entry_diagnostics(hass, entry)
-
-    assert result["coordinator"]["last_update_success"] is False
-    assert result["coordinator"]["last_exception_status"] is None
+    with pytest.raises(UpdateFailed):
+        await coordinator._async_update_data()
 
 
-async def test_diagnostics_status_is_none_when_there_is_no_status(
-    hass: HomeAssistant, mock_brunata_client, mock_meter
-):
-    """And None when nothing has failed at all."""
-    entry = await _setup(hass, mock_brunata_client, mock_meter)
+async def test_api_error_fails_the_update(coordinator, mock_brunata_client, mock_meter):
+    """Unlike a connection error, a bad response is not something waiting will
+    fix, so it is reported rather than papered over with stale data."""
+    coordinator.data = {"12345": mock_meter}
+    mock_brunata_client.async_get_meters = AsyncMock(
+        side_effect=BrunataApiError("Brunata rate limit reached", 429)
+    )
 
-    result = await async_get_config_entry_diagnostics(hass, entry)
-
-    assert result["coordinator"]["last_exception_status"] is None
-
-
-async def test_diagnostics_redacts_the_meter_number(
-    hass: HomeAssistant, mock_brunata_client, mock_meter
-):
-    """The meter number identifies a device at an address. Redacted rather
-    than dropped, so the field stays in the report while the number does not.
-
-    The substituted value is a fixed string, which is what the first assertion
-    pins: two meters are indistinguishable in a report, so nothing may be
-    built on reading a changed number out of one.
-    """
-    entry = await _setup(hass, mock_brunata_client, mock_meter)
-
-    result = await async_get_config_entry_diagnostics(hass, entry)
-
-    assert result["meters"][0]["meter_no"] == "**REDACTED**"
-    assert mock_meter.meter_no not in str(result)
-
-
-async def test_diagnostics_includes_what_faults_have_needed(
-    hass: HomeAssistant, mock_brunata_client, mock_meter
-):
-    """Each of these has been the answer to a real fault: the lookup tables
-    when meters were named after numbers, the raw unit when statistics were
-    suppressed, and the coordinator state when values went stale."""
-    entry = await _setup(hass, mock_brunata_client, mock_meter)
-
-    result = await async_get_config_entry_diagnostics(hass, entry)
-
-    assert result["api"]["lookup_tables_loaded"] is True
-    assert result["api"]["meter_types"] == ["Collector", "Radiator", "Water"]
-    assert result["api"]["measurement_units"] == ["undefined", "units", "m3"]
-
-    assert result["coordinator"]["last_update_success"] is True
-    assert result["coordinator"]["meter_count"] == 1
-
-    meter = result["meters"][0]
-    assert meter["meter_id"] == mock_meter.meter_id
-    assert meter["meter_type"] == mock_meter.meter_type
-    assert meter["unit"] == mock_meter.unit
-    assert meter["value"] == mock_meter.value
-
-
-async def test_diagnostics_reports_what_the_parse_dropped(
-    hass: HomeAssistant, mock_brunata_client, mock_meter
-):
-    """A sensor that stopped updating without going unavailable has exactly one
-    explanation, and this is where a bug report carries it.
-
-    raw_item_count next to meter_count says how much of the payload was
-    dropped; a zero raw count is the separate fault of Brunata reporting
-    nothing at all.
-    """
-    entry = await _setup(hass, mock_brunata_client, mock_meter)
-
-    result = await async_get_config_entry_diagnostics(hass, entry)
-
-    assert result["coordinator"]["raw_item_count"] == 1
-    assert result["coordinator"]["unresolved_unit_meter_ids"] == []
-
-
-async def test_diagnostics_serialises_dates_as_strings(
-    hass: HomeAssistant, mock_brunata_client, mock_meter
-):
-    """date and datetime are not JSON. Left as objects they would either fail
-    to serialise or arrive as something unreadable."""
-    entry = await _setup(hass, mock_brunata_client, mock_meter)
-
-    result = await async_get_config_entry_diagnostics(hass, entry)
-    meter = result["meters"][0]
-
-    assert meter["reading_date"] == mock_meter.reading_date.isoformat()
-    assert meter["mounting_date"] == mock_meter.mounting_date.isoformat()
+    with pytest.raises(UpdateFailed, match="rate limit"):
+        await coordinator._async_update_data()
