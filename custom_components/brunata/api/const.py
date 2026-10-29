@@ -104,13 +104,24 @@ DEFAULT_HEADERS = {
 # the meter payload into names and units.
 LOCALE = "en"
 
-KC_REALM_BASE = (
-    "https://online.brunata.com/iam/realms/online-prod/protocol/openid-connect"
-)
-KC_AUTHORIZE_URL = f"{KC_REALM_BASE}/auth"
-KC_TOKEN_URL = f"{KC_REALM_BASE}/token"
-KC_CLIENT_ID = "82770188-c92e-4d16-927d-a15c472eda55"
-KC_REDIRECT_URI = "https://online.brunata.com/auth-redirect"
-KC_SCOPE = "openid offline_access"
+# Brunata's own identity provider, which the portal signs in against. It is
+# served from the same host as the API, so both addresses below are built from
+# BASE_URL rather than spelled out again: one place to change if the portal
+# ever moves, and no second spelling that can be updated alone.
+OIDC_BASE_URL = f"{BASE_URL}/iam/realms/online-prod/protocol/openid-connect"
+AUTHORIZE_URL = f"{OIDC_BASE_URL}/auth"
+TOKEN_URL = f"{OIDC_BASE_URL}/token"
+
+# The portal's own OAuth client, read off the authorize request its web app
+# makes — visible in any browser's developer tools. A public client, so there
+# is no secret to hold and none is sent; what stands in for one is the PKCE
+# challenge in auth.py.
+CLIENT_ID = "82770188-c92e-4d16-927d-a15c472eda55"
+REDIRECT_URI = f"{BASE_URL}/auth-redirect"
+
+# offline_access is the scope that makes the server issue a refresh token.
+# Without it every renewal would be a full three-request login instead of a
+# single POST — slower, and far more likely to trip the bot protection.
+AUTH_SCOPE = "openid offline_access"
 
 REQUEST_TIMEOUT = 15.0
