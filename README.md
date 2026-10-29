@@ -3,7 +3,7 @@
 [![Hassfest](https://img.shields.io/github/actions/workflow/status/MSL-DA/brunata_online/hassfest.yml?branch=main&label=Hassfest)](https://github.com/MSL-DA/brunata_online/actions/workflows/hassfest.yml)
 [![HACS](https://img.shields.io/github/actions/workflow/status/MSL-DA/brunata_online/hacs.yml?branch=main&label=HACS)](https://github.com/MSL-DA/brunata_online/actions/workflows/hacs.yml)
 
-![Brunata logo](images/logo_readme.png)
+![Brunata logo](https://raw.githubusercontent.com/MSL-DA/brunata_online/refs/heads/main/images/logo_readme.png)
 
 # Brunata Online for Home Assistant
 
