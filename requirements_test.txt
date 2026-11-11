@@ -1,15 +1,28 @@
 # This pins the Home Assistant version CI tests against — the version you
-# would write in a support request, not the test package's own version
-# number. pytest-homeassistant-custom-component is left unpinned below: it
-# only exists to expose HA's test fixtures, so pip picks whichever release of
-# it matches the homeassistant version pinned here.
+# would write in a support request, not anything belonging to the test
+# package.
 #
-# It is not an ordinary dependency, and dependabot.yml is set up to bump it
-# with the Home Assistant version visible in the pull request title, so the
-# number below moves on its own schedule. Nothing else should restate it: a
-# document or docstring naming this version goes stale at the next bump with
-# nothing to catch it. Point at this file instead. The lint toolchain is
-# pinned separately in requirements_lint.txt precisely because it *is*
-# ordinary — do not merge the two files.
+# pytest-homeassistant is Home Assistant's own test plugin, released from
+# home-assistant/core with the same version number as Home Assistant itself.
+# It must match the homeassistant pin exactly, and it is pinned here rather
+# than left to pip, for two reasons:
+#
+#   * Its own metadata cannot be relied on to steer pip to the matching
+#     release, so the pair is stated here, side by side.
+#   * The PyPI name also carries an unrelated project's 0.1.x releases from
+#     2020. Left unpinned, pip can backtrack onto those — which is exactly
+#     what happened to the old pytest-homeassistant-custom-component when it
+#     stopped publishing: with no release matching this pin it fell back to
+#     0.2.1 from 2021 and pytest 6.2, which cannot run on Python 3.14.
+#
+# Do not install pytest-homeassistant-custom-component alongside it: the two
+# provide overlapping fixtures.
+#
+# dependabot.yml groups the two lines so they move together, with the Home
+# Assistant version visible in the pull request title. Nothing else should
+# restate the number: a document or docstring naming it goes stale at the
+# next bump with nothing to catch it. Point at this file instead. The lint
+# toolchain is pinned separately in requirements_lint.txt precisely because it
+# *is* ordinary — do not merge the two files.
 homeassistant==2026.11.0
-pytest-homeassistant-custom-component
+pytest-homeassistant==2026.11.0
