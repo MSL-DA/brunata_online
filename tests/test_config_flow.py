@@ -8,7 +8,7 @@ import voluptuous as vol
 from homeassistant import config_entries, data_entry_flow
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr, selector
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from pytest_homeassistant.common import MockConfigEntry
 
 from custom_components.brunata.api import (
     BrunataApiError,

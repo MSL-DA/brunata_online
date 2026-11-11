@@ -35,5 +35,14 @@ updates:
     cooldown:
       default-days: 3
       semver-patch-days: 0
+    # pytest-homeassistant must carry exactly the homeassistant version number,
+    # so the two are bumped in one pull request. Apart they would each open a
+    # pull request that cannot install.
+    groups:
+      home-assistant:
+        patterns:
+          - "homeassistant"
+          - "pytest-homeassistant"
     commit-message:
       prefix: "ci"
+      
