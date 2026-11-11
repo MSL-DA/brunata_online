@@ -16,9 +16,9 @@ from custom_components.brunata.api import BrunataMeter, ParseReport
 from custom_components.brunata.const import DEVICE_ID_PREFIX, DOMAIN
 
 
-@pytest.fixture(autouse=True)
-def auto_enable_custom_integrations(enable_custom_integrations):
-    yield
+# No autouse enable_custom_integrations wrapper: pytest-homeassistant's hass
+# fixture loads custom_components/ by default, and its migration notes say to
+# remove the wrapper.
 
 
 @pytest.fixture
