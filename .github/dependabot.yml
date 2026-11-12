@@ -45,4 +45,3 @@ updates:
           - "pytest-homeassistant"
     commit-message:
       prefix: "ci"
-      
