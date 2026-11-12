@@ -26,7 +26,7 @@ import re
 import secrets
 import time
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlparse, urlunparse
 
 import httpx
 
@@ -39,7 +39,7 @@ from .const import (
     TOKEN_URL,
 )
 from .errors import BrunataApiError, BrunataAuthError
-from .http import _payload, async_request
+from .http import _payload, _retry_after_seconds, async_request
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -75,6 +75,22 @@ _AUTH_HOST = urlparse(OIDC_BASE_URL).hostname
 # branch that reports a changed flow; is_redirect would send it to the branch
 # that asks the user for a password which was never wrong.
 _LOGIN_ACCEPTED_STATUSES = frozenset({301, 302, 303, 307, 308})
+
+
+# Answers from Keycloak that say nothing about the password: 403 is what bot
+# protection in front of the login sends, 404 means the address no longer
+# exists, 429 is a rate limit and 5xx is Brunata having a bad day. Each becomes
+# a BrunataApiError, so the coordinator retries — and honours the rate limit —
+# instead of opening a reauth dialog that asks for a password which was never
+# wrong. Read on the credential POST and on the refresh of the token.
+#
+# On the credential POST, everything else that is not a redirect is still read
+# as "credentials rejected". Keycloak answers a wrong password by rendering the
+# form again, and which status it renders it with is not something this code
+# has seen documented, so only the statuses that cannot mean that are taken
+# out.
+def _is_not_about_the_credentials(status: int) -> bool:
+    return status in (403, 404, 429) or status >= 500
 
 
 # Renew slightly before the server's own expiry, so a slow request or a little
@@ -164,6 +180,36 @@ def _checked_form_action(raw: str) -> str:
 def _code_from_url(url: Any) -> str | None:
     """Pull the OAuth authorization code out of a redirect URL."""
     return parse_qs(urlparse(str(url)).query).get("code", [None])[0]
+
+
+def _login_step_failed(response: httpx.Response, step: str) -> BrunataApiError:
+    """Describe a login request that failed for a reason other than the password.
+
+    Carries the status, so the coordinator can tell a rate limit from the
+    rest, and for 429 the Retry-After seconds, so the pause it takes is the
+    one Brunata asked for. Without them a 429 during a login fell back to the
+    default pause at best.
+    """
+    status = response.status_code
+    return BrunataApiError(
+        f"Brunata {step} returned {status}",
+        status,
+        _retry_after_seconds(response) if status == 429 else None,
+    )
+
+
+def _without_query(url: str) -> str:
+    """Return a URL with its query and fragment removed, for a message.
+
+    A redirect from Keycloak can carry its one-time session_code, or an
+    authorization code, in the query. Error messages reach both the log and
+    the diagnostics download, which get attached to public issues, so the
+    address is reported without them — the same reason _checked_form_action()
+    names only scheme, host and port.
+    """
+    return urlunparse(urlparse(url)._replace(params="", query="", fragment=""))
+
+
 class BrunataAuth:
     """Holds one account's credentials and the tokens minted for them."""
 
@@ -293,6 +339,9 @@ class BrunataAuth:
     async def _async_try_refresh(self) -> bool:
         """Redeem the refresh token. Returns False to fall back to a login.
 
+        Raises BrunataApiError instead when Brunata answers with a status a
+        full login would meet as well — see _is_not_about_the_credentials().
+
         We request the offline_access scope, so Keycloak issues one. Using it
         turns a renewal into a single POST instead of a three-request browser
         login, which is faster and far less likely to trip bot protection.
@@ -310,6 +359,13 @@ class BrunataAuth:
             },
             follow_redirects=False,
         )
+        # Not every refusal is a reason to log in from scratch. A rate limit,
+        # bot protection or an outage at Brunata would meet the full login just
+        # the same, three requests later, so they end the attempt here and
+        # keep the refresh token for the next poll. Only the rest — in practice
+        # Keycloak's 400 for a refresh token it no longer accepts — falls back.
+        if _is_not_about_the_credentials(response.status_code):
+            raise _login_step_failed(response, "token endpoint")
         if response.status_code != 200:
             _LOGGER.debug(
                 "Brunata refresh token rejected (%s) — falling back to a full login",
@@ -349,17 +405,20 @@ class BrunataAuth:
             },
             follow_redirects=False,
         )
+        # BrunataApiError, not BrunataAuthError, for every failure from here on.
+        # By this point Keycloak has accepted the credentials and issued a
+        # code; a refused exchange or a token response this code cannot use
+        # says nothing about the password, and a reauth dialog would ask for
+        # one that already works.
         if response.status_code != 200:
             self._clear_tokens()
-            raise BrunataAuthError(
-                f"Brunata rejected the authorization code ({response.status_code})"
-            )
+            raise _login_step_failed(response, "token endpoint")
 
         try:
             self._store_tokens(_payload(response))
-        except BrunataApiError as err:
+        except BrunataApiError:
             self._clear_tokens()
-            raise BrunataAuthError(str(err)) from err
+            raise
 
     async def _async_authorize(self, code_challenge: str) -> str:
         """Obtain an authorization code, logging in if we have to."""
@@ -377,10 +436,7 @@ class BrunataAuth:
             follow_redirects=True,
         )
         if page.status_code >= 400:
-            raise BrunataApiError(
-                f"Brunata authorize endpoint returned {page.status_code}",
-                page.status_code,
-            )
+            raise _login_step_failed(page, "authorize endpoint")
 
         # A live Keycloak SSO session redirects straight to the redirect URI
         # with ?code=... and renders no form. That is success: treating the
@@ -412,7 +468,10 @@ class BrunataAuth:
             follow_redirects=False,
         )
         # On success Keycloak issues a redirect; on failure it re-renders the
-        # form with an error message.
+        # form with an error message. A status that cannot be that answer is
+        # reported as what it is — see _is_not_about_the_credentials().
+        if _is_not_about_the_credentials(auth.status_code):
+            raise _login_step_failed(auth, "login form")
         if auth.status_code not in _LOGIN_ACCEPTED_STATUSES:
             raise BrunataAuthError(
                 "Brunata rejected the login — check the email and password"
@@ -424,7 +483,9 @@ class BrunataAuth:
         # credentials that already worked.
         location = auth.headers.get("Location", "")
         if not location.startswith(REDIRECT_URI):
-            raise BrunataApiError(f"Unexpected redirect after login: {location}")
+            raise BrunataApiError(
+                f"Unexpected redirect after login: {_without_query(location) or '(none)'}"
+            )
 
         auth_code = _code_from_url(location)
         if not auth_code:
