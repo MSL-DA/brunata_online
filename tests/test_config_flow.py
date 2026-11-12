@@ -238,7 +238,7 @@ async def test_reauth_replaces_the_stored_password(
         ),
     ):
         result = await hass.config_entries.flow.async_configure(
-            form["flow_id"], dict(CREDENTIALS)
+            form["flow_id"], {"password": CREDENTIALS["password"]}
         )
         await hass.async_block_till_done()
 
@@ -270,10 +270,7 @@ async def test_flow_reauth_invalid_auth(hass: HomeAssistant, mock_brunata_client
     ):
         result2 = await hass.config_entries.flow.async_configure(
             result["flow_id"],
-            {
-                "email": "test@example.com",
-                "password": "still_wrong",
-            },
+            {"password": "still_wrong"},
         )
         await hass.async_block_till_done()
 
@@ -306,10 +303,7 @@ async def test_flow_reauth_cannot_connect(hass: HomeAssistant, mock_brunata_clie
     ):
         result2 = await hass.config_entries.flow.async_configure(
             result["flow_id"],
-            {
-                "email": "test@example.com",
-                "password": "new_password123",
-            },
+            {"password": "new_password123"},
         )
         await hass.async_block_till_done()
 
@@ -317,53 +311,16 @@ async def test_flow_reauth_cannot_connect(hass: HomeAssistant, mock_brunata_clie
     assert result2["errors"] == {"base": "cannot_connect"}
 
 
-async def test_flow_reauth_wrong_account(hass: HomeAssistant, mock_brunata_client):
-    """Test that reauthenticating with a different email aborts instead of
-    silently reassigning the config entry to a different Brunata account."""
-    entry = MockConfigEntry(
-        domain=DOMAIN,
-        unique_id="test@example.com",
-        data={
-            "email": "test@example.com",
-            "password": "old_password",
-        },
-    )
-    entry.add_to_hass(hass)
-
-    result = await hass.config_entries.flow.async_init(
-        DOMAIN,
-        context={"source": config_entries.SOURCE_REAUTH, "entry_id": entry.entry_id},
-    )
-
-    with patch(
-        "custom_components.brunata.config_flow.validate_input",
-        return_value={"title": "other@example.com"},
-    ):
-        result2 = await hass.config_entries.flow.async_configure(
-            result["flow_id"],
-            {
-                "email": "other@example.com",
-                "password": "new_password123",
-            },
-        )
-        await hass.async_block_till_done()
-
-    assert result2["type"] == data_entry_flow.FlowResultType.ABORT
-    assert result2["reason"] == "wrong_account"
-    assert entry.data["email"] == "test@example.com"
-    assert entry.data["password"] == "old_password"
-
-
-async def test_reauth_rejects_the_wrong_account_without_logging_in(
+async def test_reauth_asks_for_the_password_only(
     hass: HomeAssistant, mock_brunata_client
 ):
-    """The unique_id check comes before validate_input().
+    """The address is not a field in the reauth dialog.
 
-    Both orders end in the same wrong_account abort, so the outcome above does
-    not pin the ordering down. Entering a different address is a mistake the
-    unique_id already knows about; spending a full Keycloak round trip against
-    a bot-protected endpoint to reach the same answer costs the user seconds
-    and Brunata a request for nothing.
+    It used to be, with the stored address as its default, and changing it
+    aborted with wrong_account — a field whose only use was to make that
+    mistake. Moving to another address is what the reconfigure dialog is for.
+    The address is shown in the description instead, so the user can still see
+    which account the dialog is about.
     """
     entry = MockConfigEntry(
         domain=DOMAIN,
@@ -372,23 +329,14 @@ async def test_reauth_rejects_the_wrong_account_without_logging_in(
     )
     entry.add_to_hass(hass)
 
-    result = await hass.config_entries.flow.async_init(
+    form = await hass.config_entries.flow.async_init(
         DOMAIN,
         context={"source": config_entries.SOURCE_REAUTH, "entry_id": entry.entry_id},
     )
 
-    with patch(
-        "custom_components.brunata.config_flow.validate_input",
-        return_value={"title": "other@example.com"},
-    ) as validate:
-        result2 = await hass.config_entries.flow.async_configure(
-            result["flow_id"],
-            {"email": "other@example.com", "password": "new_password123"},
-        )
-        await hass.async_block_till_done()
-
-    assert result2["reason"] == "wrong_account"
-    assert validate.call_count == 0
+    assert form["step_id"] == "reauth_confirm"
+    assert [str(marker) for marker in form["data_schema"].schema] == ["password"]
+    assert form["description_placeholders"] == {"email": "test@example.com"}
 
 
 async def test_credential_fields_use_selectors(hass: HomeAssistant, mock_brunata_client):
@@ -431,7 +379,12 @@ async def test_credential_fields_use_selectors(hass: HomeAssistant, mock_brunata
         context={"source": config_entries.SOURCE_REAUTH, "entry_id": entry.entry_id},
     )
     assert reauth["step_id"] == "reauth_confirm"
-    _assert_credential_fields(reauth["data_schema"])
+    # The reauth form asks for the password only; see
+    # test_reauth_asks_for_the_password_only.
+    password = _field(reauth["data_schema"], "password")
+    assert isinstance(password, selector.TextSelector)
+    assert password.config["type"] == selector.TextSelectorType.PASSWORD
+    assert password.config["autocomplete"] == "current-password"
 
     reconfigure = await hass.config_entries.flow.async_init(
         DOMAIN,
@@ -510,13 +463,14 @@ async def test_flow_user_stores_and_logs_in_with_the_normalised_email(
 async def test_reauth_logs_in_with_the_normalised_email(
     hass: HomeAssistant, mock_brunata_client
 ):
-    """Same on the reauth path, where it matters more: the form offers the
-    stored address as its default, so a padded one would be re-submitted every
-    time the user tried to fix their password."""
+    """Same on the reauth path. The address is taken from the entry, and an
+    entry created before 1.4.0 can hold it padded and in mixed case: sent as
+    stored, Keycloak would reject it and the user would be told the new
+    password was wrong."""
     entry = MockConfigEntry(
         domain=DOMAIN,
         unique_id="bruger@example.com",
-        data={"email": "bruger@example.com", "password": "old"},
+        data={"email": " Bruger@Example.COM  ", "password": "old"},
     )
     entry.add_to_hass(hass)
 
@@ -534,10 +488,7 @@ async def test_reauth_logs_in_with_the_normalised_email(
     ):
         result = await hass.config_entries.flow.async_configure(
             reauth["flow_id"],
-            {
-                "email": " Bruger@Example.COM  ",
-                "password": "new-password",
-            },
+            {"password": "new-password"},
         )
         await hass.async_block_till_done()
 
