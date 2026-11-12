@@ -1300,8 +1300,8 @@ async def test_a_rejected_token_is_retried_once_with_a_fresh_login(status):
     """A cached token can look locally valid while the server no longer accepts
     it — a revoked Keycloak session, or clock drift.
 
-    403 is checked alongside 401 because the code treats the two identically in
-    four places and neither status appeared in a test that exercised this path.
+    403 is checked alongside 401 because both trigger the retry. They part
+    only on the second attempt — see the two tests below.
     """
     responses = [FakeResponse(status), FakeResponse(200, json_data=[])]
     logins: list[bool] = []
@@ -1328,17 +1328,16 @@ async def test_a_rejected_token_is_retried_once_with_a_fresh_login(status):
     assert logins == [False, True]
 
 
-@pytest.mark.parametrize("status", [401, 403])
-async def test_a_token_rejected_after_a_fresh_login_is_an_auth_error(status):
-    """Only a rejection on the *second* attempt means the credentials are no
-    longer accepted.
+async def test_a_token_rejected_after_a_fresh_login_is_an_auth_error():
+    """Only a 401 on the *second* attempt means the credentials are no longer
+    accepted.
 
     BrunataAuthError is what the coordinator turns into ConfigEntryAuthFailed,
     which is what opens the re-authentication dialog. Nothing reached this
     line before: the retry was covered, its failure was not, so the one path
     that asks the user for a new password was never exercised.
     """
-    responses = [FakeResponse(status), FakeResponse(status)]
+    responses = [FakeResponse(401), FakeResponse(401)]
     logins: list[bool] = []
 
     class FakeHttp:
@@ -1358,6 +1357,38 @@ async def test_a_token_rejected_after_a_fresh_login_is_an_auth_error(status):
             f"{API_URL}/consumer/metersforconsumer"
         )
 
+    assert logins == [False, True]
+
+
+async def test_a_403_after_a_fresh_login_is_not_an_auth_error():
+    """The login has just succeeded, so the password is right.
+
+    A 403 at this point is the server refusing the request — bot protection
+    sends exactly that — and a reauth dialog would ask for a password that
+    already works. As a BrunataApiError the coordinator retries at the next
+    poll instead.
+    """
+    responses = [FakeResponse(403), FakeResponse(403)]
+    logins: list[bool] = []
+
+    class FakeHttp:
+        async def request(self, method, url, **kwargs):
+            return responses.pop(0)
+
+    client = BrunataApiClient("user@example.com", "s3cret", FakeHttp())
+
+    async def _fake_login(*, force=False):
+        logins.append(force)
+        _mark_logged_in(client)
+
+    client._auth.async_ensure_token = _fake_login
+
+    with pytest.raises(BrunataApiError, match="not a wrong password") as caught:
+        await client._async_authenticated_get(
+            f"{API_URL}/consumer/metersforconsumer"
+        )
+
+    assert caught.value.status == 403
     assert logins == [False, True]
 
 

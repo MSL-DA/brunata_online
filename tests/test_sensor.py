@@ -773,6 +773,85 @@ async def test_sensor_accepts_reset_when_mounting_date_changes(mock_meter):
     assert entity._mounting_date == replaced.mounting_date
 
 
+@pytest.mark.parametrize(
+    "missing",
+    [{"mounting_date": None}, {"meter_no": None}],
+    ids=["mounting_date", "meter_no"],
+)
+async def test_a_missing_identifier_is_not_a_replacement(mock_meter, missing):
+    """A poll without a mounting date or meter number says nothing about which
+    device is on the wall.
+
+    Compared with a plain !=, None against the stored value counted as a
+    change, so a fall in the same poll was accepted as a replacement. Under
+    TOTAL_INCREASING the return to the real value was then booked as
+    consumption — a false spike that cannot be removed from the statistics.
+    """
+    mock_meter = replace(mock_meter, meter_type="Water", meter_type_code=2, unit="m3")
+
+    coordinator = MagicMock()
+    coordinator.data = {"12345": mock_meter}
+    entity = _make_entity(coordinator, mock_meter)
+
+    coordinator.data = {
+        "12345": replace(mock_meter, value=312.5, reading_date=date(2025, 6, 1))
+    }
+    entity._apply_latest_reading()
+
+    coordinator.data = {
+        "12345": replace(
+            mock_meter, value=0.4, reading_date=date(2025, 6, 20), **missing
+        )
+    }
+    entity._apply_latest_reading()
+
+    assert entity.native_value == 312.5
+
+
+async def test_an_accepted_reading_without_identifiers_keeps_the_baseline(mock_meter):
+    """An increase is accepted whatever it carries, but a missing meter number
+    or mounting date must not replace the stored one.
+
+    Overwriting the baseline with None would leave a later, real replacement
+    nothing to be compared against, and it would be rejected as a glitch.
+    """
+    mock_meter = replace(
+        mock_meter, meter_type="Water", meter_type_code=2, unit="m3", meter_no="M12345"
+    )
+
+    coordinator = MagicMock()
+    coordinator.data = {"12345": mock_meter}
+    entity = _make_entity(coordinator, mock_meter)
+
+    coordinator.data = {
+        "12345": replace(
+            mock_meter,
+            value=312.5,
+            reading_date=date(2025, 6, 1),
+            meter_no=None,
+            mounting_date=None,
+        )
+    }
+    entity._apply_latest_reading()
+
+    assert entity.native_value == 312.5
+    assert entity._meter_no == "M12345"
+    assert entity._mounting_date == mock_meter.mounting_date
+
+    # The real replacement, weeks later, is still recognised.
+    replaced = replace(
+        mock_meter,
+        value=0.4,
+        reading_date=date(2025, 6, 20),
+        mounting_date=datetime(2025, 6, 19, 9, 0, tzinfo=UTC),
+    )
+    coordinator.data = {"12345": replaced}
+    entity._apply_latest_reading()
+
+    assert entity.native_value == 0.4
+    assert entity._mounting_date == replaced.mounting_date
+
+
 async def test_sensor_unexplained_decrease_is_rejected(mock_meter):
     """Neither a replacement nor an annual reset. Adopting it under
     TOTAL_INCREASING would record a false consumption spike on the way back

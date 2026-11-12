@@ -170,6 +170,22 @@ def _is_cumulative_unit(canonical: str | None, raw_unit: str) -> bool:
     return ALLOCATOR_UNIT_MARKER in raw_unit.lower()
 
 
+def _known_and_changed(old: Any, new: Any) -> bool:
+    """Return True only if both values are known and they differ.
+
+    The replacement rule in _accept_reading() reads a changed meter number or
+    mounting date as proof that the physical meter was swapped, and a swap
+    lets a fall through. A value that is missing on either side proves nothing:
+    Brunata leaving mountingDate out of one poll, or sending one that cannot be
+    parsed, is not a new meter. Compared with a plain !=, None against a date
+    counted as a change, so a glitch in that same poll was accepted as a
+    replacement — and under TOTAL_INCREASING the return to the real value was
+    then booked as consumption, a false spike in the long term statistics that
+    cannot be removed afterwards.
+    """
+    return old is not None and new is not None and old != new
+
+
 def _device_name(meter_type: str, placement: str | None, meter_id: str) -> str:
     """Name a meter's device.
 
@@ -618,8 +634,14 @@ class BrunataSensor(
         self._reset_confirmed = None
         self._reset_declined = None
         self._attr_native_value = meter.value
-        self._meter_no = meter.meter_no
-        self._mounting_date = meter.mounting_date
+        # Only a known value replaces the baseline. A poll that lacks the meter
+        # number or the mounting date says nothing about which device this is,
+        # and overwriting the baseline with None would leave nothing for a real
+        # replacement to be compared against later. See _known_and_changed().
+        if meter.meter_no is not None:
+            self._meter_no = meter.meter_no
+        if meter.mounting_date is not None:
+            self._mounting_date = meter.mounting_date
 
         # Only when the reading carries a date. Overwriting both fields with
         # None on an undated reading would clear the year baseline, and
@@ -697,8 +719,10 @@ class BrunataSensor(
         cases, all of them resting on something Brunata states rather than on
         the shape of the readings:
 
-        1. The mounting date or the meter number changed — the physical device
-           was replaced, so the new one legitimately starts near zero. This
+        1. The mounting date or the meter number changed, with the value known
+           on both sides — the physical device was replaced, so the new one
+           legitimately starts near zero. A value that is missing is not a
+           change; see _known_and_changed(). This
            applies to *every* meter that counts upwards. All meters are
            replaced eventually, roughly every 8-10 years, heat cost allocators
            included; the check below is deliberately not conditioned on meter
@@ -732,8 +756,10 @@ class BrunataSensor(
             # reading. Only accumulating meters get a guard at all.
             return True
 
-        number_changed = meter.meter_no != self._meter_no
-        mounting_changed = meter.mounting_date != self._mounting_date
+        number_changed = _known_and_changed(self._meter_no, meter.meter_no)
+        mounting_changed = _known_and_changed(
+            self._mounting_date, meter.mounting_date
+        )
         if number_changed or mounting_changed:
             # The meter numbers themselves are deliberately not in this line.
             # They identify a physical device at an address, which is why

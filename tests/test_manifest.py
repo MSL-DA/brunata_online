@@ -27,8 +27,8 @@ Declaring a floor that is too high only costs installability; declaring one
 that is too low breaks setup for anyone who takes it at its word.
 
 The floor is measured by hand, on demand, and is deliberately not a standing CI
-job. Measuring it works: 2025.3.0 installs from PyPI and the suite runs green on
-it under Python 3.13, which is where both readings above come from. What does
+job. Measuring it worked: 2025.3.0 installed from PyPI and the suite ran green
+on it under Python 3.13, which is where both readings above come from. What did
 not work is sweeping the whole range — 2025.5 through 2025.8 each install and
 then die on
 
@@ -45,12 +45,22 @@ CI runs against the pin in requirements_test.txt instead, with a scheduled job
 against the newest release. That pin is deliberately not written out here:
 Dependabot bumps it weekly, and a number restated in prose goes stale at the
 next bump with no test to catch it. Read requirements_test.txt for the current
-one. It is years newer than anything in 2025 and says nothing about the floor.
+one. It is far newer than anything in 2025 and says nothing about the floor.
 
-To repeat the measurement — after a floor change, or after a new import from
-homeassistant appears — a throwaway workflow that installs a pinned
-homeassistant on Python 3.13 and runs pytest is the whole of it. Delete it again
-afterwards rather than leaving it in the Actions list.
+The suite as it stands cannot repeat the measurement. It runs on
+pytest-homeassistant, which Home Assistant publishes only from 2026.11 and which
+needs Python 3.14.2, so there is no release of it for 2025.3. The readings above
+were taken with its predecessor, pytest-homeassistant-custom-component, which
+was published alongside Home Assistant until 2026.10.4.
+
+To measure again — after a floor change, or after a new import from
+homeassistant appears — use a throwaway branch that goes back to that package,
+at the version matching the release being measured. On that branch the tests
+must import from pytest_homeassistant_custom_component.common again, and
+conftest.py needs back the autouse fixture that requests
+enable_custom_integrations, without which the old package does not load
+custom_components/. Run it on Python 3.13, and delete the branch and its
+workflow afterwards rather than leaving them in the repository.
 
 What is left to check here is that the advertised minimum stays a floor and
 never creeps above what is actually exercised.
