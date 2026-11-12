@@ -46,9 +46,14 @@ jobs:
       # failure has to be explained six months later, that version is the first
       # thing anyone looks for. pytest-latest.yml has carried this step from
       # the start; the blocking workflow needs it more, not less.
+      # shell: bash, not the default, because only an explicit bash shell
+      # runs with pipefail. Without it the step's result is grep's: pip show
+      # exits 1 for a package that is not installed, grep still finds the
+      # other one, and the step is green while showing half of what it is for.
       - name: Show resolved versions
+        shell: bash
         run: |
-          pip show homeassistant pytest-homeassistant-custom-component \
+          pip show homeassistant pytest-homeassistant \
             | grep -E "^(Name|Version)"
 
       - name: Run pytest
