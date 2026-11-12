@@ -24,5 +24,5 @@
 # next bump with nothing to catch it. Point at this file instead. The lint
 # toolchain is pinned separately in requirements_lint.txt precisely because it
 # *is* ordinary — do not merge the two files.
-homeassistant==2026.11.0
-pytest-homeassistant==2026.11.0
+homeassistant==2026.11.1
+pytest-homeassistant==2026.11.1
