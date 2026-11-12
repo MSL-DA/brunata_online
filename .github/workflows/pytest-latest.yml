@@ -34,14 +34,26 @@ jobs:
         with:
           python-version: "3.14"
 
+      # pytest-homeassistant carries the same version number as Home Assistant
+      # and must match it exactly, but is not tied to it by pip. Take the newest
+      # plugin release and install the Home Assistant release of that number.
+      # The lower bound keeps pip off the unrelated 0.1.x releases that share
+      # the PyPI name.
       - name: Install test dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install --upgrade pytest-homeassistant-custom-component
+          pip install --upgrade "pytest-homeassistant>=2026.11.0"
+          HA_VERSION="$(pip show pytest-homeassistant | awk '/^Version:/ {print $2}')"
+          pip install "homeassistant==${HA_VERSION}"
 
+      # shell: bash, not the default, because only an explicit bash shell
+      # runs with pipefail. Without it the step's result is grep's: pip show
+      # exits 1 for a package that is not installed, grep still finds the
+      # other one, and the step is green while showing half of what it is for.
       - name: Show resolved versions
+        shell: bash
         run: |
-          pip show homeassistant pytest-homeassistant-custom-component \
+          pip show homeassistant pytest-homeassistant \
             | grep -E "^(Name|Version)"
 
       - name: Run pytest
