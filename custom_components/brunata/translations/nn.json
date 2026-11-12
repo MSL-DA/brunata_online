@@ -1,0 +1,48 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "data": {
+          "email": "E-post",
+          "password": "Passord"
+        },
+        "description": "Skriv inn påloggingsopplysningane dine for Brunata."
+      },
+      "reauth_confirm": {
+        "data": {
+          "password": "Passord"
+        },
+        "description": "Brunata godtek ikkje lenger passordet for {email}. Skriv inn det gjeldande passordet for å halde fram."
+      },
+      "reconfigure": {
+        "data": {
+          "email": "E-post",
+          "password": "Passord"
+        },
+        "description": "Endre passord eller e-postadresse"
+      }
+    },
+    "error": {
+      "cannot_connect": "Klarte ikkje å nå Brunata eller å få eit brukbart svar. Prøv igjen seinare.",
+      "invalid_auth": "Ugyldig pålogging",
+      "unknown": "Uventa feil"
+    },
+    "abort": {
+      "already_configured": "Denne kontoen er allereie sett opp",
+      "reauth_successful": "Påloggingsopplysningane er oppdaterte",
+      "account_already_configured": "Den e-postadressa vert allereie brukt av ein annan Brunata-integrasjon. Ingenting vart endra.",
+      "meter_mismatch": "Kontoen bak den e-postadressa rapporterer ikkje alle målarane som denne integrasjonen allereie har, så det er ein annan husstand. Ingenting vart endra.",
+      "reconfigure_successful": "Påloggingsopplysningane er oppdaterte"
+    }
+  },
+  "entity": {
+    "sensor": {
+      "consumption": {
+        "name": "Forbruk"
+      },
+      "reading_time": {
+        "name": "Siste avlesing"
+      }
+    }
+  }
+}
