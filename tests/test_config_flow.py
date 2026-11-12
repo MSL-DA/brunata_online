@@ -336,7 +336,10 @@ async def test_reauth_asks_for_the_password_only(
 
     assert form["step_id"] == "reauth_confirm"
     assert [str(marker) for marker in form["data_schema"].schema] == ["password"]
-    assert form["description_placeholders"] == {"email": "test@example.com"}
+    # Only the key this integration supplies. Home Assistant adds its own to a
+    # reauth dialog — "name", the entry's title — so the dictionary as a whole
+    # is not ours to pin down.
+    assert form["description_placeholders"]["email"] == "test@example.com"
 
 
 async def test_credential_fields_use_selectors(hass: HomeAssistant, mock_brunata_client):
