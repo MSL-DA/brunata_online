@@ -10,10 +10,9 @@
       },
       "reauth_confirm": {
         "data": {
-          "email": "E-mail",
           "password": "Mot de passe"
         },
-        "description": "Vos identifiants Brunata ne sont plus valides. Veuillez les saisir à nouveau pour continuer."
+        "description": "Brunata n'accepte plus le mot de passe de {email}. Veuillez saisir le mot de passe actuel pour continuer."
       },
       "reconfigure": {
         "data": {
@@ -24,14 +23,13 @@
       }
     },
     "error": {
-      "cannot_connect": "Impossible de se connecter à Brunata. Vérifiez votre connexion internet.",
+      "cannot_connect": "Impossible de joindre Brunata ou d'obtenir une réponse exploitable. Réessayez plus tard.",
       "invalid_auth": "Identifiants incorrects",
       "unknown": "Erreur inattendue"
     },
     "abort": {
       "already_configured": "Ce compte est déjà configuré",
       "reauth_successful": "Les identifiants de connexion ont été mis à jour",
-      "wrong_account": "Cette adresse e-mail appartient à un autre compte. Connectez-vous avec le compte d'origine.",
       "account_already_configured": "Cette adresse e-mail est déjà utilisée par une autre intégration Brunata. Aucune modification n'a été apportée.",
       "meter_mismatch": "Le compte associé à cette adresse e-mail ne signale pas tous les compteurs déjà présents dans cette intégration ; il s'agit donc d'un autre foyer. Aucune modification n'a été apportée.",
       "reconfigure_successful": "Les identifiants de connexion ont été mis à jour"

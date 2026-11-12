@@ -10,10 +10,9 @@
       },
       "reauth_confirm": {
         "data": {
-          "email": "E-post",
           "password": "Passord"
         },
-        "description": "Brunata-påloggingsinformasjonen din er ikke lenger gyldig. Angi den på nytt for å fortsette."
+        "description": "Brunata godtar ikke lenger passordet for {email}. Angi det nåværende passordet for å fortsette."
       },
       "reconfigure": {
         "data": {
@@ -24,14 +23,13 @@
       }
     },
     "error": {
-      "cannot_connect": "Kan ikke koble til Brunata. Kontroller internettforbindelsen din.",
+      "cannot_connect": "Kunne ikke nå Brunata eller få et brukbart svar. Prøv igjen senere.",
       "invalid_auth": "Feil e-post eller passord",
       "unknown": "Uventet feil"
     },
     "abort": {
       "already_configured": "Denne kontoen er allerede konfigurert",
       "reauth_successful": "Påloggingsinformasjonen er oppdatert",
-      "wrong_account": "Denne e-postadressen tilhører en annen konto. Logg inn med den opprinnelige kontoen.",
       "account_already_configured": "Denne e-postadressen brukes allerede av en annen Brunata-integrasjon. Ingenting ble endret.",
       "meter_mismatch": "Kontoen som er knyttet til denne e-postadressen, rapporterer ikke alle målerne denne integrasjonen allerede har, så det ser ut til å være en annen husstand. Ingenting ble endret.",
       "reconfigure_successful": "Påloggingsinformasjonen er oppdatert"

@@ -219,44 +219,39 @@ class BrunataConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     ) -> ConfigFlowResult:
         """Confirm re-authentication dialog.
 
-        The address is fixed here even though async_step_reconfigure lets it
-        move. Reauth starts on its own, from a failing poll, so the account it
-        is repairing is the one the user was already using; an address typed
-        into a dialog that appeared unasked is a typo far more often than it is
-        a deliberate move. Moving to a new account is a decision, and it is
-        made in the reconfigure dialog, which the user opens themselves.
+        Asks for the password only. The address is fixed here even though
+        async_step_reconfigure lets it move. Reauth starts on its own, from a
+        failing poll, so the account it is repairing is the one the user was
+        already using; an address typed into a dialog that appeared unasked is
+        a typo far more often than it is a deliberate move. Moving to a new
+        account is a decision, and it is made in the reconfigure dialog, which
+        the user opens themselves.
+
+        The dialog used to show the address as an editable field and abort
+        with wrong_account if it was changed — a field whose only use was to
+        make that mistake. The address is now shown in the description
+        instead, so the user can still see which account is meant.
         """
         reauth_entry = self._get_reauth_entry()
+        # Normalised on the way out of the entry, for the same reason as in
+        # async_step_reconfigure: an entry created before 1.4.0 can hold the
+        # address padded or in mixed case, and Keycloak would reject it.
+        email = _normalise_email(reauth_entry.data[CONF_EMAIL])
         errors = {}
 
         if user_input is not None:
-            # Normalised before the login for the same reason as in
-            # async_step_user: a padded address fails against Keycloak and the
-            # user is told their password is wrong.
-            user_input = {
-                **user_input,
-                CONF_EMAIL: _normalise_email(user_input[CONF_EMAIL]),
+            credentials = {
+                CONF_EMAIL: email,
+                CONF_PASSWORD: user_input[CONF_PASSWORD],
             }
-            # The account check first, the login second. Both orders end in the
-            # same wrong_account abort, but this one decides it locally: a full
-            # Keycloak round trip against a bot-protected endpoint to reach an
-            # answer the unique_id already knows costs the user seconds and
-            # Brunata a request for nothing.
-            #
-            # It also puts _abort_if_unique_id_mismatch()'s AbortFlow outside
-            # the try below, where it belongs: it has to reach the flow manager
-            # to become a proper FlowResultType.ABORT, and inside the try it
-            # needed an explicit re-raise to get past the broad handler.
-            await self.async_set_unique_id(user_input[CONF_EMAIL])
-            self._abort_if_unique_id_mismatch(reason="wrong_account")
             try:
-                await validate_input(self.hass, user_input)
+                await validate_input(self.hass, credentials)
                 _LOGGER.debug(
                     "Re-authentication successful for entry %s", reauth_entry.entry_id
                 )
                 return self.async_update_reload_and_abort(
                     reauth_entry,
-                    data_updates=user_input,
+                    data_updates=credentials,
                 )
             except CannotConnect:
                 errors["base"] = "cannot_connect"
@@ -268,14 +263,8 @@ class BrunataConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         return self.async_show_form(
             step_id="reauth_confirm",
-            data_schema=vol.Schema(
-                {
-                    vol.Required(
-                        CONF_EMAIL, default=reauth_entry.data.get(CONF_EMAIL)
-                    ): EMAIL_SELECTOR,
-                    vol.Required(CONF_PASSWORD): PASSWORD_SELECTOR,
-                }
-            ),
+            data_schema=vol.Schema({vol.Required(CONF_PASSWORD): PASSWORD_SELECTOR}),
+            description_placeholders={"email": email},
             errors=errors,
         )
 
