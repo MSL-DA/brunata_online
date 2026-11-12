@@ -10,10 +10,9 @@
       },
       "reauth_confirm": {
         "data": {
-          "email": "Email",
           "password": "Password"
         },
-        "description": "Your Brunata credentials are no longer valid. Please re-enter them to continue."
+        "description": "Brunata no longer accepts the password for {email}. Enter the current password to continue."
       },
       "reconfigure": {
         "data": {
@@ -24,14 +23,13 @@
       }
     },
     "error": {
-      "cannot_connect": "Unable to connect to Brunata. Check your internet connection.",
+      "cannot_connect": "Could not reach Brunata or get a usable answer. Try again later.",
       "invalid_auth": "Invalid authentication",
       "unknown": "Unexpected error"
     },
     "abort": {
       "already_configured": "This account is already configured",
       "reauth_successful": "Login credentials updated",
-      "wrong_account": "This email belongs to a different account. Log in with the original account.",
       "account_already_configured": "That email address is already used by another Brunata integration. Nothing was changed.",
       "meter_mismatch": "The account behind that email address does not report all the meters this integration already has, so it is a different household. Nothing was changed.",
       "reconfigure_successful": "Login credentials updated"
