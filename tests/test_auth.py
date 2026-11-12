@@ -203,6 +203,38 @@ async def test_rejected_refresh_token_falls_back_to_full_login():
     ]
 
 
+@pytest.mark.parametrize("status", [403, 429, 500, 503])
+async def test_a_refresh_refused_by_brunata_does_not_fall_back_to_a_login(status):
+    """Bot protection, a rate limit or an outage at Brunata.
+
+    A full login would meet the same answer three requests later, and for 429
+    it would ask again the moment Brunata said to wait. So the attempt ends
+    here, as a BrunataApiError the coordinator retries, and the refresh token
+    is kept for the next poll.
+    """
+    http = FakeHttpClient(token_posts=[FakeResponse(status_code=status, json_data={})])
+    auth = make_auth(http, refresh_token="still-good")
+
+    with pytest.raises(BrunataApiError) as caught:
+        await auth.async_ensure_token()
+
+    assert caught.value.status == status
+    assert http.request_methods() == ["POST token"]
+    assert auth._refresh_token == "still-good"
+
+
+async def test_a_rate_limited_refresh_carries_retry_after():
+    http = FakeHttpClient(
+        token_posts=[FakeResponse(status_code=429, headers={"Retry-After": "300"})]
+    )
+    auth = make_auth(http, refresh_token="still-good")
+
+    with pytest.raises(BrunataApiError) as caught:
+        await auth.async_ensure_token()
+
+    assert caught.value.retry_after == 300.0
+
+
 async def test_live_sso_session_is_not_an_auth_failure():
     """Regression test.
 
@@ -306,11 +338,18 @@ async def test_force_clears_sso_cookies_and_skips_refresh():
     assert http.request_methods()[0] == "GET other"
 
 
-async def test_wrong_credentials_raise_auth_error():
-    """Keycloak re-renders the form (HTTP 200) instead of redirecting."""
+@pytest.mark.parametrize("status", [200, 400, 401])
+async def test_wrong_credentials_raise_auth_error(status):
+    """Keycloak re-renders the form instead of redirecting.
+
+    200 is what it has been seen to answer with. 400 and 401 stay credential
+    errors too: which status Keycloak renders the form with is not documented
+    anywhere this code has read, and only statuses that cannot carry that
+    answer are taken out — see the test below.
+    """
     http = FakeHttpClient(
         authorize=_authorize_with_form(),
-        form_post=FakeResponse(status_code=200, text=LOGIN_FORM_HTML),
+        form_post=FakeResponse(status_code=status, text=LOGIN_FORM_HTML),
     )
     auth = make_auth(http)
 
@@ -318,6 +357,85 @@ async def test_wrong_credentials_raise_auth_error():
     # error about the redirect target rather than the credentials.
     with pytest.raises(BrunataAuthError, match="check the email and password"):
         await auth.async_ensure_token()
+
+
+@pytest.mark.parametrize("status", [403, 404, 429, 500, 503])
+async def test_a_failing_credential_post_is_not_a_credentials_error(status):
+    """Bot protection, a moved address, a rate limit or an outage at Brunata.
+
+    None of them says the password is wrong. As a BrunataAuthError each one
+    opened the reauth dialog and asked for a password that already worked;
+    as a BrunataApiError the coordinator retries at the next poll, and for 429
+    holds back as Brunata asked.
+    """
+    http = FakeHttpClient(
+        authorize=_authorize_with_form(),
+        form_post=FakeResponse(status_code=status, text="<html>blocked</html>"),
+    )
+    auth = make_auth(http)
+
+    with pytest.raises(BrunataApiError) as caught:
+        await auth.async_ensure_token()
+
+    assert caught.value.status == status
+    # Stopped at the credential POST: no code exchange was attempted.
+    assert http.request_methods() == ["GET other", "POST other"]
+
+
+async def test_a_rate_limited_credential_post_carries_retry_after():
+    """The coordinator's pause is only as good as the number it is given.
+
+    Without Retry-After on the error, a 429 during a login falls back to the
+    default pause instead of the one Brunata asked for.
+    """
+    http = FakeHttpClient(
+        authorize=_authorize_with_form(),
+        form_post=FakeResponse(status_code=429, headers={"Retry-After": "120"}),
+    )
+    auth = make_auth(http)
+
+    with pytest.raises(BrunataApiError) as caught:
+        await auth.async_ensure_token()
+
+    assert caught.value.status == 429
+    assert caught.value.retry_after == 120.0
+
+
+async def test_a_rate_limited_authorize_request_carries_retry_after():
+    """The authorize request already failed as a BrunataApiError with its
+    status, but without the Retry-After Brunata sent with it."""
+    http = FakeHttpClient(
+        authorize=FakeResponse(
+            url=AUTHORIZE_URL, status_code=429, headers={"Retry-After": "60"}
+        )
+    )
+    auth = make_auth(http)
+
+    with pytest.raises(BrunataApiError) as caught:
+        await auth.async_ensure_token()
+
+    assert caught.value.status == 429
+    assert caught.value.retry_after == 60.0
+
+
+@pytest.mark.parametrize("status", [400, 401, 429, 503])
+async def test_a_refused_code_exchange_is_not_a_credentials_error(status):
+    """Keycloak has accepted the credentials and issued a code by the time the
+    exchange runs, so its failure is never a wrong password. The state is still
+    cleared, so nothing half-stored is reused."""
+    http = FakeHttpClient(
+        authorize=_authorize_with_form(),
+        form_post=_successful_form_post(),
+        token_posts=[FakeResponse(status_code=status, json_data={})],
+    )
+    auth = make_auth(http, access_token="stale")
+
+    with pytest.raises(BrunataApiError) as caught:
+        await auth.async_ensure_token()
+
+    assert caught.value.status == status
+    assert auth._access_token is None
+    assert auth._refresh_token is None
 
 
 async def test_missing_login_form_is_not_a_credentials_error():
@@ -352,6 +470,34 @@ async def test_unexpected_redirect_target_is_not_a_credentials_error():
         await auth.async_ensure_token()
 
 
+async def test_an_unexpected_redirect_is_reported_without_its_query():
+    """The message reaches the log and the diagnostics download.
+
+    Keycloak's own redirects carry a one-time session_code in the query, and
+    diagnostics files are attached to public issues. The address is kept so
+    the report still says where Keycloak sent the login; the query is not.
+    """
+    http = FakeHttpClient(
+        authorize=_authorize_with_form(),
+        form_post=FakeResponse(
+            status_code=302,
+            headers={
+                "Location": "https://online.brunata.com/iam/login-actions/"
+                "required-action?session_code=SECRET&execution=UPDATE_PASSWORD"
+            },
+        ),
+    )
+    auth = make_auth(http)
+
+    with pytest.raises(BrunataApiError) as caught:
+        await auth.async_ensure_token()
+
+    message = str(caught.value)
+    assert "/iam/login-actions/required-action" in message
+    assert "SECRET" not in message
+    assert "session_code" not in message
+
+
 async def test_redirect_without_code_is_not_a_credentials_error():
     http = FakeHttpClient(
         authorize=_authorize_with_form(),
@@ -367,6 +513,8 @@ async def test_redirect_without_code_is_not_a_credentials_error():
 
 
 async def test_token_endpoint_without_access_token_clears_state():
+    """A token response without a token. The credentials were accepted before
+    it, so it is a BrunataApiError, and nothing of it is kept."""
     http = FakeHttpClient(
         authorize=_authorize_with_form(),
         form_post=_successful_form_post(),
@@ -376,7 +524,7 @@ async def test_token_endpoint_without_access_token_clears_state():
     # the response under test.
     auth = make_auth(http, access_token="stale")
 
-    with pytest.raises(BrunataAuthError):
+    with pytest.raises(BrunataApiError, match="no access token"):
         await auth.async_ensure_token()
     assert auth._access_token is None
     assert auth._refresh_token is None
@@ -433,8 +581,12 @@ async def test_a_refresh_answered_with_the_wrong_shape_falls_back_to_a_full_logi
 
 async def test_a_token_exchange_answered_with_the_wrong_shape_clears_state():
     """The other caller. There is nothing left to fall back to here, so the
-    same shape has to end as an auth error with no half-stored token behind
-    it — exactly what a response carrying no access token already does."""
+    same shape has to end the login with no half-stored token behind it —
+    exactly what a response carrying no access token already does.
+
+    A BrunataApiError rather than a BrunataAuthError: the credentials were
+    accepted before this response arrived, so a reauth dialog would ask for a
+    password that already works."""
     http = FakeHttpClient(
         authorize=_authorize_with_form(),
         form_post=_successful_form_post(),
@@ -442,7 +594,7 @@ async def test_a_token_exchange_answered_with_the_wrong_shape_clears_state():
     )
     auth = make_auth(http, access_token="stale")
 
-    with pytest.raises(BrunataAuthError):
+    with pytest.raises(BrunataApiError, match="not an object"):
         await auth.async_ensure_token()
     assert auth._access_token is None
     assert auth._refresh_token is None

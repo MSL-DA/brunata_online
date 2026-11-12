@@ -27,6 +27,7 @@ from .parse import _parse_daily_consumption, _parse_meters
 
 _LOGGER = logging.getLogger(__name__)
 
+
 class BrunataApiClient:
     """Talks to Brunata Online on behalf of one account."""
 
@@ -259,6 +260,12 @@ class BrunataApiClient:
         fresh login. Only a 401 on *that* attempt means the credentials are no
         longer accepted.
 
+        A 403 on that attempt is not read that way. The login has just
+        succeeded, so the password is right, and a 403 is also what bot
+        protection sends. It becomes a BrunataApiError, which the coordinator
+        retries at the next poll, instead of a reauth dialog asking for a
+        password that already works.
+
         Shared by every endpoint on purpose. Confined to the meters call, a
         stale token on the locale resource would surface as "invalid JSON" —
         and since the tables are fetched once per client, that would repeat on
@@ -275,10 +282,17 @@ class BrunataApiClient:
         )
         response = await self._async_get(url, force_login=True, params=params)
 
-        if response.status_code in (401, 403):
+        if response.status_code == 401:
             raise BrunataAuthError(
-                f"Brunata returned {response.status_code} even after a fresh "
-                "login. Check credentials and account access."
+                "Brunata returned 401 even after a fresh login. Check "
+                "credentials and account access."
+            )
+        if response.status_code == 403:
+            raise BrunataApiError(
+                "Brunata returned 403 even after a fresh login. The login "
+                "succeeded, so this is the server refusing the request, not a "
+                "wrong password.",
+                403,
             )
         return response
 
