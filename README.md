@@ -32,8 +32,6 @@ Built for [Brunata Online](https://online.brunata.com) accounts. If Brunata Onli
 
 ## 📦 Installation
 
-**Requires Home Assistant 2025.3 or newer.**
-
 ### Marketplace — Home Assistant 2026.11 or newer
 
 1. Open [Brunata in the Marketplace](https://my.home-assistant.io/redirect/marketplace_repository/?owner=MSL-DA&repository=brunata_online&category=integration), or go to **Settings** → **Marketplace** and search for **Brunata**
@@ -49,6 +47,9 @@ Built for [Brunata Online](https://online.brunata.com) accounts. If Brunata Onli
 5. Click **Add Integration**
 6. Search for **Brunata**
 7. Enter your Brunata email and password
+
+> [!NOTE]
+> Requires Home Assistant 2025.3 or newer.
 
 ---
 
