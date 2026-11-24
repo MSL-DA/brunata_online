@@ -18,6 +18,14 @@ name: Release
 # one operation, so the CLI always met a release that already existed and
 # returned HTTP 422. The file is back to reporting only.
 #
+# The second job attaches brunata.zip to the release. hacs.json sets
+# zip_release, so the Marketplace (and HACS before 2026.11) installs from that
+# asset instead of the source tree — and GitHub counts asset downloads, which is
+# the number the Marketplace shows. A release without the asset cannot be
+# installed at all, so the job runs only once the version check has passed.
+# Like the check above, it arrives after the release exists: for the seconds in
+# between, the release is visible without its asset.
+#
 # There is deliberately no `concurrency` block. Every other workflow here has
 # one because a branch can collect several pushes; a tag ref is created once and
 # never has a competing run to cancel.
@@ -58,3 +66,27 @@ jobs:
             echo "::error::Tag $GITHUB_REF_NAME does not match manifest.json ($manifest). Bump manifest.json, or delete and re-push the tag."
             exit 1
           fi
+
+  asset:
+    name: Attach brunata.zip
+    needs: version
+    runs-on: ubuntu-latest
+    # The only job in the repository that writes: it uploads one release asset.
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+
+      # The files go at the root of the archive, as zip_release expects — not
+      # under custom_components/brunata/.
+      - name: Build brunata.zip
+        run: |
+          cd custom_components/brunata
+          zip -r -X "$RUNNER_TEMP/brunata.zip" . -x "*__pycache__*"
+
+      - name: Upload to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "$GITHUB_REF_NAME" "$RUNNER_TEMP/brunata.zip" \
+            --repo "$GITHUB_REPOSITORY" --clobber

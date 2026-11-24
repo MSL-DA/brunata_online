@@ -1,4 +1,6 @@
 {
   "name": "Brunata",
-  "homeassistant": "2025.3.0"
+  "homeassistant": "2025.3.0",
+  "zip_release": true,
+  "filename": "brunata.zip"
 }
