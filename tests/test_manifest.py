@@ -91,6 +91,7 @@ MANIFEST = json.loads(
     (REPO_ROOT / "custom_components" / "brunata" / "manifest.json").read_text()
 )
 HACS = json.loads((REPO_ROOT / "hacs.json").read_text())
+RELEASE_WORKFLOW = (REPO_ROOT / ".github" / "workflows" / "release.yml").read_text()
 
 
 def test_declared_minimum_is_not_newer_than_the_tested_version():
@@ -154,3 +155,9 @@ def test_manifest_keys_are_in_the_order_hassfest_expects():
     keys = list(MANIFEST)
     assert keys[:2] == ["domain", "name"]
     assert keys[2:] == sorted(keys[2:])
+
+
+def test_the_release_workflow_builds_the_file_hacs_json_names():
+    """The asset name is written in both hacs.json and release.yml."""
+    assert HACS.get("zip_release") is True
+    assert f'"$RUNNER_TEMP/{HACS["filename"]}"' in RELEASE_WORKFLOW
