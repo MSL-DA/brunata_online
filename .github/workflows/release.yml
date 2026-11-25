@@ -1,42 +1,27 @@
 ---
 name: Release
 
-# HACS serves whatever manifest.json says, not what the tag says. A tag pushed
-# with a stale version number produces a release users can install but that
-# Home Assistant then reports as the previous version — and HACS will not offer
-# the next update, because as far as it can tell they already have it.
-#
-# Nothing else in CI checks this: pytest.yml and hassfest.yml run on the branch,
-# where the tag does not exist yet. So it is checked here, at the one moment
-# both numbers are known.
-#
-# This job cannot block the release. HACS installs from the GitHub release, and
-# a workflow triggered by the tag always arrives after that release exists. An
-# attempt to make it blocking, by having the job create the release itself with
-# `gh release create`, failed on two releases in a row: this repo publishes from
-# the Releases page, and "Publish release" creates the tag and the release in
-# one operation, so the CLI always met a release that already existed and
-# returned HTTP 422. The file is back to reporting only.
-#
-# The second job attaches brunata.zip to the release. hacs.json sets
-# zip_release, so the Marketplace (and HACS before 2026.11) installs from that
-# asset instead of the source tree — and GitHub counts asset downloads, which is
-# the number the Marketplace shows. A release without the asset cannot be
-# installed at all, so the job runs only once the version check has passed.
-# Like the check above, it arrives after the release exists: for the seconds in
-# between, the release is visible without its asset.
-#
-# There is deliberately no `concurrency` block. Every other workflow here has
-# one because a branch can collect several pushes; a tag ref is created once and
-# never has a competing run to cancel.
+# Checks that the tag matches manifest.json and attaches brunata.zip, which
+# the Marketplace installs from (zip_release in hacs.json). Runs after the
+# release exists, so it can report but not block. To attach the file again:
+# Actions → Release → Run workflow, with the tag.
 
 on:
-  push:
-    tags:
-      - "v*"
+  release:
+    types:
+      - published
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag of an existing release, with the v (e.g. v1.6.3)"
+        required: true
+        type: string
 
 permissions:
   contents: read
+
+env:
+  TAG: ${{ github.event.release.tag_name || inputs.tag }}
 
 jobs:
   version:
@@ -44,11 +29,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TAG }}
 
-      # The step below reads manifest.json with Python. Without this it would
-      # run on whatever the runner image happens to have on PATH, which is not
-      # something this repo controls or gets told about when it changes. Every
-      # other workflow here pins the same version.
       - name: Set up Python
         uses: actions/setup-python@v7
         with:
@@ -56,14 +39,14 @@ jobs:
 
       - name: Compare the tag with manifest.json
         run: |
-          tag="${GITHUB_REF_NAME#v}"
+          version="${TAG#v}"
           manifest=$(python -c "import json; print(json.load(open('custom_components/brunata/manifest.json'))['version'])")
 
-          echo "Tag:      $GITHUB_REF_NAME (version $tag)"
+          echo "Tag:      $TAG (version $version)"
           echo "Manifest: $manifest"
 
-          if [ "$tag" != "$manifest" ]; then
-            echo "::error::Tag $GITHUB_REF_NAME does not match manifest.json ($manifest). Bump manifest.json, or delete and re-push the tag."
+          if [ "$version" != "$manifest" ]; then
+            echo "::error::Tag $TAG does not match manifest.json ($manifest)."
             exit 1
           fi
 
@@ -71,22 +54,47 @@ jobs:
     name: Attach brunata.zip
     needs: version
     runs-on: ubuntu-latest
-    # The only job in the repository that writes: it uploads one release asset.
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TAG }}
 
-      # The files go at the root of the archive, as zip_release expects — not
-      # under custom_components/brunata/.
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+
+      # Files at the root of the archive, not under custom_components/brunata/.
       - name: Build brunata.zip
         run: |
           cd custom_components/brunata
           zip -r -X "$RUNNER_TEMP/brunata.zip" . -x "*__pycache__*"
 
+      - name: Check the archive
+        run: |
+          python - "$RUNNER_TEMP/brunata.zip" <<'EOF'
+          import json
+          import os
+          import sys
+          import zipfile
+
+          archive = zipfile.ZipFile(sys.argv[1])
+          names = set(archive.namelist())
+          missing = [n for n in ("manifest.json", "__init__.py") if n not in names]
+          if missing:
+              sys.exit(f"::error::brunata.zip has no {', '.join(missing)} at its root")
+
+          version = json.loads(archive.read("manifest.json"))["version"]
+          expected = os.environ["TAG"].removeprefix("v")
+          if version != expected:
+              sys.exit(f"::error::manifest.json in brunata.zip says {version}, the tag says {expected}")
+          EOF
+
       - name: Upload to the release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release upload "$GITHUB_REF_NAME" "$RUNNER_TEMP/brunata.zip" \
+          gh release upload "$TAG" "$RUNNER_TEMP/brunata.zip" \
             --repo "$GITHUB_REPOSITORY" --clobber
