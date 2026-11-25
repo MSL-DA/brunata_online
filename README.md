@@ -1,8 +1,3 @@
-[![Version](https://img.shields.io/github/v/release/MSL-DA/brunata_online?label=Version)](https://github.com/MSL-DA/brunata_online/releases)
-[![Tests](https://img.shields.io/github/actions/workflow/status/MSL-DA/brunata_online/pytest.yml?branch=main&label=Tests)](https://github.com/MSL-DA/brunata_online/actions/workflows/pytest.yml)
-[![Hassfest](https://img.shields.io/github/actions/workflow/status/MSL-DA/brunata_online/hassfest.yml?branch=main&label=Hassfest)](https://github.com/MSL-DA/brunata_online/actions/workflows/hassfest.yml)
-[![HACS](https://img.shields.io/github/actions/workflow/status/MSL-DA/brunata_online/hacs.yml?branch=main&label=HACS)](https://github.com/MSL-DA/brunata_online/actions/workflows/hacs.yml)
-
 ![Brunata logo](https://raw.githubusercontent.com/MSL-DA/brunata_online/refs/heads/main/images/logo_readme.png)
 
 # Brunata Online for Home Assistant
@@ -30,6 +25,12 @@ Built for [Brunata Online](https://online.brunata.com) accounts. If Brunata Onli
 
 ---
 
+## 📖 Documentation
+
+See the [Wiki](https://github.com/MSL-DA/brunata_online/wiki) for details on [Using the sensors](https://github.com/MSL-DA/brunata_online/wiki/Using-the-sensors) — including which meters work in the Energy dashboard and why consumption graphs show 0 right after setup.
+
+---
+
 ## 📦 Installation
 
 ### Marketplace — Home Assistant 2026.11 or newer
@@ -49,9 +50,3 @@ Built for [Brunata Online](https://online.brunata.com) accounts. If Brunata Onli
 5. Click **Add Integration**
 6. Search for **Brunata**
 7. Enter your Brunata email and password
-
----
-
-## 📖 Documentation
-
-See the [wiki](https://github.com/MSL-DA/brunata_online/wiki) for details on [using the sensors](https://github.com/MSL-DA/brunata_online/wiki/Using-the-sensors) — including which meters work in the Energy dashboard and why consumption graphs show 0 right after setup.
