@@ -77,7 +77,7 @@ def _log_unsupported_meter(meter_id: str, code: str) -> None:
     TypeError out of _parse_meters(), costing every meter that update — the
     exact failure this filter exists to avoid.
     """
-    _LOGGER.info(
+    _LOGGER.warning(
         "Meter %s has meterType %s, which this integration does not support, "
         "so no entity is created for it. Supported types are %s. If this "
         "meter measures consumption you expected to see in Home Assistant, "
