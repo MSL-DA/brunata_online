@@ -760,13 +760,14 @@ def test_a_skipped_meter_type_is_logged_once_per_run(caplog):
     item = _meter_item("logged-once-type")
     item["meterType"] = 13
 
-    with caplog.at_level(logging.INFO, logger="custom_components.brunata.api.parse"):
+    with caplog.at_level(logging.WARNING, logger="custom_components.brunata.api.parse"):
         _parse([item])
         _parse([item])
         _parse([item])
 
     lines = [r for r in caplog.records if "logged-once-type" in r.getMessage()]
     assert len(lines) == 1
+    assert lines[0].levelno == logging.WARNING
 
 
 def test_a_skipped_unit_is_logged_once_per_run(caplog):
