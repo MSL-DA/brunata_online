@@ -25,6 +25,12 @@ Built for [Brunata Online](https://online.brunata.com) accounts. If Brunata Onli
 
 ---
 
+## 📖 Documentation
+
+See the [Wiki](https://github.com/MSL-DA/brunata_online/wiki) for details on [Using the sensors](https://github.com/MSL-DA/brunata_online/wiki/Using-the-sensors) — including which meters work in the Energy dashboard and why consumption graphs show 0 right after setup.
+
+---
+
 ## 📦 Installation
 
 ### Marketplace — Home Assistant 2026.11 or newer
@@ -44,9 +50,3 @@ Built for [Brunata Online](https://online.brunata.com) accounts. If Brunata Onli
 5. Click **Add Integration**
 6. Search for **Brunata**
 7. Enter your Brunata email and password
-
----
-
-## 📖 Documentation
-
-See the [wiki](https://github.com/MSL-DA/brunata_online/wiki) for details on [using the sensors](https://github.com/MSL-DA/brunata_online/wiki/Using-the-sensors) — including which meters work in the Energy dashboard and why consumption graphs show 0 right after setup.
