@@ -13,7 +13,13 @@ from homeassistant.components.sensor import (
     SensorEntity,
     SensorStateClass,
 )
-from homeassistant.const import EntityCategory, UnitOfEnergy, UnitOfVolume
+from homeassistant.const import (
+    STATE_UNAVAILABLE,
+    STATE_UNKNOWN,
+    EntityCategory,
+    UnitOfEnergy,
+    UnitOfVolume,
+)
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
@@ -522,8 +528,8 @@ class BrunataSensor(
         last_state = await self.async_get_last_state()
         if last_state is not None and last_state.state not in (
             None,
-            "unknown",
-            "unavailable",
+            STATE_UNKNOWN,
+            STATE_UNAVAILABLE,
         ):
             try:
                 restored = float(last_state.state)

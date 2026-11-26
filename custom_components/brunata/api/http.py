@@ -19,6 +19,7 @@ from .errors import BrunataApiError, BrunataAuthError, BrunataConnectionError
 
 _LOGGER = logging.getLogger(__name__)
 
+
 def _retry_after_seconds(response: httpx.Response) -> float | None:
     """Read the Retry-After header, in its delay-seconds form.
 
