@@ -16,12 +16,14 @@ import time
 import pytest
 
 from custom_components.brunata.api import (
+    BrunataApiError,
+    BrunataAuthError,
+)
+from custom_components.brunata.api.const import (
     AUTHORIZE_URL,
     CLIENT_ID,
     REDIRECT_URI,
     TOKEN_URL,
-    BrunataApiError,
-    BrunataAuthError,
 )
 from custom_components.brunata.api.auth import BrunataAuth
 
