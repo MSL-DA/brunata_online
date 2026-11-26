@@ -9,6 +9,8 @@ Built for [Brunata Online](https://online.brunata.com) accounts. If Brunata Onli
 > [!IMPORTANT]
 > This is a community integration and is **not** affiliated with or supported by Brunata.
 
+If the integration is useful to you, a ⭐ on [GitHub](https://github.com/MSL-DA/brunata_online) is appreciated.
+
 ---
 
 ## ✨ Features
@@ -33,9 +35,9 @@ See the [Wiki](https://github.com/MSL-DA/brunata_online/wiki) for details on [Us
 
 ## 📦 Installation
 
-### Marketplace — Home Assistant 2026.11 or newer
-
 **Requires Home Assistant 2025.3 or newer.**
+
+### Marketplace — Home Assistant 2026.11 or newer
 
 1. Open [Brunata in the Marketplace](https://my.home-assistant.io/redirect/marketplace_repository/?owner=MSL-DA&repository=brunata_online&category=integration), or go to **Settings** → **Marketplace** and search for **Brunata**
 2. Install the integration

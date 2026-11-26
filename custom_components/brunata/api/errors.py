@@ -8,6 +8,7 @@ the login flow can all raise them without importing one another.
 
 from __future__ import annotations
 
+
 class BrunataError(Exception):
     """Base class for every error this client raises."""
 

@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from typing import NamedTuple
 
+
 @dataclass(frozen=True, slots=True)
 class BrunataMeter:
     """A single meter and its most recent reading.
