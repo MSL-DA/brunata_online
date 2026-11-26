@@ -24,6 +24,7 @@ from .models import BrunataMeter, ParsedMeters, ParseReport
 
 _LOGGER = logging.getLogger(__name__)
 
+
 @lru_cache(maxsize=64)
 def _log_unresolved_unit(meter_id: str, code: str) -> None:
     """Note a meter skipped for an unusable unit, once per process.
@@ -327,6 +328,12 @@ def _parse_daily_consumption(
             if not isinstance(value, dict):
                 continue
             from_date = parse_timestamp(value.get("fromDate"))
+            if from_date is not None and from_date.tzinfo is None:
+                # Dropping the day instead could hide a negative day, and a
+                # negative day is what rejects a fall that is not a reset.
+                raise BrunataApiError(
+                    f"Brunata consumption day without a time zone: {value.get('fromDate')!r}"
+                )
             if from_date is None or not start <= from_date < end:
                 continue
             days.append(_parse_value(value.get("consumption")))
@@ -483,7 +490,7 @@ def _parse_meters(
             # Anything else is dropped, and sensor.py falls back to a precision
             # chosen from the unit.
             decimals=(
-                int(decimals)
+                decimals
                 if isinstance(decimals, int)
                 and not isinstance(decimals, bool)
                 and decimals >= 0
