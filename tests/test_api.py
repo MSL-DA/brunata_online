@@ -17,14 +17,16 @@ import httpx
 import pytest
 
 from custom_components.brunata.api import (
-    API_URL,
-    DEFAULT_HEADERS,
-    REFERER_URL,
-    SUPPORTED_METER_TYPES,
     BrunataApiClient,
     BrunataApiError,
     BrunataAuthError,
     BrunataConnectionError,
+)
+from custom_components.brunata.api.const import (
+    API_URL,
+    DEFAULT_HEADERS,
+    REFERER_URL,
+    SUPPORTED_METER_TYPES,
 )
 from custom_components.brunata.api.http import _payload
 from custom_components.brunata.api.parse import _parse_daily_consumption, _parse_meters
@@ -1160,6 +1162,22 @@ def test_daily_consumption_for_a_meter_not_in_the_answer_is_none():
         )
         is None
     )
+
+
+def test_a_consumption_day_without_a_time_zone_is_an_api_error():
+    """Not skipped: a skipped day could be the negative one that rejects a fall."""
+    payload = _consumption_payload()
+    payload["consumptionLines"][1]["consumptionValues"][1]["fromDate"] = (
+        "2026-01-01T00:00:00"
+    )
+
+    with pytest.raises(BrunataApiError):
+        _parse_daily_consumption(
+            payload,
+            "4711",
+            datetime(2025, 12, 31, tzinfo=_CET),
+            datetime(2026, 1, 2, tzinfo=_CET),
+        )
 
 
 @pytest.mark.parametrize("payload", [[], {"consumptionLines": None}, "x"])
