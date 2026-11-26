@@ -21,10 +21,10 @@ from homeassistant.util import dt as dt_util
 
 from custom_components.brunata.api import (
     BASE_URL,
-    SUPPORTED_METER_TYPES,
     BrunataConnectionError,
     ParseReport,
 )
+from custom_components.brunata.api.const import SUPPORTED_METER_TYPES
 from custom_components.brunata.const import DOMAIN
 from custom_components.brunata.sensor import (
     ANNUAL_RESET_METER_TYPES,
