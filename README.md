@@ -9,6 +9,8 @@ Built for [Brunata Online](https://online.brunata.com) accounts. If Brunata Onli
 > [!IMPORTANT]
 > This is a community integration and is **not** affiliated with or supported by Brunata.
 
+If the integration is useful to you, a ⭐ on [GitHub](https://github.com/MSL-DA/brunata_online) is appreciated.
+
 ---
 
 ## ✨ Features
