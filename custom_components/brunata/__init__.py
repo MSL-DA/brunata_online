@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_EMAIL, CONF_PASSWORD, Platform
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.event import async_track_time_change
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
@@ -82,6 +82,19 @@ _RATE_LIMIT_DEFAULT_BACKOFF = timedelta(minutes=55)
 # call site in _async_update_data() for why that distinction is load-bearing.
 _RATE_LIMIT_MAX_BACKOFF = timedelta(hours=24)
 
+# Connection failures in a row before the outage is logged as a warning, and
+# how often the warning is repeated while it lasts.
+_FAILURES_BEFORE_WARNING = 3
+_FAILURE_WARNING_INTERVAL = timedelta(hours=24)
+
+# The 429 deadline per config entry. Kept in hass.data rather than on the
+# coordinator, because a failed setup builds a new coordinator on every retry.
+_RATE_LIMITS_KEY = f"{DOMAIN}_rate_limited_until"
+
+
+def _rate_limits(hass: HomeAssistant) -> dict[str, datetime]:
+    return hass.data.setdefault(_RATE_LIMITS_KEY, {})
+
 
 def _entry_jitter_seconds(entry_id: str) -> int:
     """Derive a stable second offset, inside the spread, from the entry_id.
@@ -115,6 +128,10 @@ def _jittered_poll_time(entry_id: str) -> tuple[int, int]:
 
 async def async_setup_entry(hass: HomeAssistant, entry: BrunataConfigEntry) -> bool:
     """Set up Brunata from a config entry."""
+    until = _rate_limits(hass).get(entry.entry_id)
+    if until is not None and dt_util.utcnow() < until:
+        raise ConfigEntryNotReady(f"Brunata rate-limited this integration until {until}")
+
     client = await BrunataApiClient.async_create(
         hass, entry.data[CONF_EMAIL], entry.data[CONF_PASSWORD]
     )
@@ -309,8 +326,9 @@ class BrunataDataUpdateCoordinator(DataUpdateCoordinator[dict[str, BrunataMeter]
         # before the first poll: nothing has been reported, so nothing can be
         # concluded.
         self.last_parse = ParseReport(frozenset(), 0)
-        # Set when Brunata answers 429. See async_should_poll().
-        self._rate_limited_until: datetime | None = None
+        self._consecutive_failures = 0
+        self._last_success: datetime | None = None
+        self._last_failure_warning: datetime | None = None
         super().__init__(
             hass,
             _LOGGER,
@@ -321,6 +339,37 @@ class BrunataDataUpdateCoordinator(DataUpdateCoordinator[dict[str, BrunataMeter]
             name=DOMAIN,
             # No update_interval: polling is driven by the wall-clock listener
             # registered in async_setup_entry.
+        )
+
+    @property
+    def _rate_limited_until(self) -> datetime | None:
+        """Set when Brunata answers 429. See async_should_poll()."""
+        return _rate_limits(self.hass).get(self.config_entry.entry_id)
+
+    @_rate_limited_until.setter
+    def _rate_limited_until(self, value: datetime | None) -> None:
+        if value is None:
+            _rate_limits(self.hass).pop(self.config_entry.entry_id, None)
+        else:
+            _rate_limits(self.hass)[self.config_entry.entry_id] = value
+
+    def _log_connection_failure(self) -> None:
+        """INFO for a single failure, WARNING once failures keep coming."""
+        self._consecutive_failures += 1
+        now = dt_util.utcnow()
+        if self._consecutive_failures < _FAILURES_BEFORE_WARNING or (
+            self._last_failure_warning is not None
+            and now - self._last_failure_warning < _FAILURE_WARNING_INTERVAL
+        ):
+            _LOGGER.info("Cannot reach Brunata — keeping last known values")
+            return
+        self._last_failure_warning = now
+        _LOGGER.warning(
+            "Cannot reach Brunata: %d polls in a row have failed, last successful "
+            "update %s. The sensors keep their last known values until Brunata "
+            "answers again",
+            self._consecutive_failures,
+            self._last_success,
         )
 
     @callback
@@ -348,10 +397,9 @@ class BrunataDataUpdateCoordinator(DataUpdateCoordinator[dict[str, BrunataMeter]
                     self._rate_limited_until,
                 )
                 return False
-            # Cleared here, and only here. This is the one place the deadline
-            # is read, so it expires where it is used rather than being reset
-            # by a successful update somewhere else — a second place would have
-            # to be kept in step with this one for no gain.
+            # Cleared here, and only here, so it expires where it is used
+            # rather than being reset by a successful update somewhere else.
+            # async_setup_entry() also reads it, but never clears it.
             self._rate_limited_until = None
 
         return True
@@ -368,7 +416,7 @@ class BrunataDataUpdateCoordinator(DataUpdateCoordinator[dict[str, BrunataMeter]
             # sensors and leave a gap in their statistics. On the very first
             # refresh there is nothing to keep, so the failure is surfaced.
             if self.data is not None:
-                _LOGGER.info("Cannot reach Brunata — keeping last known values")
+                self._log_connection_failure()
                 return self.data
             raise UpdateFailed(str(err)) from err
         except BrunataApiError as err:
@@ -405,4 +453,11 @@ class BrunataDataUpdateCoordinator(DataUpdateCoordinator[dict[str, BrunataMeter]
         # in place, the same way it leaves the previous data in place: the two
         # are read together and must describe the same poll.
         self.last_parse = self.client.last_parse_report()
+        if self._last_failure_warning is not None:
+            _LOGGER.info(
+                "Brunata answers again after %d failed polls", self._consecutive_failures
+            )
+        self._consecutive_failures = 0
+        self._last_failure_warning = None
+        self._last_success = dt_util.utcnow()
         return meters

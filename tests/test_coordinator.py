@@ -6,9 +6,12 @@ whether the user gets a re-authentication prompt, a quiet retry, or sensors
 frozen at their last value, so each branch is checked here.
 """
 
+import logging
+from datetime import timedelta
 from unittest.mock import AsyncMock
 
 import pytest
+from freezegun.api import FrozenDateTimeFactory
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.update_coordinator import UpdateFailed
@@ -92,3 +95,60 @@ async def test_api_error_fails_the_update(coordinator, mock_brunata_client, mock
 
     with pytest.raises(UpdateFailed, match="rate limit"):
         await coordinator._async_update_data()
+
+
+def _warnings(caplog) -> list[str]:
+    return [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+
+
+async def test_a_lasting_connection_failure_is_logged_as_a_warning(
+    coordinator, mock_brunata_client, mock_meter, caplog
+):
+    """One failed poll is common and stays at INFO; the third in a row is not."""
+    caplog.set_level(logging.INFO, logger="custom_components.brunata")
+    mock_brunata_client.async_get_meters = AsyncMock(
+        return_value={"12345": mock_meter}
+    )
+    coordinator.data = await coordinator._async_update_data()
+
+    mock_brunata_client.async_get_meters = AsyncMock(
+        side_effect=BrunataConnectionError("down")
+    )
+    await coordinator._async_update_data()
+    await coordinator._async_update_data()
+    assert _warnings(caplog) == []
+
+    await coordinator._async_update_data()
+    assert len(_warnings(caplog)) == 1
+    assert "3 polls in a row" in _warnings(caplog)[0]
+
+
+async def test_the_warning_is_repeated_once_a_day_and_reset_by_success(
+    coordinator,
+    mock_brunata_client,
+    mock_meter,
+    caplog,
+    freezer: FrozenDateTimeFactory,
+):
+    caplog.set_level(logging.INFO, logger="custom_components.brunata")
+    ok = AsyncMock(return_value={"12345": mock_meter})
+    down = AsyncMock(side_effect=BrunataConnectionError("down"))
+    mock_brunata_client.async_get_meters = ok
+    coordinator.data = await coordinator._async_update_data()
+
+    mock_brunata_client.async_get_meters = down
+    for _ in range(10):
+        freezer.tick(timedelta(hours=1))
+        await coordinator._async_update_data()
+    assert len(_warnings(caplog)) == 1
+
+    freezer.tick(timedelta(hours=24))
+    await coordinator._async_update_data()
+    assert len(_warnings(caplog)) == 2
+
+    mock_brunata_client.async_get_meters = ok
+    await coordinator._async_update_data()
+    mock_brunata_client.async_get_meters = down
+    await coordinator._async_update_data()
+    await coordinator._async_update_data()
+    assert len(_warnings(caplog)) == 2
