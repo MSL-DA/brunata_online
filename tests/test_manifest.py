@@ -84,7 +84,7 @@ import pytest
 from awesomeversion import AwesomeVersion
 from homeassistant.const import __version__ as HA_VERSION
 
-from custom_components.brunata.api import ISSUE_TRACKER_URL
+from custom_components.brunata.api.const import ISSUE_TRACKER_URL
 
 REPO_ROOT = Path(__file__).parent.parent
 MANIFEST = json.loads(
