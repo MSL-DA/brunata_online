@@ -575,6 +575,34 @@ async def test_a_rate_limit_longer_than_a_day_is_capped(
     assert coordinator.async_should_poll(now + timedelta(hours=25)) is True
 
 
+async def test_a_rate_limit_at_setup_survives_the_setup_retry(
+    hass: HomeAssistant, mock_brunata_client, freezer: FrozenDateTimeFactory
+):
+    """Every setup retry builds a new coordinator, so the deadline must not live
+    on the coordinator alone."""
+    freezer.move_to("2026-08-27 10:00:00+00:00")
+    entry = _entry(hass)
+    mock_brunata_client.async_get_meters = AsyncMock(
+        side_effect=BrunataApiError("Brunata rate limit reached (429)", 429, 7200)
+    )
+    assert not await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    assert entry.state is ConfigEntryState.SETUP_RETRY
+    assert mock_brunata_client.async_get_meters.await_count == 1
+
+    freezer.tick(timedelta(hours=1))
+    await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
+    assert entry.state is ConfigEntryState.SETUP_RETRY
+    assert mock_brunata_client.async_get_meters.await_count == 1
+
+    freezer.tick(timedelta(hours=1, minutes=1))
+    mock_brunata_client.async_get_meters = AsyncMock(return_value={})
+    await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
+    assert entry.state is ConfigEntryState.LOADED
+
+
 async def test_other_errors_do_not_hold_the_schedule(
     hass: HomeAssistant, mock_brunata_client, mock_meter, device_for_meter
 ):
